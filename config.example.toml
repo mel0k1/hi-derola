@@ -1,0 +1,18 @@
+# hi-derola config
+# path: ~/.config/hi-derola/config.toml
+
+[provider]
+# openai (any openai-compatible endpoint) | anthropic
+type = "openai"
+
+# any model of the provider
+model = "anthropic/claude-sonnet-4.5"
+
+# optional: override endpoint, e.g. openrouter
+base_url = "https://openrouter.ai/api/v1"
+
+# api key, or env HI_DEROLA_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY
+api_key = ""
+
+# optional response limit
+max_tokens = 4096
