@@ -13,6 +13,7 @@ use crate::agent;
 use crate::chat::{Role, Session};
 use crate::config::Config;
 use crate::files;
+use crate::mcp::{self, McpClient};
 use crate::provider::{ApiEvent, ChatRequest, Provider};
 use crate::ui;
 
@@ -62,10 +63,11 @@ pub struct App {
     history: Vec<String>,
     hist_idx: usize,
     draft: String,
+    mcp: Option<Arc<McpClient>>,
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
-const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /clear         start new session\n  /quit          exit\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  model can read/write files and run bash, write+bash ask y/n/a";
+const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /clear         start new session\n  /quit          exit\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/list/bash + mcp servers, mutations ask y/n/a";
 
 fn fmt_tokens(n: u64) -> String {
     if n < 1000 {
@@ -111,8 +113,18 @@ impl App {
             history: Vec::new(),
             hist_idx: 0,
             draft: String::new(),
+            mcp: None,
             tx,
         }
+    }
+
+    pub async fn connect_mcp(&mut self) {
+        let cfgs = self.cfg.mcp.clone();
+        let (client, logs) = mcp::connect_all(&cfgs).await;
+        for l in logs {
+            self.info(l);
+        }
+        self.mcp = client;
     }
 
     fn info(&mut self, text: impl Into<String>) {
@@ -389,6 +401,7 @@ impl App {
         let provider = self.provider.clone();
         let tx = self.tx.clone();
         let allow_all = self.allow_all.clone();
+        let mcp = self.mcp.clone();
         let req = ChatRequest {
             system: self.session.system.clone(),
             messages: self.session.messages.clone(),
@@ -400,7 +413,7 @@ impl App {
             tools: Vec::new(),
         };
         let handle = tokio::spawn(async move {
-            if let Err(e) = agent::run(provider, req, tx.clone(), allow_all).await {
+            if let Err(e) = agent::run(provider, req, tx.clone(), allow_all, mcp).await {
                 let _ = tx.send(ApiEvent::Failed(format!("{e:#}")));
             }
         });
@@ -465,6 +478,7 @@ pub async fn run(
     crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut app = App::new(cfg, provider, tx);
+    app.connect_mcp().await;
     let mut inflight: Option<tokio::task::JoinHandle<()>> = None;
     let res = loop {
         terminal.draw(|f| ui::draw(f, &app))?;

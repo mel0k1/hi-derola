@@ -23,3 +23,9 @@ stream = true
 # optional sampling params
 # temperature = 0.7
 # top_p = 0.9
+
+# mcp servers (stdio), tools exposed as mcp__<name>__<tool>, calls ask y/n/a
+# [[mcp]]
+# name = "fs"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]

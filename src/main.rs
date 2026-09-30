@@ -5,6 +5,7 @@ mod config;
 mod diff;
 mod files;
 mod md;
+mod mcp;
 mod provider;
 mod tools;
 mod ui;

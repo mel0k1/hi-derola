@@ -10,8 +10,8 @@ use tokio::sync::mpsc::UnboundedSender;
 use crate::chat::{Message, ToolCall};
 
 pub struct ToolSpec {
-    pub name: &'static str,
-    pub description: &'static str,
+    pub name: String,
+    pub description: String,
     pub parameters: serde_json::Value,
 }
 

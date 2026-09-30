@@ -2,6 +2,7 @@ use anyhow::{bail, Result};
 use serde_json::{json, Value};
 
 use crate::files::{self, WriteBlock};
+use crate::mcp::McpClient;
 use crate::provider::ToolSpec;
 
 const MAX_LIST: usize = 500;
@@ -11,8 +12,8 @@ const BASH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 pub fn specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
-            name: "read_file",
-            description: "Read a UTF-8 text file. Returns the file content, up to 128KB.",
+            name: "read_file".into(),
+            description: "Read a UTF-8 text file. Returns the file content, up to 128KB.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -22,8 +23,8 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
-            name: "write_file",
-            description: "Create or overwrite a file with the complete content. Parent directories are created automatically.",
+            name: "write_file".into(),
+            description: "Create or overwrite a file with the complete content. Parent directories are created automatically.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -34,8 +35,8 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
-            name: "edit",
-            description: "Perform exact string replacement in an existing file. old_str must match the file content exactly and be unique unless replace_all is true. Read the file first.",
+            name: "edit".into(),
+            description: "Perform exact string replacement in an existing file. old_str must match the file content exactly and be unique unless replace_all is true. Read the file first.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -48,8 +49,8 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
-            name: "list_files",
-            description: "List files and directories recursively, up to 3 levels deep.",
+            name: "list_files".into(),
+            description: "List files and directories recursively, up to 3 levels deep.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -58,8 +59,8 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
-            name: "bash",
-            description: "Run a shell command and return stdout/stderr combined, with the exit code on failure.",
+            name: "bash".into(),
+            description: "Run a shell command and return stdout/stderr combined, with the exit code on failure.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -72,7 +73,7 @@ pub fn specs() -> Vec<ToolSpec> {
 }
 
 pub fn needs_confirm(name: &str) -> bool {
-    matches!(name, "write_file" | "edit" | "bash")
+    matches!(name, "write_file" | "edit" | "bash") || name.starts_with("mcp__")
 }
 
 pub fn detail(name: &str, args: &str) -> String {
@@ -81,7 +82,15 @@ pub fn detail(name: &str, args: &str) -> String {
         "read_file" | "write_file" | "edit" => v["path"].as_str().unwrap_or("").to_string(),
         "list_files" => v["path"].as_str().unwrap_or(".").to_string(),
         "bash" => v["command"].as_str().unwrap_or("").to_string(),
-        _ => String::new(),
+        _ => {
+            let d = args.lines().next().unwrap_or("").to_string();
+            if d.chars().count() > 60 {
+                let t: String = d.chars().take(57).collect();
+                format!("{t}...")
+            } else {
+                d
+            }
+        }
     };
     let d = d.lines().next().unwrap_or("").to_string();
     if d.chars().count() > 80 {
@@ -119,7 +128,13 @@ pub fn preview(name: &str, args: &str) -> Vec<crate::diff::Row> {
     }
 }
 
-pub async fn execute(name: &str, args: &str) -> Result<String> {
+pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<String> {
+    if let Some(rest) = name.strip_prefix("mcp__") {
+        let Some(c) = mcp else {
+            bail!("mcp is not configured");
+        };
+        return c.call(rest, args).await;
+    }
     let v: Value = serde_json::from_str(args).unwrap_or(Value::Null);
     match name {
         "read_file" => {

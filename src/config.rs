@@ -1,5 +1,6 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 const EXAMPLE: &str = include_str!("../config.example.toml");
@@ -7,6 +8,8 @@ const EXAMPLE: &str = include_str!("../config.example.toml");
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub provider: ProviderConfig,
+    #[serde(default)]
+    pub mcp: Vec<McpConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +33,16 @@ pub struct ProviderConfig {
 
 fn default_true() -> bool {
     true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpConfig {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
 }
 
 pub fn config_path() -> PathBuf {

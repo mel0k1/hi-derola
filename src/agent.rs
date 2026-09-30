@@ -6,6 +6,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 use crate::chat::{Message, Role};
+use crate::mcp::McpClient;
 use crate::provider::{ApiEvent, ChatRequest, Provider};
 use crate::tools;
 
@@ -16,8 +17,13 @@ pub async fn run(
     mut req: ChatRequest,
     tx: UnboundedSender<ApiEvent>,
     allow_all: Arc<AtomicBool>,
+    mcp: Option<Arc<McpClient>>,
 ) -> Result<()> {
-    req.tools = tools::specs();
+    let mut specs = tools::specs();
+    if let Some(m) = &mcp {
+        specs.extend(m.specs().await);
+    }
+    req.tools = specs;
     let mut msgs = req.messages.clone();
     let mut round = 0;
     loop {
@@ -63,7 +69,7 @@ pub async fn run(
                     continue;
                 }
             }
-            let out = match tools::execute(&call.name, &call.args).await {
+            let out = match tools::execute(&call.name, &call.args, mcp.as_deref()).await {
                 Ok(o) => o,
                 Err(e) => format!("error: {e:#}"),
             };
