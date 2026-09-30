@@ -1,10 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
+use tokio::sync::mpsc::UnboundedSender;
 
-use super::{send_json, Provider};
-use crate::chat::Message;
+use super::{sse_lines, send, ApiEvent, ChatRequest, Provider};
 
 pub struct Anthropic {
     http: reqwest::Client,
@@ -22,42 +21,26 @@ impl Anthropic {
     }
 }
 
-#[derive(Deserialize)]
-struct Response {
-    content: Vec<Block>,
-}
-
-#[derive(Deserialize)]
-struct Block {
-    #[serde(default)]
-    text: Option<String>,
-}
-
 #[async_trait]
 impl Provider for Anthropic {
     fn name(&self) -> &'static str {
         "anthropic"
     }
 
-    async fn complete(
-        &self,
-        system: &str,
-        messages: &[Message],
-        model: &str,
-        max_tokens: Option<u32>,
-    ) -> Result<String> {
+    async fn chat(&self, req: ChatRequest, tx: UnboundedSender<ApiEvent>) -> Result<()> {
         let mut msgs = Vec::new();
-        for m in messages {
+        for m in &req.messages {
             msgs.push(json!({"role": m.role.as_str(), "content": m.content}));
         }
         let body = json!({
-            "model": model,
-            "max_tokens": max_tokens.unwrap_or(4096),
-            "system": system,
+            "model": req.model,
+            "max_tokens": req.max_tokens.unwrap_or(4096),
+            "system": req.system,
             "messages": msgs,
+            "stream": req.stream,
         });
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
-        let text = send_json(
+        let resp = send(
             &self.http,
             url,
             vec![
@@ -67,14 +50,47 @@ impl Provider for Anthropic {
             body,
         )
         .await?;
-        let data: Response = serde_json::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
-        let out: String = data
-            .content
-            .into_iter()
-            .filter_map(|b| b.text)
-            .collect::<Vec<_>>()
-            .join("");
-        Ok(out)
+
+        let mut full = String::new();
+        if req.stream {
+            sse_lines(resp, |line| {
+                let Some(data) = line.strip_prefix("data:") else {
+                    return Ok(());
+                };
+                let data = data.trim();
+                let Ok(v) = serde_json::from_str::<Value>(data) else {
+                    return Ok(());
+                };
+                match v["type"].as_str() {
+                    Some("content_block_delta") => {
+                        if v["delta"]["type"].as_str() == Some("text_delta") {
+                            if let Some(c) = v["delta"]["text"].as_str() {
+                                if !c.is_empty() {
+                                    full.push_str(c);
+                                    tx.send(ApiEvent::Chunk(c.to_string()))
+                                        .map_err(|_| anyhow::anyhow!("closed"))?;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                Ok(())
+            })
+            .await?;
+        } else {
+            let text = resp.text().await?;
+            let v: Value = serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+            for block in v["content"].as_array().into_iter().flatten() {
+                if let Some(t) = block["text"].as_str() {
+                    full.push_str(t);
+                }
+            }
+            if !full.is_empty() {
+                let _ = tx.send(ApiEvent::Chunk(full.clone()));
+            }
+        }
+        let _ = tx.send(ApiEvent::Done(full));
+        Ok(())
     }
 }

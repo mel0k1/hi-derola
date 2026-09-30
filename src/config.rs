@@ -20,6 +20,12 @@ pub struct ProviderConfig {
     pub api_key: Option<String>,
     #[serde(default)]
     pub max_tokens: Option<u32>,
+    #[serde(default = "default_true")]
+    pub stream: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 pub fn config_path() -> PathBuf {

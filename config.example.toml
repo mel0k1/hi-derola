@@ -16,3 +16,6 @@ api_key = ""
 
 # optional response limit
 max_tokens = 4096
+
+# stream response tokens as they arrive
+stream = true

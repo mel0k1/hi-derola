@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use crate::chat::{Role, Session};
 use crate::config::Config;
 use crate::files::{self, WriteBlock};
-use crate::provider::Provider;
+use crate::provider::{ApiEvent, ChatRequest, Provider};
 use crate::ui;
 
 pub enum Kind {
@@ -30,11 +30,6 @@ pub enum Phase {
     Confirm,
 }
 
-pub enum ApiEvent {
-    Done(String),
-    Failed(String),
-}
-
 pub struct App {
     pub cfg: Config,
     pub model: String,
@@ -47,6 +42,8 @@ pub struct App {
     pub pending: Vec<WriteBlock>,
     pub pending_idx: usize,
     pub attachments: Vec<(String, String)>,
+    pub streaming: Option<usize>,
+    pub reasoning: Option<usize>,
     pub should_quit: bool,
     pub status: String,
     tx: mpsc::UnboundedSender<ApiEvent>,
@@ -84,6 +81,8 @@ impl App {
             pending: Vec::new(),
             pending_idx: 0,
             attachments: Vec::new(),
+            streaming: None,
+            reasoning: None,
             should_quit: false,
             status,
             tx,
@@ -100,13 +99,48 @@ impl App {
 
     pub fn on_api(&mut self, ev: ApiEvent) {
         match ev {
-            ApiEvent::Done(text) => {
-                self.entries.push(Entry {
-                    kind: Kind::Bot,
-                    text: text.clone(),
-                });
-                self.session.push(Role::Assistant, text.clone());
-                let blocks = files::parse_write_blocks(&text);
+            ApiEvent::Chunk(s) => {
+                match self.streaming {
+                    Some(i) => self.entries[i].text.push_str(&s),
+                    None => {
+                        self.entries.push(Entry {
+                            kind: Kind::Bot,
+                            text: s,
+                        });
+                        self.streaming = Some(self.entries.len() - 1);
+                    }
+                }
+                self.scroll_up = 0;
+            }
+            ApiEvent::Reasoning(s) => {
+                match self.reasoning {
+                    Some(i) => self.entries[i].text.push_str(&s),
+                    None => {
+                        self.entries.push(Entry {
+                            kind: Kind::Info,
+                            text: format!("reasoning: {s}"),
+                        });
+                        self.reasoning = Some(self.entries.len() - 1);
+                    }
+                }
+                self.scroll_up = 0;
+            }
+            ApiEvent::Note(s) => self.info(s),
+            ApiEvent::Usage { .. } => {}
+            ApiEvent::Done(full) => {
+                match self.streaming {
+                    Some(i) => self.entries[i].text = full.clone(),
+                    None => {
+                        if !full.is_empty() {
+                            self.entries.push(Entry {
+                                kind: Kind::Bot,
+                                text: full.clone(),
+                            });
+                        }
+                    }
+                }
+                self.session.push(Role::Assistant, full.clone());
+                let blocks = files::parse_write_blocks(&full);
                 if blocks.is_empty() {
                     self.phase = Phase::Idle;
                 } else {
@@ -114,13 +148,24 @@ impl App {
                     self.pending_idx = 0;
                     self.phase = Phase::Confirm;
                 }
+                self.streaming = None;
+                self.reasoning = None;
             }
             ApiEvent::Failed(e) => {
                 self.info(format!("error: {e}"));
                 self.phase = Phase::Idle;
+                self.streaming = None;
+                self.reasoning = None;
             }
         }
-        self.scroll_up = 0;
+        self.status = self.status_line();
+    }
+
+    pub fn cancelled(&mut self) {
+        self.phase = Phase::Idle;
+        self.streaming = None;
+        self.reasoning = None;
+        self.info("cancelled");
         self.status = self.status_line();
     }
 
@@ -188,14 +233,6 @@ impl App {
             }
             Phase::Waiting => {
                 match key.code {
-                    KeyCode::Esc => {
-                        if let Some(h) = inflight.take() {
-                            h.abort();
-                        }
-                        self.phase = Phase::Idle;
-                        self.info("cancelled");
-                        self.status = self.status_line();
-                    }
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         self.input.clear();
                     }
@@ -269,20 +306,18 @@ impl App {
         self.status = self.status_line();
 
         let provider = self.provider.clone();
-        let system = self.session.system.clone();
-        let messages = self.session.messages.clone();
-        let model = self.model.clone();
-        let max_tokens = self.cfg.provider.max_tokens;
         let tx = self.tx.clone();
+        let req = ChatRequest {
+            system: self.session.system.clone(),
+            messages: self.session.messages.clone(),
+            model: self.model.clone(),
+            max_tokens: self.cfg.provider.max_tokens,
+            stream: self.cfg.provider.stream,
+        };
         let handle = tokio::spawn(async move {
-            let res = provider
-                .complete(&system, &messages, &model, max_tokens)
-                .await;
-            let ev = match res {
-                Ok(t) => ApiEvent::Done(t),
-                Err(e) => ApiEvent::Failed(format!("{e:#}")),
-            };
-            let _ = tx.send(ev);
+            if let Err(e) = provider.chat(req, tx.clone()).await {
+                let _ = tx.send(ApiEvent::Failed(format!("{e:#}")));
+            }
         });
         *inflight = Some(handle);
     }
@@ -355,7 +390,20 @@ pub async fn run(
         }
         if crossterm::event::poll(std::time::Duration::from_millis(30))? {
             match crossterm::event::read()? {
-                Event::Key(k) => app.on_key(k, &mut inflight),
+                Event::Key(k) => {
+                    if k.kind == KeyEventKind::Press
+                        && k.code == KeyCode::Esc
+                        && matches!(app.phase, Phase::Waiting)
+                    {
+                        if let Some(h) = inflight.take() {
+                            h.abort();
+                        }
+                        while rx.try_recv().is_ok() {}
+                        app.cancelled();
+                    } else {
+                        app.on_key(k, &mut inflight);
+                    }
+                }
                 Event::Paste(s) => app.input.push_str(&s),
                 Event::Mouse(m) => match m.kind {
                     MouseEventKind::ScrollUp => app.scroll_up = app.scroll_up.saturating_add(3),

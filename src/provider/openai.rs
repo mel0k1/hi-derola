@@ -1,10 +1,9 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
+use tokio::sync::mpsc::UnboundedSender;
 
-use super::{send_json, Provider};
-use crate::chat::Message;
+use super::{sse_lines, send, ApiEvent, ChatRequest, Provider};
 
 pub struct OpenAi {
     http: reqwest::Client,
@@ -22,58 +21,62 @@ impl OpenAi {
     }
 }
 
-#[derive(Deserialize)]
-struct Response {
-    choices: Vec<Choice>,
-}
-
-#[derive(Deserialize)]
-struct Choice {
-    message: ChoiceMessage,
-}
-
-#[derive(Deserialize)]
-struct ChoiceMessage {
-    #[serde(default)]
-    content: Option<String>,
-}
-
 #[async_trait]
 impl Provider for OpenAi {
     fn name(&self) -> &'static str {
         "openai"
     }
 
-    async fn complete(
-        &self,
-        system: &str,
-        messages: &[Message],
-        model: &str,
-        max_tokens: Option<u32>,
-    ) -> Result<String> {
-        let mut msgs = vec![json!({"role": "system", "content": system})];
-        for m in messages {
+    async fn chat(&self, req: ChatRequest, tx: UnboundedSender<ApiEvent>) -> Result<()> {
+        let mut msgs = vec![json!({"role": "system", "content": req.system})];
+        for m in &req.messages {
             msgs.push(json!({"role": m.role.as_str(), "content": m.content}));
         }
-        let mut body = json!({"model": model, "messages": msgs});
-        if let Some(t) = max_tokens {
+        let mut body = json!({"model": req.model, "messages": msgs, "stream": req.stream});
+        if let Some(t) = req.max_tokens {
             body["max_tokens"] = json!(t);
         }
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let text = send_json(
+        let resp = send(
             &self.http,
             url,
             vec![("Authorization", format!("Bearer {}", self.api_key))],
             body,
         )
         .await?;
-        let data: Response = serde_json::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
-        Ok(data
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|c| c.message.content)
-            .unwrap_or_default())
+
+        let mut full = String::new();
+        if req.stream {
+            sse_lines(resp, |line| {
+                let Some(data) = line.strip_prefix("data:") else {
+                    return Ok(());
+                };
+                let data = data.trim();
+                if data == "[DONE]" {
+                    return Ok(());
+                }
+                let Ok(v) = serde_json::from_str::<Value>(data) else {
+                    return Ok(());
+                };
+                if let Some(c) = v["choices"][0]["delta"]["content"].as_str() {
+                    if !c.is_empty() {
+                        full.push_str(c);
+                        tx.send(ApiEvent::Chunk(c.to_string()))
+                            .map_err(|_| anyhow::anyhow!("closed"))?;
+                    }
+                }
+                Ok(())
+            })
+            .await?;
+        } else {
+            let text = resp.text().await?;
+            let v: Value = serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+            if let Some(c) = v["choices"][0]["message"]["content"].as_str() {
+                full = c.to_string();
+                let _ = tx.send(ApiEvent::Chunk(full.clone()));
+            }
+        }
+        let _ = tx.send(ApiEvent::Done(full));
+        Ok(())
     }
 }
