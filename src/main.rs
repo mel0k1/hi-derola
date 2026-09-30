@@ -1,5 +1,6 @@
 mod chat;
 mod config;
+mod files;
 mod provider;
 
 fn main() -> anyhow::Result<()> {
