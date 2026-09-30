@@ -22,6 +22,10 @@ pub struct ProviderConfig {
     pub max_tokens: Option<u32>,
     #[serde(default = "default_true")]
     pub stream: bool,
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(default)]
+    pub top_p: Option<f64>,
 }
 
 fn default_true() -> bool {

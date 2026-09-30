@@ -11,6 +11,11 @@ pub struct OpenAi {
     api_key: String,
 }
 
+fn is_reasoning(model: &str) -> bool {
+    let m = model.rsplit('/').next().unwrap_or(model);
+    m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") || m.starts_with("gpt-5")
+}
+
 impl OpenAi {
     pub fn new(base_url: Option<String>, api_key: String) -> Self {
         Self {
@@ -32,9 +37,22 @@ impl Provider for OpenAi {
         for m in &req.messages {
             msgs.push(json!({"role": m.role.as_str(), "content": m.content}));
         }
+        let reasoning_model = is_reasoning(&req.model);
         let mut body = json!({"model": req.model, "messages": msgs, "stream": req.stream});
         if let Some(t) = req.max_tokens {
-            body["max_tokens"] = json!(t);
+            if reasoning_model {
+                body["max_completion_tokens"] = json!(t);
+            } else {
+                body["max_tokens"] = json!(t);
+            }
+        }
+        if !reasoning_model {
+            if let Some(v) = req.temperature {
+                body["temperature"] = json!(v);
+            }
+            if let Some(v) = req.top_p {
+                body["top_p"] = json!(v);
+            }
         }
         if req.stream {
             body["stream_options"] = json!({"include_usage": true});

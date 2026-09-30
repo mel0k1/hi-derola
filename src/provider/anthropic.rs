@@ -39,6 +39,11 @@ impl Provider for Anthropic {
             "messages": msgs,
             "stream": req.stream,
         });
+        if let Some(v) = req.temperature {
+            body["temperature"] = json!(v);
+        } else if let Some(v) = req.top_p {
+            body["top_p"] = json!(v);
+        }
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
         let resp = send(
             &self.http,

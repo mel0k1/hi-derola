@@ -19,3 +19,7 @@ max_tokens = 4096
 
 # stream response tokens as they arrive
 stream = true
+
+# optional sampling params
+# temperature = 0.7
+# top_p = 0.9

@@ -338,6 +338,8 @@ impl App {
             messages: self.session.messages.clone(),
             model: self.model.clone(),
             max_tokens: self.cfg.provider.max_tokens,
+            temperature: self.cfg.provider.temperature,
+            top_p: self.cfg.provider.top_p,
             stream: self.cfg.provider.stream,
         };
         let handle = tokio::spawn(async move {

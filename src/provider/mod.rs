@@ -23,6 +23,8 @@ pub struct ChatRequest {
     pub messages: Vec<Message>,
     pub model: String,
     pub max_tokens: Option<u32>,
+    pub temperature: Option<f64>,
+    pub top_p: Option<f64>,
     pub stream: bool,
 }
 
