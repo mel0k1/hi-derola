@@ -5,6 +5,7 @@ use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
 
 use crate::app::{App, Kind, Phase};
+use crate::md;
 
 pub const ACCENT: Color = Color::Rgb(122, 162, 247);
 pub const DIM: Color = Color::Rgb(106, 115, 125);
@@ -44,7 +45,10 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
                     "bot",
                     Style::new().fg(DIM).add_modifier(Modifier::BOLD),
                 )));
-                push_body(&mut lines, &e.text);
+                for mut l in md::render(&e.text) {
+                    l.spans.insert(0, Span::raw("  "));
+                    lines.push(l);
+                }
             }
             Kind::Info => {
                 for l in e.text.lines() {

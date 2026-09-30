@@ -3,6 +3,7 @@ mod app;
 mod chat;
 mod config;
 mod files;
+mod md;
 mod provider;
 mod tools;
 mod ui;
