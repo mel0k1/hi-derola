@@ -64,14 +64,25 @@ impl Provider for Anthropic {
                 };
                 match v["type"].as_str() {
                     Some("content_block_delta") => {
-                        if v["delta"]["type"].as_str() == Some("text_delta") {
-                            if let Some(c) = v["delta"]["text"].as_str() {
-                                if !c.is_empty() {
-                                    full.push_str(c);
-                                    tx.send(ApiEvent::Chunk(c.to_string()))
-                                        .map_err(|_| anyhow::anyhow!("closed"))?;
+                        match v["delta"]["type"].as_str() {
+                            Some("text_delta") => {
+                                if let Some(c) = v["delta"]["text"].as_str() {
+                                    if !c.is_empty() {
+                                        full.push_str(c);
+                                        tx.send(ApiEvent::Chunk(c.to_string()))
+                                            .map_err(|_| anyhow::anyhow!("closed"))?;
+                                    }
                                 }
                             }
+                            Some("thinking_delta") => {
+                                if let Some(t) = v["delta"]["thinking"].as_str() {
+                                    if !t.is_empty() {
+                                        tx.send(ApiEvent::Reasoning(t.to_string()))
+                                            .map_err(|_| anyhow::anyhow!("closed"))?;
+                                    }
+                                }
+                            }
+                            _ => {}
                         }
                     }
                     Some("message_start") => {

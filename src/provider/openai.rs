@@ -69,6 +69,16 @@ impl Provider for OpenAi {
                             .map_err(|_| anyhow::anyhow!("closed"))?;
                     }
                 }
+                let d = &v["choices"][0]["delta"];
+                if let Some(r) = d["reasoning_content"]
+                    .as_str()
+                    .or_else(|| d["reasoning"].as_str())
+                {
+                    if !r.is_empty() {
+                        tx.send(ApiEvent::Reasoning(r.to_string()))
+                            .map_err(|_| anyhow::anyhow!("closed"))?;
+                    }
+                }
                 if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
                     tx.send(ApiEvent::Usage {
                         input: u["prompt_tokens"].as_u64().unwrap_or(0),
