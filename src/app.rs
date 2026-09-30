@@ -58,10 +58,13 @@ pub struct App {
     pub should_quit: bool,
     pub status: String,
     allow_all: Arc<AtomicBool>,
+    history: Vec<String>,
+    hist_idx: usize,
+    draft: String,
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
-const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /clear         start new session\n  /quit          exit\nkeys:\n  enter send  esc cancel/quit  pgup/pgdn scroll  ctrl+c quit\ntools:\n  model can read/write files and run bash, write+bash ask y/n/a";
+const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /clear         start new session\n  /quit          exit\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  model can read/write files and run bash, write+bash ask y/n/a";
 
 fn fmt_tokens(n: u64) -> String {
     if n < 1000 {
@@ -104,6 +107,9 @@ impl App {
             should_quit: false,
             status,
             allow_all: Arc::new(AtomicBool::new(false)),
+            history: Vec::new(),
+            hist_idx: 0,
+            draft: String::new(),
             tx,
         }
     }
@@ -306,6 +312,8 @@ impl App {
             }
             KeyCode::PageUp => self.scroll_up = self.scroll_up.saturating_add(10),
             KeyCode::PageDown => self.scroll_up = self.scroll_up.saturating_sub(10),
+            KeyCode::Up => self.hist_prev(),
+            KeyCode::Down => self.hist_next(),
             KeyCode::Char(c)
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
@@ -315,8 +323,36 @@ impl App {
         }
     }
 
+    fn hist_prev(&mut self) {
+        if self.hist_idx == 0 || self.history.is_empty() {
+            return;
+        }
+        if self.hist_idx == self.history.len() {
+            self.draft = self.input.clone();
+        }
+        self.hist_idx -= 1;
+        self.input = self.history[self.hist_idx].clone();
+    }
+
+    fn hist_next(&mut self) {
+        if self.hist_idx >= self.history.len() {
+            return;
+        }
+        self.hist_idx += 1;
+        self.input = if self.hist_idx == self.history.len() {
+            self.draft.clone()
+        } else {
+            self.history[self.hist_idx].clone()
+        };
+    }
+
     fn submit(&mut self, inflight: &mut Option<tokio::task::JoinHandle<()>>) {
         let text = self.input.trim().to_string();
+        if !text.is_empty() && self.history.last().map(|h| h != &text).unwrap_or(true) {
+            self.history.push(text.clone());
+        }
+        self.hist_idx = self.history.len();
+        self.draft.clear();
         if text.starts_with('/') {
             self.input.clear();
             self.command(&text);
