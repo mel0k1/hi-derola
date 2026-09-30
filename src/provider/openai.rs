@@ -36,6 +36,9 @@ impl Provider for OpenAi {
         if let Some(t) = req.max_tokens {
             body["max_tokens"] = json!(t);
         }
+        if req.stream {
+            body["stream_options"] = json!({"include_usage": true});
+        }
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let resp = send(
             &self.http,
@@ -65,6 +68,13 @@ impl Provider for OpenAi {
                             .map_err(|_| anyhow::anyhow!("closed"))?;
                     }
                 }
+                if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
+                    tx.send(ApiEvent::Usage {
+                        input: u["prompt_tokens"].as_u64().unwrap_or(0),
+                        output: u["completion_tokens"].as_u64().unwrap_or(0),
+                    })
+                    .map_err(|_| anyhow::anyhow!("closed"))?;
+                }
                 Ok(())
             })
             .await?;
@@ -74,6 +84,13 @@ impl Provider for OpenAi {
             if let Some(c) = v["choices"][0]["message"]["content"].as_str() {
                 full = c.to_string();
                 let _ = tx.send(ApiEvent::Chunk(full.clone()));
+            }
+            if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
+                tx.send(ApiEvent::Usage {
+                    input: u["prompt_tokens"].as_u64().unwrap_or(0),
+                    output: u["completion_tokens"].as_u64().unwrap_or(0),
+                })
+                .map_err(|_| anyhow::anyhow!("closed"))?;
             }
         }
         let _ = tx.send(ApiEvent::Done(full));

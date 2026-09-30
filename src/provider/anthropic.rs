@@ -73,6 +73,20 @@ impl Provider for Anthropic {
                             }
                         }
                     }
+                    Some("message_start") => {
+                        tx.send(ApiEvent::Usage {
+                            input: v["message"]["usage"]["input_tokens"].as_u64().unwrap_or(0),
+                            output: 0,
+                        })
+                        .map_err(|_| anyhow::anyhow!("closed"))?;
+                    }
+                    Some("message_delta") => {
+                        tx.send(ApiEvent::Usage {
+                            input: 0,
+                            output: v["usage"]["output_tokens"].as_u64().unwrap_or(0),
+                        })
+                        .map_err(|_| anyhow::anyhow!("closed"))?;
+                    }
                     _ => {}
                 }
                 Ok(())
@@ -89,6 +103,11 @@ impl Provider for Anthropic {
             if !full.is_empty() {
                 let _ = tx.send(ApiEvent::Chunk(full.clone()));
             }
+            tx.send(ApiEvent::Usage {
+                input: v["usage"]["input_tokens"].as_u64().unwrap_or(0),
+                output: v["usage"]["output_tokens"].as_u64().unwrap_or(0),
+            })
+            .map_err(|_| anyhow::anyhow!("closed"))?;
         }
         let _ = tx.send(ApiEvent::Done(full));
         Ok(())

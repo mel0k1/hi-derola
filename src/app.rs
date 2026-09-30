@@ -44,12 +44,22 @@ pub struct App {
     pub attachments: Vec<(String, String)>,
     pub streaming: Option<usize>,
     pub reasoning: Option<usize>,
+    pub tokens_in: u64,
+    pub tokens_out: u64,
     pub should_quit: bool,
     pub status: String,
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
 const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /clear         start new session\n  /quit          exit\nkeys:\n  enter send  esc cancel/quit  pgup/pgdn scroll  ctrl+c quit\nwrites:\n  model outputs ```path blocks, confirm each with y/n";
+
+fn fmt_tokens(n: u64) -> String {
+    if n < 1000 {
+        n.to_string()
+    } else {
+        format!("{:.1}k", n as f64 / 1000.0)
+    }
+}
 
 impl App {
     pub fn new(cfg: Config, provider: Arc<dyn Provider>, tx: mpsc::UnboundedSender<ApiEvent>) -> Self {
@@ -83,6 +93,8 @@ impl App {
             attachments: Vec::new(),
             streaming: None,
             reasoning: None,
+            tokens_in: 0,
+            tokens_out: 0,
             should_quit: false,
             status,
             tx,
@@ -126,7 +138,11 @@ impl App {
                 self.scroll_up = 0;
             }
             ApiEvent::Note(s) => self.info(s),
-            ApiEvent::Usage { .. } => {}
+            ApiEvent::Usage { input, output } => {
+                self.tokens_in += input;
+                self.tokens_out += output;
+                self.status = self.status_line();
+            }
             ApiEvent::Done(full) => {
                 match self.streaming {
                     Some(i) => self.entries[i].text = full.clone(),
@@ -176,7 +192,17 @@ impl App {
                 let b = &self.pending[self.pending_idx];
                 format!("apply {}?  y/n", b.path)
             }
-            Phase::Idle => format!("{} · {}", self.provider.name(), self.model),
+            Phase::Idle => {
+                let mut s = format!("{} · {}", self.provider.name(), self.model);
+                if self.tokens_in > 0 || self.tokens_out > 0 {
+                    s.push_str(&format!(
+                        " · {} in · {} out",
+                        fmt_tokens(self.tokens_in),
+                        fmt_tokens(self.tokens_out)
+                    ));
+                }
+                s
+            }
         }
     }
 
