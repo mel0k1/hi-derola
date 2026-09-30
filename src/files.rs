@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 
+#[derive(Clone)]
 pub struct WriteBlock {
     pub path: String,
     pub content: String,

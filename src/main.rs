@@ -1,14 +1,27 @@
+mod app;
 mod chat;
 mod config;
 mod files;
 mod provider;
+mod ui;
 
-fn main() -> anyhow::Result<()> {
+use anyhow::{Context, Result};
+
+fn main() -> Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(run())
+}
+
+async fn run() -> Result<()> {
     let cfg = config::Config::load()?;
     let key = cfg
         .api_key()
-        .ok_or_else(|| anyhow::anyhow!("no api key: set api_key in config or HI_DEROLA_API_KEY"))?;
+        .context("no api key: set api_key in config or HI_DEROLA_API_KEY")?;
     let provider = provider::build(&cfg.provider.kind, cfg.provider.base_url.clone(), key)?;
-    println!("hi-derola · {} · {}", provider.name(), cfg.provider.model);
-    Ok(())
+    let mut terminal = ratatui::init();
+    let res = app::run(&mut terminal, cfg, provider).await;
+    ratatui::restore();
+    res
 }

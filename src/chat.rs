@@ -1,6 +1,5 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
-    System,
     User,
     Assistant,
 }
@@ -8,7 +7,6 @@ pub enum Role {
 impl Role {
     pub fn as_str(self) -> &'static str {
         match self {
-            Role::System => "system",
             Role::User => "user",
             Role::Assistant => "assistant",
         }
