@@ -10,6 +10,9 @@ use crate::md;
 pub const ACCENT: Color = Color::Rgb(122, 162, 247);
 pub const DIM: Color = Color::Rgb(106, 115, 125);
 
+const ADD: Color = Color::Rgb(158, 206, 106);
+const DEL: Color = Color::Rgb(247, 118, 142);
+
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
     let rows = Layout::vertical([
@@ -32,7 +35,7 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
         )));
     }
     for e in &app.entries {
-        match e.kind {
+        match &e.kind {
             Kind::You => {
                 lines.push(Line::from(Span::styled(
                     "you",
@@ -56,6 +59,16 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
                         format!("· {l}"),
                         Style::new().fg(DIM),
                     )));
+                }
+            }
+            Kind::Diff(rows) => {
+                for r in rows {
+                    let line = match r.tag {
+                        1 => Span::styled(format!("  + {}", r.text), Style::new().fg(ADD)),
+                        2 => Span::styled(format!("  - {}", r.text), Style::new().fg(DEL)),
+                        _ => Span::styled(format!("    {}", r.text), Style::new().fg(DIM)),
+                    };
+                    lines.push(Line::from(line));
                 }
             }
         }

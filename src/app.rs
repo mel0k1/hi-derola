@@ -20,6 +20,7 @@ pub enum Kind {
     You,
     Bot,
     Info,
+    Diff(Vec<crate::diff::Row>),
 }
 
 pub struct Entry {
@@ -164,9 +165,16 @@ impl App {
                 self.scroll_up = 0;
             }
             ApiEvent::Note(s) => self.info(s),
-            ApiEvent::Tool { name, detail } => {
+            ApiEvent::Tool { name, detail, diff } => {
                 self.flush_stream();
                 self.info(format!("tool {name} {detail}"));
+                if !diff.is_empty() {
+                    self.entries.push(Entry {
+                        kind: Kind::Diff(diff),
+                        text: String::new(),
+                    });
+                    self.scroll_up = 0;
+                }
             }
             ApiEvent::Confirm { name, args, rx } => {
                 self.flush_stream();

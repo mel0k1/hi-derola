@@ -2,6 +2,7 @@ mod agent;
 mod app;
 mod chat;
 mod config;
+mod diff;
 mod files;
 mod md;
 mod provider;

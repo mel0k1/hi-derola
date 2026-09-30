@@ -34,6 +34,20 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "edit",
+            description: "Perform exact string replacement in an existing file. old_str must match the file content exactly and be unique unless replace_all is true. Read the file first.",
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path"},
+                    "old_str": {"type": "string", "description": "Exact text to replace"},
+                    "new_str": {"type": "string", "description": "Replacement text"},
+                    "replace_all": {"type": "boolean", "description": "Replace every occurrence, default false"}
+                },
+                "required": ["path", "old_str", "new_str"]
+            }),
+        },
+        ToolSpec {
             name: "list_files",
             description: "List files and directories recursively, up to 3 levels deep.",
             parameters: json!({
@@ -58,13 +72,13 @@ pub fn specs() -> Vec<ToolSpec> {
 }
 
 pub fn needs_confirm(name: &str) -> bool {
-    matches!(name, "write_file" | "bash")
+    matches!(name, "write_file" | "edit" | "bash")
 }
 
 pub fn detail(name: &str, args: &str) -> String {
     let v: Value = serde_json::from_str(args).unwrap_or(Value::Null);
     let d = match name {
-        "read_file" | "write_file" => v["path"].as_str().unwrap_or("").to_string(),
+        "read_file" | "write_file" | "edit" => v["path"].as_str().unwrap_or("").to_string(),
         "list_files" => v["path"].as_str().unwrap_or(".").to_string(),
         "bash" => v["command"].as_str().unwrap_or("").to_string(),
         _ => String::new(),
@@ -75,6 +89,33 @@ pub fn detail(name: &str, args: &str) -> String {
         format!("{t}...")
     } else {
         d
+    }
+}
+
+pub fn preview(name: &str, args: &str) -> Vec<crate::diff::Row> {
+    let v: Value = serde_json::from_str(args).unwrap_or(Value::Null);
+    match name {
+        "edit" => {
+            let (Some(path), Some(old), Some(new)) = (
+                v["path"].as_str(),
+                v["old_str"].as_str(),
+                v["new_str"].as_str(),
+            ) else {
+                return Vec::new();
+            };
+            match std::fs::read_to_string(path) {
+                Ok(c) => crate::diff::preview_edit(&c, old, new),
+                Err(_) => Vec::new(),
+            }
+        }
+        "write_file" => {
+            let (Some(path), Some(new)) = (v["path"].as_str(), v["content"].as_str()) else {
+                return Vec::new();
+            };
+            let old = std::fs::read_to_string(path).ok();
+            crate::diff::preview_write(old.as_deref(), new)
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -101,6 +142,33 @@ pub async fn execute(name: &str, args: &str) -> Result<String> {
                 content: content.to_string(),
             })?;
             Ok(format!("wrote {path} ({n} lines)"))
+        }
+        "edit" => {
+            let Some(path) = v["path"].as_str() else {
+                bail!("edit: path required");
+            };
+            let Some(old) = v["old_str"].as_str() else {
+                bail!("edit: old_str required");
+            };
+            let Some(new) = v["new_str"].as_str() else {
+                bail!("edit: new_str required");
+            };
+            let replace_all = v["replace_all"].as_bool().unwrap_or(false);
+            let content = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
+            let count = content.matches(old).count();
+            if count == 0 {
+                bail!("edit: old_str not found in {path}");
+            }
+            if count > 1 && !replace_all {
+                bail!("edit: old_str matches {count} times in {path}, add context or set replace_all");
+            }
+            let updated = if replace_all {
+                content.replace(old, new)
+            } else {
+                content.replacen(old, new, 1)
+            };
+            std::fs::write(path, updated).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
+            Ok(format!("edited {path} ({count} replacement{})", if count == 1 { "" } else { "s" }))
         }
         "list_files" => {
             let dir = v["path"].as_str().unwrap_or(".");

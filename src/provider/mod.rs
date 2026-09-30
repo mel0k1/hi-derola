@@ -25,7 +25,7 @@ pub enum ApiEvent {
     Reasoning(String),
     Usage { input: u64, output: u64 },
     Note(String),
-    Tool { name: String, detail: String },
+    Tool { name: String, detail: String, diff: Vec<crate::diff::Row> },
     Confirm { name: String, args: String, rx: tokio::sync::oneshot::Sender<bool> },
     Done { text: String, messages: Vec<Message> },
     Failed(String),

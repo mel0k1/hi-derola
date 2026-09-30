@@ -43,6 +43,12 @@ pub async fn run(
         msgs.push(Message::new(Role::Assistant, reply.text.clone()).with_calls(reply.calls.clone()));
         req.messages = msgs.clone();
         for call in reply.calls {
+            tx.send(ApiEvent::Tool {
+                name: call.name.clone(),
+                detail: tools::detail(&call.name, &call.args),
+                diff: tools::preview(&call.name, &call.args),
+            })
+            .map_err(|_| anyhow!("closed"))?;
             if tools::needs_confirm(&call.name) && !allow_all.load(Ordering::Relaxed) {
                 let (otx, orx) = oneshot::channel();
                 tx.send(ApiEvent::Confirm {
@@ -57,15 +63,18 @@ pub async fn run(
                     continue;
                 }
             }
-            tx.send(ApiEvent::Tool {
-                name: call.name.clone(),
-                detail: tools::detail(&call.name, &call.args),
-            })
-            .map_err(|_| anyhow!("closed"))?;
             let out = match tools::execute(&call.name, &call.args).await {
                 Ok(o) => o,
                 Err(e) => format!("error: {e:#}"),
             };
+            let summary: String = out
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(70)
+                .collect();
+            let _ = tx.send(ApiEvent::Note(summary));
             msgs.push(Message::tool(&call.id, out));
             req.messages = msgs.clone();
         }
