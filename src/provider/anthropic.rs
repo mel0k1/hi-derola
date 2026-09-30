@@ -32,7 +32,7 @@ impl Provider for Anthropic {
         for m in &req.messages {
             msgs.push(json!({"role": m.role.as_str(), "content": m.content}));
         }
-        let body = json!({
+        let mut body = json!({
             "model": req.model,
             "max_tokens": req.max_tokens.unwrap_or(4096),
             "system": req.system,
