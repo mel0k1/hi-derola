@@ -1,0 +1,73 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use anyhow::{anyhow, Result};
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::oneshot;
+
+use crate::chat::{Message, Role};
+use crate::provider::{ApiEvent, ChatRequest, Provider};
+use crate::tools;
+
+const MAX_ROUNDS: usize = 15;
+
+pub async fn run(
+    provider: Arc<dyn Provider>,
+    mut req: ChatRequest,
+    tx: UnboundedSender<ApiEvent>,
+    allow_all: Arc<AtomicBool>,
+) -> Result<()> {
+    req.tools = tools::specs();
+    let mut msgs = req.messages.clone();
+    let mut round = 0;
+    loop {
+        round += 1;
+        if round > MAX_ROUNDS {
+            let _ = tx.send(ApiEvent::Note(format!("tool loop exceeded {MAX_ROUNDS} rounds, stopping")));
+            msgs.push(Message::new(Role::Assistant, "stopped: tool loop limit reached"));
+            let _ = tx.send(ApiEvent::Done {
+                text: "stopped: tool loop limit reached".into(),
+                messages: msgs,
+            });
+            return Ok(());
+        }
+        let reply = provider.chat(&req, &tx).await?;
+        if reply.calls.is_empty() {
+            msgs.push(Message::new(Role::Assistant, reply.text.clone()));
+            let _ = tx.send(ApiEvent::Done {
+                text: reply.text,
+                messages: msgs,
+            });
+            return Ok(());
+        }
+        msgs.push(Message::new(Role::Assistant, reply.text.clone()).with_calls(reply.calls.clone()));
+        req.messages = msgs.clone();
+        for call in reply.calls {
+            if tools::needs_confirm(&call.name) && !allow_all.load(Ordering::Relaxed) {
+                let (otx, orx) = oneshot::channel();
+                tx.send(ApiEvent::Confirm {
+                    name: call.name.clone(),
+                    args: call.args.clone(),
+                    rx: otx,
+                })
+                .map_err(|_| anyhow!("closed"))?;
+                if !orx.await.unwrap_or(false) {
+                    msgs.push(Message::tool(&call.id, "user denied this action"));
+                    req.messages = msgs.clone();
+                    continue;
+                }
+            }
+            tx.send(ApiEvent::Tool {
+                name: call.name.clone(),
+                detail: tools::detail(&call.name, &call.args),
+            })
+            .map_err(|_| anyhow!("closed"))?;
+            let out = match tools::execute(&call.name, &call.args).await {
+                Ok(o) => o,
+                Err(e) => format!("error: {e:#}"),
+            };
+            msgs.push(Message::tool(&call.id, out));
+            req.messages = msgs.clone();
+        }
+    }
+}

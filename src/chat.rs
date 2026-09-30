@@ -2,6 +2,7 @@
 pub enum Role {
     User,
     Assistant,
+    Tool,
 }
 
 impl Role {
@@ -9,14 +10,24 @@ impl Role {
         match self {
             Role::User => "user",
             Role::Assistant => "assistant",
+            Role::Tool => "tool",
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub args: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct Message {
     pub role: Role,
     pub content: String,
+    pub tool_calls: Vec<ToolCall>,
+    pub tool_call_id: String,
 }
 
 impl Message {
@@ -24,6 +35,22 @@ impl Message {
         Self {
             role,
             content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: String::new(),
+        }
+    }
+
+    pub fn with_calls(mut self, calls: Vec<ToolCall>) -> Self {
+        self.tool_calls = calls;
+        self
+    }
+
+    pub fn tool(id: &str, content: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: id.to_string(),
         }
     }
 }

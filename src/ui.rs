@@ -6,8 +6,8 @@ use ratatui::Frame;
 
 use crate::app::{App, Kind, Phase};
 
-const ACCENT: Color = Color::Rgb(122, 162, 247);
-const DIM: Color = Color::Rgb(106, 115, 125);
+pub const ACCENT: Color = Color::Rgb(122, 162, 247);
+pub const DIM: Color = Color::Rgb(106, 115, 125);
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
@@ -83,18 +83,33 @@ fn wrapped_height(lines: &[Line], width: u16) -> usize {
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {
     match app.phase {
         Phase::Confirm => {
-            let b = &app.pending[app.pending_idx];
             let block = Block::new()
                 .borders(Borders::ALL)
                 .border_style(Style::new().fg(ACCENT))
-                .title(Span::styled("apply", Style::new().fg(ACCENT)));
+                .title(Span::styled("confirm", Style::new().fg(ACCENT)));
             let inner = block.inner(area);
             f.render_widget(block, area);
-            let text = format!(
-                "{} ({} lines)\n[y] apply  [n] skip  [a] apply all  [s] skip all",
-                b.path,
-                b.content.lines().count()
-            );
+            let text = match &app.confirm {
+                Some(c) => {
+                    let args = match serde_json::from_str::<serde_json::Value>(&c.args) {
+                        Ok(v) => v["command"]
+                            .as_str()
+                            .or_else(|| v["path"].as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        Err(_) => c.args.clone(),
+                    };
+                    let args = args.lines().next().unwrap_or("");
+                    let args = if args.chars().count() > 60 {
+                        let t: String = args.chars().take(57).collect();
+                        format!("{t}...")
+                    } else {
+                        args.to_string()
+                    };
+                    format!("{} {}\n[y] run  [n] skip  [a] allow all", c.name, args)
+                }
+                None => "...".into(),
+            };
             f.render_widget(Paragraph::new(text), inner);
         }
         _ => {

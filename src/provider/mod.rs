@@ -7,14 +7,27 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::chat::Message;
+use crate::chat::{Message, ToolCall};
+
+pub struct ToolSpec {
+    pub name: &'static str,
+    pub description: &'static str,
+    pub parameters: serde_json::Value,
+}
+
+pub struct Reply {
+    pub text: String,
+    pub calls: Vec<ToolCall>,
+}
 
 pub enum ApiEvent {
     Chunk(String),
     Reasoning(String),
     Usage { input: u64, output: u64 },
     Note(String),
-    Done(String),
+    Tool { name: String, detail: String },
+    Confirm { name: String, args: String, rx: tokio::sync::oneshot::Sender<bool> },
+    Done { text: String, messages: Vec<Message> },
     Failed(String),
 }
 
@@ -26,13 +39,14 @@ pub struct ChatRequest {
     pub temperature: Option<f64>,
     pub top_p: Option<f64>,
     pub stream: bool,
+    pub tools: Vec<ToolSpec>,
 }
 
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn name(&self) -> &'static str;
 
-    async fn chat(&self, req: ChatRequest, tx: UnboundedSender<ApiEvent>) -> Result<()>;
+    async fn chat(&self, req: &ChatRequest, tx: &UnboundedSender<ApiEvent>) -> Result<Reply>;
 }
 
 pub fn build(kind: &str, base_url: Option<String>, api_key: String) -> Result<Arc<dyn Provider>> {

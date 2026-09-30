@@ -1,8 +1,10 @@
+mod agent;
 mod app;
 mod chat;
 mod config;
 mod files;
 mod provider;
+mod tools;
 mod ui;
 
 use anyhow::{Context, Result};

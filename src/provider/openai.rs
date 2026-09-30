@@ -3,7 +3,8 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::{sse_lines, send, ApiEvent, ChatRequest, Provider};
+use super::{sse_lines, send, ApiEvent, ChatRequest, Provider, Reply};
+use crate::chat::{Message, Role, ToolCall};
 
 pub struct OpenAi {
     http: reqwest::Client,
@@ -26,16 +27,44 @@ impl OpenAi {
     }
 }
 
+fn msg_json(m: &Message) -> Value {
+    match m.role {
+        Role::Tool => json!({"role": "tool", "tool_call_id": m.tool_call_id, "content": m.content}),
+        Role::Assistant if !m.tool_calls.is_empty() => {
+            let content = if m.content.is_empty() {
+                Value::Null
+            } else {
+                json!(m.content)
+            };
+            let calls: Vec<Value> = m
+                .tool_calls
+                .iter()
+                .map(|c| json!({"id": c.id, "type": "function", "function": {"name": c.name, "arguments": c.args}}))
+                .collect();
+            json!({"role": "assistant", "content": content, "tool_calls": calls})
+        }
+        _ => json!({"role": m.role.as_str(), "content": m.content}),
+    }
+}
+
+fn clean_args(s: &str) -> String {
+    if s.trim().is_empty() {
+        "{}".into()
+    } else {
+        s.to_string()
+    }
+}
+
 #[async_trait]
 impl Provider for OpenAi {
     fn name(&self) -> &'static str {
         "openai"
     }
 
-    async fn chat(&self, req: ChatRequest, tx: UnboundedSender<ApiEvent>) -> Result<()> {
+    async fn chat(&self, req: &ChatRequest, tx: &UnboundedSender<ApiEvent>) -> Result<Reply> {
         let mut msgs = vec![json!({"role": "system", "content": req.system})];
         for m in &req.messages {
-            msgs.push(json!({"role": m.role.as_str(), "content": m.content}));
+            msgs.push(msg_json(m));
         }
         let reasoning_model = is_reasoning(&req.model);
         let mut body = json!({"model": req.model, "messages": msgs, "stream": req.stream});
@@ -54,6 +83,15 @@ impl Provider for OpenAi {
                 body["top_p"] = json!(v);
             }
         }
+        if !req.tools.is_empty() {
+            let tools: Vec<Value> = req
+                .tools
+                .iter()
+                .map(|t| json!({"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.parameters}}))
+                .collect();
+            body["tools"] = tools.into();
+            body["tool_choice"] = json!("auto");
+        }
         if req.stream {
             body["stream_options"] = json!({"include_usage": true});
         }
@@ -63,12 +101,14 @@ impl Provider for OpenAi {
             url,
             vec![("Authorization", format!("Bearer {}", self.api_key))],
             body,
-            &tx,
+            tx,
         )
         .await?;
 
         let mut full = String::new();
+        let mut calls: Vec<ToolCall> = Vec::new();
         if req.stream {
+            let mut pending: Vec<Value> = Vec::new();
             sse_lines(resp, |line| {
                 let Some(data) = line.strip_prefix("data:") else {
                     return Ok(());
@@ -80,21 +120,36 @@ impl Provider for OpenAi {
                 let Ok(v) = serde_json::from_str::<Value>(data) else {
                     return Ok(());
                 };
-                if let Some(c) = v["choices"][0]["delta"]["content"].as_str() {
+                let d = &v["choices"][0]["delta"];
+                if let Some(c) = d["content"].as_str() {
                     if !c.is_empty() {
                         full.push_str(c);
                         tx.send(ApiEvent::Chunk(c.to_string()))
                             .map_err(|_| anyhow::anyhow!("closed"))?;
                     }
                 }
-                let d = &v["choices"][0]["delta"];
-                if let Some(r) = d["reasoning_content"]
-                    .as_str()
-                    .or_else(|| d["reasoning"].as_str())
-                {
+                if let Some(r) = d["reasoning_content"].as_str().or_else(|| d["reasoning"].as_str()) {
                     if !r.is_empty() {
                         tx.send(ApiEvent::Reasoning(r.to_string()))
                             .map_err(|_| anyhow::anyhow!("closed"))?;
+                    }
+                }
+                if let Some(tcs) = d["tool_calls"].as_array() {
+                    for tc in tcs {
+                        let idx = tc["index"].as_u64().unwrap_or(0) as usize;
+                        while pending.len() <= idx {
+                            pending.push(json!({"id": "", "name": "", "args": ""}));
+                        }
+                        if let Some(id) = tc["id"].as_str() {
+                            pending[idx]["id"] = json!(id);
+                        }
+                        if let Some(n) = tc["function"]["name"].as_str() {
+                            pending[idx]["name"] = json!(n);
+                        }
+                        if let Some(a) = tc["function"]["arguments"].as_str() {
+                            let acc = format!("{}{}", pending[idx]["args"].as_str().unwrap_or(""), a);
+                            pending[idx]["args"] = json!(acc);
+                        }
                     }
                 }
                 if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
@@ -107,12 +162,33 @@ impl Provider for OpenAi {
                 Ok(())
             })
             .await?;
+            calls = pending
+                .into_iter()
+                .filter(|p| !p["name"].as_str().unwrap_or("").is_empty())
+                .map(|p| ToolCall {
+                    id: p["id"].as_str().unwrap_or("").to_string(),
+                    name: p["name"].as_str().unwrap_or("").to_string(),
+                    args: clean_args(p["args"].as_str().unwrap_or("")),
+                })
+                .collect();
         } else {
             let text = resp.text().await?;
             let v: Value = serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
-            if let Some(c) = v["choices"][0]["message"]["content"].as_str() {
+            let msg = &v["choices"][0]["message"];
+            if let Some(c) = msg["content"].as_str() {
                 full = c.to_string();
-                let _ = tx.send(ApiEvent::Chunk(full.clone()));
+                if !full.is_empty() {
+                    let _ = tx.send(ApiEvent::Chunk(full.clone()));
+                }
+            }
+            if let Some(tcs) = msg["tool_calls"].as_array() {
+                for tc in tcs {
+                    calls.push(ToolCall {
+                        id: tc["id"].as_str().unwrap_or("").to_string(),
+                        name: tc["function"]["name"].as_str().unwrap_or("").to_string(),
+                        args: clean_args(tc["function"]["arguments"].as_str().unwrap_or("")),
+                    });
+                }
             }
             if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
                 tx.send(ApiEvent::Usage {
@@ -122,7 +198,6 @@ impl Provider for OpenAi {
                 .map_err(|_| anyhow::anyhow!("closed"))?;
             }
         }
-        let _ = tx.send(ApiEvent::Done(full));
-        Ok(())
+        Ok(Reply { text: full, calls })
     }
 }

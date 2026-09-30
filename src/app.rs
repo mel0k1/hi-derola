@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -6,10 +7,12 @@ use crossterm::event::{
     DisableMouseCapture,
 };
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 
+use crate::agent;
 use crate::chat::{Role, Session};
 use crate::config::Config;
-use crate::files::{self, WriteBlock};
+use crate::files;
 use crate::provider::{ApiEvent, ChatRequest, Provider};
 use crate::ui;
 
@@ -24,10 +27,17 @@ pub struct Entry {
     pub text: String,
 }
 
+#[derive(PartialEq)]
 pub enum Phase {
     Idle,
     Waiting,
     Confirm,
+}
+
+pub struct ConfirmCtx {
+    pub name: String,
+    pub args: String,
+    pub rx: oneshot::Sender<bool>,
 }
 
 pub struct App {
@@ -39,8 +49,7 @@ pub struct App {
     pub input: String,
     pub scroll_up: usize,
     pub phase: Phase,
-    pub pending: Vec<WriteBlock>,
-    pub pending_idx: usize,
+    pub confirm: Option<ConfirmCtx>,
     pub attachments: Vec<(String, String)>,
     pub streaming: Option<usize>,
     pub reasoning: Option<usize>,
@@ -48,10 +57,11 @@ pub struct App {
     pub tokens_out: u64,
     pub should_quit: bool,
     pub status: String,
+    allow_all: Arc<AtomicBool>,
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
-const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /clear         start new session\n  /quit          exit\nkeys:\n  enter send  esc cancel/quit  pgup/pgdn scroll  ctrl+c quit\nwrites:\n  model outputs ```path blocks, confirm each with y/n";
+const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /clear         start new session\n  /quit          exit\nkeys:\n  enter send  esc cancel/quit  pgup/pgdn scroll  ctrl+c quit\ntools:\n  model can read/write files and run bash, write+bash ask y/n/a";
 
 fn fmt_tokens(n: u64) -> String {
     if n < 1000 {
@@ -70,13 +80,10 @@ impl App {
         let system = format!(
             "You are hi-derola, a coding assistant running in the user's terminal.\n\
              Working directory: {cwd}\n\
-             Be concise and practical.\n\n\
-             When asked to create or modify files, answer with fenced code blocks where the \
-             info string is the target file path, one block per file:\n\n\
-             ```src/main.rs\n\
-             // complete file content\n\
-             ```\n\n\
-             Always output the complete file content, never diffs, never ellipses."
+             Be concise and practical. Use markdown for formatting.\n\n\
+             Use the provided tools to work with files and run commands instead of printing \
+             code fences with file contents. Prefer read_file before modifying a file. \
+             write_file writes the complete file content."
         );
         let status = format!("{} · {}", provider.name(), model);
         Self {
@@ -88,8 +95,7 @@ impl App {
             input: String::new(),
             scroll_up: 0,
             phase: Phase::Idle,
-            pending: Vec::new(),
-            pending_idx: 0,
+            confirm: None,
             attachments: Vec::new(),
             streaming: None,
             reasoning: None,
@@ -97,6 +103,7 @@ impl App {
             tokens_out: 0,
             should_quit: false,
             status,
+            allow_all: Arc::new(AtomicBool::new(false)),
             tx,
         }
     }
@@ -107,6 +114,19 @@ impl App {
             text: text.into(),
         });
         self.scroll_up = 0;
+    }
+
+    fn flush_stream(&mut self) {
+        if let Some(i) = self.streaming.take() {
+            if self.entries[i].text.trim().is_empty() {
+                self.entries.remove(i);
+                if let Some(r) = self.reasoning {
+                    if r > i {
+                        self.reasoning = Some(r - 1);
+                    }
+                }
+            }
+        }
     }
 
     pub fn on_api(&mut self, ev: ApiEvent) {
@@ -138,32 +158,33 @@ impl App {
                 self.scroll_up = 0;
             }
             ApiEvent::Note(s) => self.info(s),
+            ApiEvent::Tool { name, detail } => {
+                self.flush_stream();
+                self.info(format!("tool {name} {detail}"));
+            }
+            ApiEvent::Confirm { name, args, rx } => {
+                self.flush_stream();
+                self.confirm = Some(ConfirmCtx { name, args, rx });
+                self.phase = Phase::Confirm;
+                self.scroll_up = 0;
+            }
             ApiEvent::Usage { input, output } => {
                 self.tokens_in += input;
                 self.tokens_out += output;
-                self.status = self.status_line();
             }
-            ApiEvent::Done(full) => {
-                match self.streaming {
-                    Some(i) => self.entries[i].text = full.clone(),
-                    None => {
-                        if !full.is_empty() {
-                            self.entries.push(Entry {
-                                kind: Kind::Bot,
-                                text: full.clone(),
-                            });
-                        }
-                    }
+            ApiEvent::Done { text, messages } => {
+                if let Some(i) = self.streaming {
+                    self.entries[i].text = text.clone();
+                } else if !text.is_empty() {
+                    self.entries.push(Entry {
+                        kind: Kind::Bot,
+                        text: text.clone(),
+                    });
                 }
-                self.session.push(Role::Assistant, full.clone());
-                let blocks = files::parse_write_blocks(&full);
-                if blocks.is_empty() {
-                    self.phase = Phase::Idle;
-                } else {
-                    self.pending = blocks;
-                    self.pending_idx = 0;
-                    self.phase = Phase::Confirm;
+                if !messages.is_empty() {
+                    self.session.messages = messages;
                 }
+                self.phase = Phase::Idle;
                 self.streaming = None;
                 self.reasoning = None;
             }
@@ -179,6 +200,7 @@ impl App {
 
     pub fn cancelled(&mut self) {
         self.phase = Phase::Idle;
+        self.confirm = None;
         self.streaming = None;
         self.reasoning = None;
         self.info("cancelled");
@@ -188,10 +210,10 @@ impl App {
     fn status_line(&self) -> String {
         match self.phase {
             Phase::Waiting => "thinking...".into(),
-            Phase::Confirm => {
-                let b = &self.pending[self.pending_idx];
-                format!("apply {}?  y/n", b.path)
-            }
+            Phase::Confirm => match &self.confirm {
+                Some(c) => format!("run {}?  y/n/a", c.name),
+                None => "confirm...".into(),
+            },
             Phase::Idle => {
                 let mut s = format!("{} · {}", self.provider.name(), self.model);
                 if self.tokens_in > 0 || self.tokens_out > 0 {
@@ -207,39 +229,28 @@ impl App {
     }
 
     fn confirm_key(&mut self, code: KeyCode) {
+        let Some(c) = self.confirm.take() else {
+            self.phase = Phase::Idle;
+            return;
+        };
         match code {
             KeyCode::Char('y') => {
-                let block = self.pending[self.pending_idx].clone();
-                match files::apply(&block) {
-                    Ok(n) => self.info(format!("wrote {} ({n} lines)", block.path)),
-                    Err(e) => self.info(format!("error: {e:#}")),
-                }
-                self.pending_idx += 1;
-            }
-            KeyCode::Char('n') => {
-                let path = self.pending[self.pending_idx].path.clone();
-                self.info(format!("skipped {path}"));
-                self.pending_idx += 1;
+                let _ = c.rx.send(true);
             }
             KeyCode::Char('a') => {
-                for b in self.pending[self.pending_idx..].to_vec() {
-                    match files::apply(&b) {
-                        Ok(n) => self.info(format!("wrote {} ({n} lines)", b.path)),
-                        Err(e) => self.info(format!("error: {e:#}")),
-                    }
-                }
-                self.pending_idx = self.pending.len();
+                self.allow_all.store(true, Ordering::Relaxed);
+                let _ = c.rx.send(true);
             }
-            KeyCode::Char('s') | KeyCode::Esc => {
-                self.pending_idx = self.pending.len();
+            KeyCode::Char('n') | KeyCode::Char('s') => {
+                let _ = c.rx.send(false);
+                self.info("denied");
             }
-            _ => return,
+            _ => {
+                self.confirm = Some(c);
+                return;
+            }
         }
-        if self.pending_idx >= self.pending.len() {
-            self.pending.clear();
-            self.pending_idx = 0;
-            self.phase = Phase::Idle;
-        }
+        self.phase = Phase::Waiting;
         self.scroll_up = 0;
         self.status = self.status_line();
     }
@@ -333,6 +344,7 @@ impl App {
 
         let provider = self.provider.clone();
         let tx = self.tx.clone();
+        let allow_all = self.allow_all.clone();
         let req = ChatRequest {
             system: self.session.system.clone(),
             messages: self.session.messages.clone(),
@@ -341,9 +353,10 @@ impl App {
             temperature: self.cfg.provider.temperature,
             top_p: self.cfg.provider.top_p,
             stream: self.cfg.provider.stream,
+            tools: Vec::new(),
         };
         let handle = tokio::spawn(async move {
-            if let Err(e) = provider.chat(req, tx.clone()).await {
+            if let Err(e) = agent::run(provider, req, tx.clone(), allow_all).await {
                 let _ = tx.send(ApiEvent::Failed(format!("{e:#}")));
             }
         });
@@ -362,6 +375,7 @@ impl App {
                 self.session.clear();
                 self.entries.clear();
                 self.attachments.clear();
+                self.allow_all.store(false, Ordering::Relaxed);
                 self.info("new session");
             }
             "/model" => {
@@ -421,8 +435,13 @@ pub async fn run(
                 Event::Key(k) => {
                     if k.kind == KeyEventKind::Press
                         && k.code == KeyCode::Esc
-                        && matches!(app.phase, Phase::Waiting)
+                        && matches!(app.phase, Phase::Waiting | Phase::Confirm)
                     {
+                        if app.phase == Phase::Confirm {
+                            if let Some(c) = app.confirm.take() {
+                                let _ = c.rx.send(false);
+                            }
+                        }
                         if let Some(h) = inflight.take() {
                             h.abort();
                         }
