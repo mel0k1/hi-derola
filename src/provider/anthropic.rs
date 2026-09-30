@@ -48,6 +48,7 @@ impl Provider for Anthropic {
                 ("anthropic-version", "2023-06-01".into()),
             ],
             body,
+            &tx,
         )
         .await?;
 

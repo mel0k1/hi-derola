@@ -45,6 +45,7 @@ impl Provider for OpenAi {
             url,
             vec![("Authorization", format!("Bearer {}", self.api_key))],
             body,
+            &tx,
         )
         .await?;
 
