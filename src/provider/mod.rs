@@ -102,7 +102,7 @@ pub async fn send(
         attempt += 1;
         let mut req = http.post(&url).json(&body);
         for (k, v) in &headers {
-            req = req.header(k, v);
+            req = req.header(*k, v);
         }
         let outcome = req.send().await;
         match outcome {
