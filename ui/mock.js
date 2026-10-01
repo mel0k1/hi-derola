@@ -336,6 +336,28 @@
       const composed = attachments.map(([p, c]) => "[file: " + p + "]\n" + c + "\n\n").join("") + text;
       attachments = [];
       emitAttachments();
+      const attached = [];
+      const missing = [];
+      const seen = new Set();
+      const re = /(^|\s)@([^\s@]+)/g;
+      let m2;
+      while ((m2 = re.exec(text))) {
+        const p = m2[2].replace(/[.,;:)\]!]+$/, "");
+        if (!p || seen.has(p)) continue;
+        seen.add(p);
+        const n2 = node(resolve(p));
+        if (typeof n2 === "string" && attached.length < 8) {
+          attached.push(p);
+        } else {
+          missing.push(p);
+        }
+      }
+      if (attached.length || missing.length) {
+        let line = "";
+        if (attached.length) line += "@mentions attached: " + attached.join(", ");
+        if (missing.length) line += (line ? " · " : "") + "not found: " + missing.join(", ");
+        emit({ t: "note", s: line });
+      }
       s.messages.push({ role: "user", content: composed });
       saveState();
       emitSessions();
