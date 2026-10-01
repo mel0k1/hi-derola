@@ -54,7 +54,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "edit".into(),
-            description: "Perform exact string replacement in an existing file. old_str must match the file content exactly and be unique unless replace_all is true. Read the file first.".into(),
+            description: "Perform string replacement in an existing file. Tries an exact match first, then tolerates line ending (CRLF/LF), BOM and trailing whitespace differences. Must be unique unless replace_all is true. Read the file first.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -164,8 +164,12 @@ pub fn preview(name: &str, args: &str) -> Vec<crate::diff::Row> {
             ) else {
                 return Vec::new();
             };
+            let replace_all = v["replace_all"].as_bool().unwrap_or(false);
             match std::fs::read_to_string(path) {
-                Ok(c) => crate::diff::preview_edit(&c, old, new),
+                Ok(c) => match apply_edit(&c, old, new, replace_all) {
+                    Ok((updated, _)) => crate::diff::lines_diff(&c, &updated),
+                    Err(_) => Vec::new(),
+                },
                 Err(_) => Vec::new(),
             }
         }
@@ -220,20 +224,13 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
             let Some(new) = v["new_str"].as_str() else {
                 bail!("edit: new_str required");
             };
+            if old.is_empty() {
+                bail!("edit: old_str is empty");
+            }
             let replace_all = v["replace_all"].as_bool().unwrap_or(false);
             let content = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
-            let count = content.matches(old).count();
-            if count == 0 {
-                bail!("edit: old_str not found in {path}");
-            }
-            if count > 1 && !replace_all {
-                bail!("edit: old_str matches {count} times in {path}, add context or set replace_all");
-            }
-            let updated = if replace_all {
-                content.replace(old, new)
-            } else {
-                content.replacen(old, new, 1)
-            };
+            let (updated, count) = apply_edit(&content, old, new, replace_all)
+                .map_err(|e| anyhow::anyhow!("edit: {e:#} in {path}"))?;
             std::fs::write(path, updated).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
             Ok(format!("edited {path} ({count} replacement{})", if count == 1 { "" } else { "s" }))
         }
@@ -357,6 +354,101 @@ fn norm(p: &str) -> String {
 
 const MAX_ATTACH_BYTES: u64 = 128 * 1024;
 
+fn normalize_eol(s: &str) -> String {
+    s.replace("\r\n", "\n")
+}
+
+fn try_edit(content: &str, old: &str, new: &str, replace_all: bool) -> Option<(String, usize)> {
+    let n = content.matches(old).count();
+    if n == 0 || (n > 1 && !replace_all) {
+        return None;
+    }
+    let out = if replace_all {
+        content.replace(old, new)
+    } else {
+        content.replacen(old, new, 1)
+    };
+    Some((out, n))
+}
+
+fn trim_edit(
+    content: &str,
+    old: &str,
+    new: &str,
+    replace_all: bool,
+) -> anyhow::Result<Option<(String, usize)>> {
+    let c_lines: Vec<&str> = content.lines().collect();
+    let o_lines: Vec<&str> = old.lines().collect();
+    if o_lines.is_empty() {
+        return Ok(None);
+    }
+    let n_lines: Vec<String> = new.lines().map(|s| s.to_string()).collect();
+    let c_trim: Vec<&str> = c_lines.iter().map(|l| l.trim_end()).collect();
+    let o_trim: Vec<&str> = o_lines.iter().map(|l| l.trim_end()).collect();
+    let hits: Vec<usize> = (0..=c_lines.len().saturating_sub(o_lines.len()))
+        .filter(|&i| c_trim[i..i + o_lines.len()] == o_trim[..])
+        .collect();
+    if hits.is_empty() {
+        return Ok(None);
+    }
+    if hits.len() > 1 && !replace_all {
+        bail!("old_str matches {} times", hits.len());
+    }
+    let count = hits.len();
+    let mut lines: Vec<String> = c_lines.iter().map(|s| s.to_string()).collect();
+    for i in hits.into_iter().rev() {
+        lines.splice(i..i + o_lines.len(), n_lines.iter().cloned());
+    }
+    let mut joined = lines.join("\n");
+    if content.ends_with('\n') && !joined.is_empty() {
+        joined.push('\n');
+    }
+    Ok(Some((joined, count)))
+}
+
+pub fn apply_edit(content: &str, old: &str, new: &str, replace_all: bool) -> Result<(String, usize)> {
+    let (body, bom) = match content.strip_prefix('\u{feff}') {
+        Some(rest) => (rest, true),
+        None => (content, false),
+    };
+    let crlf = body.contains("\r\n");
+    let norm = normalize_eol(body);
+    let old_n = normalize_eol(old);
+    let new_n = normalize_eol(new);
+    let mut multi = false;
+    if let Some((out, n)) = try_edit(body, old, new, replace_all) {
+        return Ok((with_bom(&out, bom), n));
+    }
+    if let Some((out, n)) = try_edit(&norm, &old_n, &new_n, replace_all) {
+        return Ok((with_bom(&restore_eol(&out, crlf), bom), n));
+    }
+    match trim_edit(&norm, &old_n, &new_n, replace_all) {
+        Ok(Some((out, n))) => return Ok((with_bom(&restore_eol(&out, crlf), bom), n)),
+        Ok(None) => {}
+        Err(_) => multi = true,
+    }
+    if multi || (!old_n.is_empty() && norm.matches(&old_n).count() > 1) {
+        bail!("old_str matches multiple times, add context or set replace_all");
+    }
+    bail!("old_str not found");
+}
+
+fn with_bom(s: &str, bom: bool) -> String {
+    if bom {
+        format!("\u{feff}{s}")
+    } else {
+        s.to_string()
+    }
+}
+
+fn restore_eol(text: &str, crlf: bool) -> String {
+    if crlf {
+        text.replace('\n', "\r\n")
+    } else {
+        text.to_string()
+    }
+}
+
 fn read_numbered(path: &str, offset: usize, limit: usize) -> Result<String> {
     let bytes = std::fs::read(path).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
     if bytes.len() as u64 > MAX_ATTACH_BYTES {
@@ -431,6 +523,47 @@ mod tests {
         assert_eq!(budget("short".into(), 0), "short");
         let uni = "ё".repeat(50);
         assert!(budget(uni, 10).contains("ёё"));
+    }
+
+    #[test]
+    fn edit_tolerant_matching() {
+        let crlf = "fn main() {\r\n    let x = 1;\r\n    println!(\"{}\", x);\r\n}\r\n";
+        let (out, n) = apply_edit(crlf, "let x = 1;\n    println", "let x = 2;\n    println", false).unwrap();
+        assert_eq!(n, 1);
+        assert!(out.contains("let x = 2;"));
+        assert!(out.contains("\r\n"));
+        assert_eq!(out.matches("\r\n").count(), crlf.matches("\r\n").count());
+
+        let bom_content = "\u{feff}line one\nline two\n";
+        let (out, n) = apply_edit(bom_content, "line two", "line TWO", false).unwrap();
+        assert_eq!(n, 1);
+        assert!(out.starts_with('\u{feff}'));
+        assert!(out.contains("line TWO"));
+
+        let ws = "fn a() {   \n    let y = 2;\t\n}\n";
+        let (out, n) = apply_edit(ws, "fn a() {\n    let y = 2;\n}", "fn a() {\n    let y = 3;\n}", false).unwrap();
+        assert_eq!(n, 1);
+        assert!(out.contains("let y = 3;"));
+        assert!(out.ends_with('\n'));
+
+        let dup = "a\nfoo\nb\nfoo\n";
+        let (out, n) = apply_edit(dup, "foo", "bar", true).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(out.matches("bar").count(), 2);
+        assert!(apply_edit(dup, "foo", "bar", false).is_err());
+
+        let dup_ws = "a  \nfoo\nb\nfoo  \n";
+        assert!(apply_edit(dup_ws, "foo", "x", false).is_err());
+        let (out, n) = apply_edit(dup_ws, "foo\nb", "x", false).unwrap();
+        assert_eq!(n, 1);
+        assert!(out.contains("a  \nx\nfoo  "));
+
+        assert!(apply_edit("hello\n", "missing text", "x", false).is_err());
+        assert!(apply_edit("hello\n", "", "x", false).is_err());
+
+        let (out, n) = apply_edit("keep\nold line\nend\n", "old line", "new line", false).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(out, "keep\nnew line\nend\n");
     }
 
     #[test]

@@ -96,39 +96,6 @@ pub fn lines_diff(a: &str, b: &str) -> Vec<Row> {
     ellipsis(rows)
 }
 
-pub fn preview_edit(content: &str, old: &str, new: &str) -> Vec<Row> {
-    let all: Vec<&str> = content.lines().collect();
-    let idx = content.find(old).unwrap_or(0);
-    let start = content[..idx].matches('\n').count();
-    let old_n = old.lines().count().max(1);
-    let mut rows = Vec::new();
-    for l in all.iter().take(start).skip(start.saturating_sub(CONTEXT)) {
-        rows.push(Row {
-            tag: 0,
-            text: (*l).to_string(),
-        });
-    }
-    for l in old.lines() {
-        rows.push(Row {
-            tag: 2,
-            text: l.to_string(),
-        });
-    }
-    for l in new.lines() {
-        rows.push(Row {
-            tag: 1,
-            text: l.to_string(),
-        });
-    }
-    for l in all.iter().skip((start + old_n).min(all.len())).take(CONTEXT) {
-        rows.push(Row {
-            tag: 0,
-            text: (*l).to_string(),
-        });
-    }
-    ellipsis(rows)
-}
-
 pub fn preview_write(old: Option<&str>, new: &str) -> Vec<Row> {
     match old {
         Some(o) => lines_diff(o, new),
