@@ -4,27 +4,26 @@ A high-performance, lightweight chat and autonomous coding assistant written in 
 
 ## features
 
-- minimalist dark GUI (Slint) by default, full TUI (ratatui) with `--tui` or when no display is available
+- minimalist dark desktop GUI (tauri, webview) plus a full TUI (ratatui) with `--tui` or when no display is available
 - windows, linux, macos — shell commands run via `cmd /C` on windows, `sh -c` elsewhere
 - multi-provider: any OpenAI-compatible endpoint (OpenAI, OpenRouter, ...) + native Anthropic
-- streaming responses, reasoning deltas, token usage counters
-- automatic retry with backoff on 429/5xx, respects Retry-After
-- tool calling: read_file, write_file, edit, list_files, glob, grep, bash
-- diff preview before edit/write approval, colored in GUI and TUI, mutations require confirmation (y/n/a)
+- streaming responses and reasoning in a separate collapsible thinking block (GUI)
+- api key, endpoint and model are editable right in the GUI settings; the model dropdown is filled from the provider's `/models` endpoint
+- configurable hotkeys (`[keys]` in config or capture fields in GUI settings)
+- tool calling: read_file, write_file, edit, list_files, glob, grep, bash + MCP servers
+- diff preview before edit/write approval, colored in GUI and TUI, mutations require confirmation
 - snapshots: every turn is snapshotted, `/undo` / `/redo` reverts file changes
 - mcp servers over stdio and streamable http: tools exposed as `mcp__<name>__<tool>`
-- markdown rendering in answers
-- input history with up/down arrows (TUI)
-- config: sampling params (temperature, top_p), max_tokens, model switching via /model
+- markdown rendering in answers, token usage counters, automatic retry with backoff on 429/5xx
 
 ## run
 
 ```
-cargo run        # GUI (Slint)
-cargo run -- --tui  # terminal UI
+cargo run                        # terminal UI
+cargo run -p hi-derola-gui       # desktop GUI (tauri)
 ```
 
-config: `~/.config/hi-derola/config.toml`, created on first start.
+config: `~/.config/hi-derola/config.toml`, created on first start. On windows the GUI builds need no extra system deps (WebView2); on linux install `libwebkit2gtk-4.1-dev`.
 
 ## config
 
@@ -33,7 +32,7 @@ config: `~/.config/hi-derola/config.toml`, created on first start.
 type = "openai"                                  # openai | anthropic
 model = "anthropic/claude-sonnet-4.5"
 base_url = "https://openrouter.ai/api/v1"        # any openai-compatible endpoint
-api_key = ""                                     # or HI_DEROLA_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY
+api_key = ""                                     # or set it in the GUI settings
 
 # local mcp server over stdio
 [[mcp]]
@@ -47,15 +46,25 @@ name = "search"
 type = "remote"
 url = "https://example.com/mcp"
 headers = { Authorization = "Bearer ..." }
+
+# gui hotkeys, "none" disables
+[keys]
+send = "enter"
+newline = "shift+enter"
+stop = "escape"
+new_session = "ctrl+n"
+open_settings = "ctrl+comma"
+undo = "ctrl+z"
+redo = "ctrl+shift+z"
+toggle_thinking = "ctrl+t"
 ```
 
-## commands
+## commands (both UIs)
 
 ```
 /file <path>   attach file to next message
 /model <name>  switch model, saved to config
-/undo          revert file changes of the last turn
-/redo          reapply undone changes
+/models        list models available for the api key
+/undo /redo    revert or reapply file changes of a turn
 /clear         start new session
-/quit          exit
 ```
