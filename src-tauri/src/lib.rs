@@ -20,6 +20,7 @@ pub struct Shared {
     title: Mutex<String>,
     created: Mutex<u64>,
     confirm: Mutex<Option<oneshot::Sender<bool>>>,
+    ask: Mutex<Option<oneshot::Sender<String>>>,
     inflight: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     tokens: Mutex<(u64, u64)>,
     cost: Mutex<f64>,
@@ -39,9 +40,8 @@ fn system_prompt() -> String {
         "You are hi-derola, a coding assistant running on the user's machine.\n\
          Working directory: {cwd}\n\
          Be concise and practical. Use markdown for formatting.\n\n\
-         Use the provided tools (read_file, write_file, edit, glob, grep, list_files, bash) \
-         to work with files and run commands instead of printing code fences with file \
-         contents. Use glob and grep to locate code before reading. \
+         Use the provided tools to work with files and run commands instead of printing code \
+         fences with file contents. Use glob and grep to locate code before reading. \
          Prefer read_file before modifying a file. \
          write_file writes the complete file content."
     );
@@ -254,6 +254,10 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     *sh.confirm.lock().unwrap() = Some(rx);
                     confirm_payload(&name, &args)
                 }
+                ApiEvent::Ask { name, args, rx } => {
+                    *sh.ask.lock().unwrap() = Some(rx);
+                    json!({"t": "ask", "name": name, "args": args})
+                }
                 ApiEvent::Usage { input, output } => {
                     let model = sh.cfg.lock().unwrap().provider.model.clone();
                     let delta = models::cost(&model, input, output);
@@ -384,6 +388,13 @@ fn confirm(sh: State<'_, Arc<Shared>>, ok: bool) {
 }
 
 #[tauri::command]
+fn answer(sh: State<'_, Arc<Shared>>, text: String) {
+    if let Some(a) = sh.ask.lock().unwrap().take() {
+        let _ = a.send(text);
+    }
+}
+
+#[tauri::command]
 fn allow_all(sh: State<'_, Arc<Shared>>) {
     sh.allow_all.store(true, Ordering::Relaxed);
     if let Some(c) = sh.confirm.lock().unwrap().take() {
@@ -398,6 +409,9 @@ fn stop(sh: State<'_, Arc<Shared>>, app: AppHandle) {
     }
     if let Some(c) = sh.confirm.lock().unwrap().take() {
         let _ = c.send(false);
+    }
+    if let Some(a) = sh.ask.lock().unwrap().take() {
+        let _ = a.send(String::new());
     }
     snapshot::end_turn();
     let _ = app.emit("ev", json!({"t": "note", "s": "cancelled"}));
@@ -485,6 +499,7 @@ fn open_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) -> Resul
     sh.titled.store(true, Ordering::Relaxed);
     sh.attachments.lock().unwrap().clear();
     sh.confirm.lock().unwrap().take();
+    sh.ask.lock().unwrap().take();
     emit_attachments(&sh, &app);
     Ok(json!({
         "id": st.id,
@@ -828,6 +843,7 @@ pub fn run() -> Result<()> {
                 title: Mutex::new(title),
                 created: Mutex::new(created),
                 confirm: Mutex::new(None),
+                ask: Mutex::new(None),
                 inflight: Mutex::new(None),
                 tokens: Mutex::new(restore.as_ref().map(|s| (s.tokens_in, s.tokens_out)).unwrap_or((0, 0))),
                 cost: Mutex::new(restore.as_ref().map(|s| s.cost).unwrap_or(0.0)),
@@ -852,8 +868,8 @@ pub fn run() -> Result<()> {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            init, save, send, confirm, allow_all, stop, list_models, mcp_reconnect, undo, redo,
-            list_sessions, new_session, open_session, delete_session, list_dir, attach_path,
+            init, save, send, confirm, answer, allow_all, stop, list_models, mcp_reconnect, undo,
+            redo, list_sessions, new_session, open_session, delete_session, list_dir, attach_path,
             detach, set_theme, list_project_files
         ])
         .run(tauri::generate_context!())

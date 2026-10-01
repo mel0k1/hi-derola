@@ -9,6 +9,8 @@ let MODEL = "";
 let KIND = "openai";
 let waiting = false;
 let confirmOpen = false;
+let askOpen = false;
+let askState = null;
 let settingsOpen = false;
 let filesOpen = false;
 let models = [];
@@ -569,6 +571,10 @@ async function handleEvent(ev) {
       $("input").blur();
       break;
     }
+    case "ask":
+      closeThink();
+      openAsk(ev.args);
+      break;
     case "usage":
       tokens.in += ev.input;
       tokens.out += ev.output;
@@ -642,7 +648,7 @@ async function handleEvent(ev) {
 async function doSend() {
   const input = $("input");
   const text = input.value.trim();
-  if (!text || confirmOpen || settingsOpen || filesOpen) return;
+  if (!text || confirmOpen || askOpen || settingsOpen || filesOpen) return;
   hideMention();
   input.value = "";
   autosize();
@@ -724,6 +730,102 @@ function allowAll() {
 $("c-run").onclick = () => resolveConfirm(true);
 $("c-deny").onclick = () => resolveConfirm(false);
 $("c-allow").onclick = () => allowAll();
+
+/* ask */
+
+function openAsk(args) {
+  let qs = [];
+  try {
+    qs = JSON.parse(args).questions || [];
+  } catch {}
+  if (!qs.length) {
+    invoke("answer", { text: "" });
+    return;
+  }
+  askOpen = true;
+  askState = { qs, sel: qs.map(() => new Set()), custom: qs.map(() => "") };
+  const body = $("ask-body");
+  body.replaceChildren();
+  qs.forEach((q, i) => {
+    const wrap = el("div", "ask-q");
+    const header = (q.header || "").trim();
+    if (header) wrap.appendChild(el("div", "q-header", header));
+    wrap.appendChild(el("div", "q-text", q.question || ""));
+    const opts = el("div", "ask-opts");
+    (q.options || []).forEach((o, j) => {
+      const b = el("button", "ask-opt");
+      b.type = "button";
+      b.appendChild(el("span", "o-label", o.label || ""));
+      if (o.description) b.appendChild(el("span", "o-desc", o.description));
+      b.onclick = () => {
+        const set = askState.sel[i];
+        if (q.multiple) {
+          set.has(j) ? set.delete(j) : set.add(j);
+          b.classList.toggle("sel", set.has(j));
+        } else {
+          set.clear();
+          set.add(j);
+          [...opts.children].forEach((c, k) => c.classList.toggle("sel", k === j));
+        }
+      };
+      opts.appendChild(b);
+    });
+    wrap.appendChild(opts);
+    const inp = document.createElement("input");
+    inp.placeholder = "type your own answer";
+    inp.spellcheck = false;
+    inp.oninput = () => { askState.custom[i] = inp.value; };
+    inp.onkeydown = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submitAsk();
+      }
+    };
+    wrap.appendChild(inp);
+    body.appendChild(wrap);
+  });
+  $("ask-overlay").classList.remove("hidden");
+  $("input").blur();
+  const first = body.querySelector("input");
+  if (first) first.focus();
+}
+
+function composeAsk() {
+  const { qs, sel, custom } = askState;
+  const lines = [];
+  qs.forEach((q, i) => {
+    const labels = [...sel[i]].map((j) => ((q.options || [])[j] || {}).label).filter(Boolean);
+    const customText = (custom[i] || "").trim();
+    let ans = customText || labels.join(", ");
+    if (!ans) return;
+    const header = (q.header || "").trim();
+    lines.push(header ? header + ": " + ans : ans);
+  });
+  return lines.join("\n");
+}
+
+function submitAsk() {
+  const text = composeAsk();
+  closeAsk();
+  invoke("answer", { text });
+  note(text ? "answered" : "no answer given");
+}
+
+function closeAsk() {
+  askOpen = false;
+  askState = null;
+  $("ask-overlay").classList.add("hidden");
+  $("input").focus();
+}
+
+function skipAsk() {
+  closeAsk();
+  invoke("answer", { text: "" });
+  note("skipped");
+}
+
+$("a-submit").onclick = () => submitAsk();
+$("a-skip").onclick = () => skipAsk();
 
 /* settings */
 
@@ -1067,6 +1169,16 @@ $("input").addEventListener("click", hideMention);
 /* hotkeys */
 
 window.addEventListener("keydown", (e) => {
+  if (askOpen) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      skipAsk();
+    } else if (e.key === "Enter" && e.target.tagName !== "INPUT") {
+      e.preventDefault();
+      submitAsk();
+    }
+    return;
+  }
   if (confirmOpen) {
     const c = comboFromEvent(e);
     if (!c) return;

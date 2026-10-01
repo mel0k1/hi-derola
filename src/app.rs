@@ -34,12 +34,18 @@ pub enum Phase {
     Idle,
     Waiting,
     Confirm,
+    Ask,
 }
 
 pub struct ConfirmCtx {
     pub name: String,
     pub args: String,
     pub rx: oneshot::Sender<bool>,
+}
+
+pub struct AskCtx {
+    pub rx: oneshot::Sender<String>,
+    pub opts: Vec<String>,
 }
 
 pub struct App {
@@ -52,6 +58,7 @@ pub struct App {
     pub scroll_up: usize,
     pub phase: Phase,
     pub confirm: Option<ConfirmCtx>,
+    pub ask: Option<AskCtx>,
     pub attachments: Vec<(String, String)>,
     pub streaming: Option<usize>,
     pub reasoning: Option<usize>,
@@ -91,6 +98,12 @@ fn fmt_cost(c: f64) -> String {
     }
 }
 
+fn key_seq(c: char) -> usize {
+    c.to_digit(10)
+        .map(|d| d.saturating_sub(1) as usize)
+        .unwrap_or(usize::MAX)
+}
+
 impl App {
     pub fn new(cfg: Config, provider: Arc<dyn Provider>, tx: mpsc::UnboundedSender<ApiEvent>) -> Self {
         let model = cfg.provider.model.clone();
@@ -101,9 +114,8 @@ impl App {
             "You are hi-derola, a coding assistant running in the user's terminal.\n\
              Working directory: {cwd}\n\
              Be concise and practical. Use markdown for formatting.\n\n\
-             Use the provided tools (read_file, write_file, edit, glob, grep, list_files, bash) \
-             to work with files and run commands instead of printing code fences with file \
-             contents. Use glob and grep to locate code before reading. \
+             Use the provided tools to work with files and run commands instead of printing code \
+             fences with file contents. Use glob and grep to locate code before reading. \
              Prefer read_file before modifying a file. \
              write_file writes the complete file content."
         );
@@ -123,6 +135,7 @@ impl App {
             scroll_up: 0,
             phase: Phase::Idle,
             confirm: None,
+            ask: None,
             attachments: Vec::new(),
             streaming: None,
             reasoning: None,
@@ -218,6 +231,40 @@ impl App {
                 self.phase = Phase::Confirm;
                 self.scroll_up = 0;
             }
+            ApiEvent::Ask { args, rx, .. } => {
+                self.flush_stream();
+                self.reasoning = None;
+                let v: serde_json::Value =
+                    serde_json::from_str(&args).unwrap_or(serde_json::Value::Null);
+                let mut opts = Vec::new();
+                if let Some(qs) = v["questions"].as_array() {
+                    for q in qs {
+                        let text = q["question"].as_str().unwrap_or("");
+                        let header = q["header"].as_str().unwrap_or("");
+                        if header.is_empty() {
+                            self.info(format!("question: {text}"));
+                        } else {
+                            self.info(format!("question [{header}]: {text}"));
+                        }
+                        if let Some(os) = q["options"].as_array() {
+                            for (i, o) in os.iter().enumerate() {
+                                let label = o["label"].as_str().unwrap_or("");
+                                let desc = o["description"].as_str().unwrap_or("");
+                                if desc.is_empty() {
+                                    self.info(format!("  {}: {label}", i + 1));
+                                } else {
+                                    self.info(format!("  {}: {label} - {desc}", i + 1));
+                                }
+                                opts.push(label.to_string());
+                            }
+                        }
+                    }
+                }
+                self.info("type an answer, press a number for an option, esc skips");
+                self.ask = Some(AskCtx { rx, opts });
+                self.phase = Phase::Ask;
+                self.scroll_up = 0;
+            }
             ApiEvent::Usage { input, output } => {
                 self.tokens_in += input;
                 self.tokens_out += output;
@@ -254,6 +301,7 @@ impl App {
     pub fn cancelled(&mut self) {
         self.phase = Phase::Idle;
         self.confirm = None;
+        self.ask = None;
         self.streaming = None;
         self.reasoning = None;
         self.info("cancelled");
@@ -268,6 +316,7 @@ impl App {
                 Some(c) => format!("run {}?  y/n/a", c.name),
                 None => "confirm...".into(),
             },
+            Phase::Ask => "answer the question".into(),
             Phase::Idle => {
                 let mut s = format!("{} · {}", self.provider.name(), self.model);
                 if self.tokens_in > 0 || self.tokens_out > 0 {
@@ -312,6 +361,39 @@ impl App {
         self.status = self.status_line();
     }
 
+    fn ask_key(&mut self, code: KeyCode) {
+        let Some(a) = self.ask.take() else {
+            self.phase = Phase::Idle;
+            return;
+        };
+        match code {
+            KeyCode::Enter => {
+                let answer = self.input.trim().to_string();
+                self.input.clear();
+                let _ = a.rx.send(answer);
+            }
+            KeyCode::Esc => {
+                self.input.clear();
+                let _ = a.rx.send(String::new());
+                self.info("skipped");
+            }
+            KeyCode::Char(c @ '1'..='9')
+                if self.input.is_empty() && key_seq(c) < a.opts.len() =>
+            {
+                let label = a.opts[key_seq(c)].clone();
+                self.info(format!("answered: {label}"));
+                let _ = a.rx.send(label);
+            }
+            _ => {
+                self.ask = Some(a);
+                return;
+            }
+        }
+        self.phase = Phase::Waiting;
+        self.scroll_up = 0;
+        self.status = self.status_line();
+    }
+
     pub fn on_key(&mut self, key: KeyEvent, inflight: &mut Option<tokio::task::JoinHandle<()>>) {
         if key.kind != KeyEventKind::Press {
             return;
@@ -323,6 +405,10 @@ impl App {
         match self.phase {
             Phase::Confirm => {
                 self.confirm_key(key.code);
+                return;
+            }
+            Phase::Ask => {
+                self.ask_key(key.code);
                 return;
             }
             Phase::Waiting => {
@@ -486,7 +572,7 @@ impl App {
     }
 
     pub fn resume_queued(&mut self, inflight: &mut Option<tokio::task::JoinHandle<()>>) {
-        if !matches!(self.phase, Phase::Idle) || self.confirm.is_some() {
+        if !matches!(self.phase, Phase::Idle) || self.confirm.is_some() || self.ask.is_some() {
             return;
         }
         let next = {

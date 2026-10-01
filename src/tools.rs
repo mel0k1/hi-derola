@@ -114,7 +114,50 @@ pub fn specs() -> Vec<ToolSpec> {
                 "required": ["command"]
             }),
         },
+        ToolSpec {
+            name: "question".into(),
+            description: "Ask the user questions during execution: gather preferences, clarify ambiguous instructions, get decisions on implementation choices. A free-form answer is always available. If you recommend an option, put it first and add \"(Recommended)\" at the end of the label.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "type": "array",
+                        "description": "Questions to ask",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "question": {"type": "string", "description": "The question text"},
+                                "header": {"type": "string", "description": "Very short label, a few words"},
+                                "options": {
+                                    "type": "array",
+                                    "description": "Answer choices",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": {"type": "string"},
+                                            "description": {"type": "string"}
+                                        },
+                                        "required": ["label"]
+                                    }
+                                },
+                                "multiple": {"type": "boolean", "description": "Allow selecting more than one option"}
+                            },
+                            "required": ["question"]
+                        }
+                    }
+                },
+                "required": ["questions"]
+            }),
+        },
     ]
+}
+
+pub fn specs_core() -> Vec<ToolSpec> {
+    specs().into_iter().filter(|s| s.name != "subagent").collect()
+}
+
+pub fn specs_nested() -> Vec<ToolSpec> {
+    specs_core().into_iter().filter(|s| s.name != "question").collect()
 }
 
 pub fn detail(name: &str, args: &str) -> String {
@@ -130,6 +173,11 @@ pub fn detail(name: &str, args: &str) -> String {
             }
         }
         "bash" => v["command"].as_str().unwrap_or("").to_string(),
+        "question" => v["questions"][0]["question"]
+            .as_str()
+            .unwrap_or("")
+            .to_string(),
+        "subagent" => v["description"].as_str().unwrap_or("").to_string(),
         _ => {
             let d = args.lines().next().unwrap_or("").to_string();
             if d.chars().count() > 60 {

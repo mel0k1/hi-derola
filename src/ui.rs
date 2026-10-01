@@ -123,6 +123,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
         _ => {
             let title = match app.phase {
                 Phase::Waiting => "input · waiting",
+                Phase::Ask => "input · answer",
                 _ => "input",
             };
             let block = Block::new()
@@ -147,6 +148,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let hints = match app.phase {
         Phase::Waiting => "esc cancel",
+        Phase::Ask => "enter answer · esc skip",
         _ => "enter send · esc quit · /help",
     };
     let cols = Layout::horizontal([

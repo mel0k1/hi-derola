@@ -1,7 +1,8 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
+use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
@@ -178,9 +179,16 @@ pub async fn run(
                     }
                 }
             }
-            let out = match tools::execute(&call.name, &call.args, mcp.as_deref()).await {
-                Ok(o) => o,
-                Err(e) => format!("error: {e:#}"),
+            let out = if call.name == "question" {
+                match ask_user(&call.args, &tx).await {
+                    Ok(a) => a,
+                    Err(e) => format!("error: {e:#}"),
+                }
+            } else {
+                match tools::execute(&call.name, &call.args, mcp.as_deref()).await {
+                    Ok(o) => o,
+                    Err(e) => format!("error: {e:#}"),
+                }
             };
             let out = tools::budget(out, cfg.output_budget);
             let summary: String = out
@@ -195,6 +203,29 @@ pub async fn run(
             req.messages = msgs.clone();
         }
     }
+}
+
+async fn ask_user(args: &str, tx: &UnboundedSender<ApiEvent>) -> Result<String> {
+    let v: Value = serde_json::from_str(args).unwrap_or(Value::Null);
+    let qs = v["questions"].as_array().cloned().unwrap_or_default();
+    if qs.is_empty() {
+        bail!("question: no questions given");
+    }
+    let (otx, orx) = oneshot::channel();
+    tx.send(ApiEvent::Ask {
+        name: "question".into(),
+        args: args.to_string(),
+        rx: otx,
+    })
+    .map_err(|_| anyhow!("closed"))?;
+    let answer = orx.await.unwrap_or_default();
+    if answer.trim().is_empty() {
+        return Ok("The user dismissed this question.".into());
+    }
+    Ok(format!(
+        "User has answered your questions: {}. You can now continue with the user's answers in mind.",
+        answer.trim()
+    ))
 }
 
 async fn wrap_up(

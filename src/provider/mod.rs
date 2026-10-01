@@ -27,6 +27,7 @@ pub enum ApiEvent {
     Note(String),
     Tool { name: String, detail: String, diff: Vec<crate::diff::Row> },
     Confirm { name: String, args: String, rx: tokio::sync::oneshot::Sender<bool> },
+    Ask { name: String, args: String, rx: tokio::sync::oneshot::Sender<String> },
     Done { text: String, messages: Vec<Message> },
     Failed(String),
 }
