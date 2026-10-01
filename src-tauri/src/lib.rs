@@ -4,6 +4,7 @@ use hi_derola::chat::{Role, Session};
 use hi_derola::config::Config;
 use hi_derola::mcp::{self, McpClient};
 use hi_derola::provider::{self, ApiEvent, ChatRequest, Provider};
+use hi_derola::sessions::{self, SessionMeta, StoredSession};
 use hi_derola::{snapshot, tools};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,6 +16,9 @@ pub struct Shared {
     cfg: Mutex<Config>,
     provider: Mutex<Option<Arc<dyn Provider>>>,
     session: Mutex<Session>,
+    sid: Mutex<String>,
+    title: Mutex<String>,
+    created: Mutex<u64>,
     confirm: Mutex<Option<oneshot::Sender<bool>>>,
     inflight: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     tokens: Mutex<(u64, u64)>,
@@ -58,6 +62,32 @@ fn confirm_payload(name: &str, args: &str) -> Value {
     })
 }
 
+fn persist(sh: &Shared) {
+    let ses = sh.session.lock().unwrap();
+    if ses.messages.is_empty() {
+        return;
+    }
+    let st = StoredSession {
+        id: sh.sid.lock().unwrap().clone(),
+        title: sh.title.lock().unwrap().clone(),
+        created: *sh.created.lock().unwrap(),
+        updated: 0,
+        system: ses.system.clone(),
+        messages: ses.messages.clone(),
+    };
+    drop(ses);
+    let _ = sessions::save(&st);
+}
+
+fn emit_sessions(app: &AppHandle) {
+    let _ = app.emit("ev", json!({"t": "sessions", "list": sessions::list()}));
+}
+
+fn emit_attachments(sh: &Shared, app: &AppHandle) {
+    let list: Vec<String> = sh.attachments.lock().unwrap().iter().map(|(p, _)| p.clone()).collect();
+    let _ = app.emit("ev", json!({"t": "attachments", "list": list}));
+}
+
 fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Shared>) {
     tauri::async_runtime::spawn(async move {
         while let Some(ev) = rx.recv().await {
@@ -81,6 +111,8 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                 ApiEvent::Done { text, messages } => {
                     sh.session.lock().unwrap().messages = messages;
                     snapshot::end_turn();
+                    persist(&sh);
+                    emit_sessions(&app);
                     json!({"t": "done", "text": text})
                 }
                 ApiEvent::Failed(e) => {
@@ -88,9 +120,28 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     json!({"t": "failed", "s": e})
                 }
             };
+            if payload.get("t").and_then(|t| t.as_str()) == Some("note") {
+                if payload.get("s").and_then(|s| s.as_str()) == Some("") {
+                    continue;
+                }
+            }
             let _ = app.emit("ev", payload);
         }
     });
+}
+
+fn start_new(sh: &Shared, app: &AppHandle) {
+    persist(sh);
+    sh.session.lock().unwrap().clear();
+    sh.attachments.lock().unwrap().clear();
+    sh.allow_all.store(false, Ordering::Relaxed);
+    *sh.sid.lock().unwrap() = sessions::new_id();
+    *sh.title.lock().unwrap() = String::new();
+    *sh.created.lock().unwrap() = 0;
+    *sh.tokens.lock().unwrap() = (0, 0);
+    emit_sessions(app);
+    emit_attachments(sh, app);
+    let _ = app.emit("ev", json!({"t": "cleared"}));
 }
 
 #[tauri::command]
@@ -102,6 +153,10 @@ fn init(sh: State<'_, Arc<Shared>>) -> Value {
         "cwd": std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default(),
         "config_path": hi_derola::config::config_path().display().to_string(),
         "has_provider": sh.provider.lock().unwrap().is_some(),
+        "sessions": sessions::list(),
+        "sid": sh.sid.lock().unwrap().clone(),
+        "title": sh.title.lock().unwrap().clone(),
+        "theme": cfg.ui.theme.clone(),
     })
 }
 
@@ -117,10 +172,22 @@ fn save(sh: State<'_, Arc<Shared>>, app: AppHandle, cfg: Config) -> Result<Value
     cfg.save().map_err(|e| format!("{e:#}"))?;
     let model = cfg.provider.model.clone();
     let kind = cfg.provider.kind.clone();
+    let theme = cfg.ui.theme.clone();
     *sh.cfg.lock().unwrap() = cfg;
     *sh.provider.lock().unwrap() = p;
     let _ = app.emit("ev", json!({"t": "model", "name": model, "kind": kind}));
+    if let Some(t) = theme {
+        let _ = app.emit("ev", json!({"t": "theme", "name": t}));
+    }
     Ok(json!({"ok": true}))
+}
+
+#[tauri::command]
+fn set_theme(sh: State<'_, Arc<Shared>>, theme: String) -> Result<Value, String> {
+    let mut cfg = sh.cfg.lock().unwrap();
+    cfg.ui.theme = Some(theme.clone());
+    cfg.save().map_err(|e| format!("{e:#}"))?;
+    Ok(json!({"ok": true, "theme": theme}))
 }
 
 #[tauri::command]
@@ -190,6 +257,215 @@ fn redo(sh: State<'_, Arc<Shared>>) -> Option<String> {
     snapshot::redo()
 }
 
+fn transcript(msgs: &[hi_derola::chat::Message]) -> Vec<Value> {
+    let mut out = Vec::new();
+    for m in msgs {
+        match m.role {
+            Role::User => out.push(json!({"k": "user", "s": m.content})),
+            Role::Assistant => {
+                if !m.content.trim().is_empty() {
+                    out.push(json!({"k": "bot", "s": m.content}));
+                }
+                for c in &m.tool_calls {
+                    out.push(json!({"k": "tool", "s": format!("{} {}", c.name, c.args)}));
+                }
+            }
+            Role::Tool => {
+                if !m.content.trim().is_empty() {
+                    let head: String = m.content.lines().take(6).collect::<Vec<_>>().join("\n");
+                    out.push(json!({"k": "toolout", "s": head}));
+                }
+            }
+        }
+    }
+    out
+}
+
+#[tauri::command]
+fn list_sessions() -> Vec<SessionMeta> {
+    sessions::list()
+}
+
+#[tauri::command]
+fn new_session(sh: State<'_, Arc<Shared>>, app: AppHandle) {
+    start_new(&sh, &app);
+}
+
+#[tauri::command]
+fn open_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) -> Result<Value, String> {
+    if *sh.sid.lock().unwrap() != id {
+        persist(&sh);
+    }
+    let st = sessions::load(&id).map_err(|e| format!("{e:#}"))?;
+    *sh.session.lock().unwrap() = Session {
+        system: if st.system.trim().is_empty() {
+            system_prompt()
+        } else {
+            st.system.clone()
+        },
+        messages: st.messages.clone(),
+    };
+    *sh.sid.lock().unwrap() = st.id.clone();
+    *sh.title.lock().unwrap() = st.title.clone();
+    *sh.created.lock().unwrap() = st.created;
+    *sh.tokens.lock().unwrap() = (0, 0);
+    sh.attachments.lock().unwrap().clear();
+    sh.confirm.lock().unwrap().take();
+    emit_attachments(&sh, &app);
+    let _ = app.emit("ev", json!({"t": "usage", "input": 0, "output": 0}));
+    Ok(json!({
+        "id": st.id,
+        "title": st.title,
+        "created": st.created,
+        "updated": st.updated,
+        "transcript": transcript(&st.messages),
+    }))
+}
+
+#[tauri::command]
+fn delete_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) -> Result<Value, String> {
+    sessions::delete(&id).map_err(|e| format!("{e:#}"))?;
+    let current = { *sh.sid.lock().unwrap() == id };
+    if current {
+        sh.session.lock().unwrap().clear();
+        sh.attachments.lock().unwrap().clear();
+        sh.allow_all.store(false, Ordering::Relaxed);
+        *sh.sid.lock().unwrap() = sessions::new_id();
+        *sh.title.lock().unwrap() = String::new();
+        *sh.created.lock().unwrap() = 0;
+        let _ = app.emit("ev", json!({"t": "cleared"}));
+    }
+    emit_sessions(&app);
+    Ok(json!({"ok": true, "current": current}))
+}
+
+fn expand(p: &str) -> std::path::PathBuf {
+    if p == "~" {
+        return dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
+    }
+    if let Some(rest) = p.strip_prefix("~/") {
+        if let Some(h) = dirs::home_dir() {
+            return h.join(rest);
+        }
+    }
+    std::path::PathBuf::from(p)
+}
+
+#[tauri::command]
+fn list_dir(path: Option<String>) -> Result<Value, String> {
+    let target = match path.as_deref().map(str::trim) {
+        None | Some("") => std::env::current_dir().map_err(|e| e.to_string())?,
+        Some(p) if p.starts_with('~') => expand(p),
+        Some(p) => std::path::PathBuf::from(p),
+    };
+    let meta = std::fs::metadata(&target).map_err(|e| format!("{e}"))?;
+    if meta.is_file() {
+        return Err("not a directory".into());
+    }
+    let rd = std::fs::read_dir(&target).map_err(|e| format!("{e}"))?;
+    let mut entries: Vec<(String, bool, u64)> = Vec::new();
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let Ok(ft) = e.file_type() else { continue };
+        let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+        entries.push((name, ft.is_dir(), size));
+    }
+    entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+    entries.truncate(500);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let home = dirs::home_dir();
+    let mut display = target.display().to_string();
+    if let Some(h) = &home {
+        if let Some(rest) = display.strip_prefix(&h.display().to_string()) {
+            display = format!("~{rest}");
+        }
+    }
+    let mut cwd_display = cwd.display().to_string();
+    if let Some(h) = &home {
+        if let Some(rest) = cwd_display.strip_prefix(&h.display().to_string()) {
+            cwd_display = format!("~{rest}");
+        }
+    }
+    let parent = target.parent().map(|p| p.display().to_string());
+    Ok(json!({
+        "path": display,
+        "cwd": cwd_display,
+        "is_cwd": target == cwd,
+        "parent": parent,
+        "entries": entries.iter().map(|(n, d, s)| json!({"name": n, "dir": d, "size": s})).collect::<Vec<_>>(),
+    }))
+}
+
+const MAX_DIR_ENTRIES: usize = 400;
+
+fn dir_tree(root: &std::path::Path, depth: u8, counter: &mut usize) -> String {
+    let mut out = String::new();
+    let Ok(rd) = std::fs::read_dir(root) else {
+        return out;
+    };
+    let mut items: Vec<_> = rd.flatten().collect();
+    items.sort_by_key(|a| a.file_name());
+    for e in items {
+        if *counter >= MAX_DIR_ENTRIES {
+            out.push_str("  ...\n");
+            return out;
+        }
+        *counter += 1;
+        let Ok(ft) = e.file_type() else { continue };
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.starts_with('.') || matches!(name.as_str(), "node_modules" | "target" | ".git") {
+            continue;
+        }
+        if ft.is_dir() {
+            if depth == 0 {
+                out.push_str(&format!("  {name}/\n"));
+            }
+            if depth < 2 {
+                let sub = dir_tree(&e.path(), depth + 1, counter);
+                for line in sub.lines() {
+                    out.push_str(&format!("  {line}\n"));
+                }
+            }
+        } else {
+            out.push_str(&format!("  {name}\n"));
+        }
+    }
+    out
+}
+
+#[tauri::command]
+fn attach_path(sh: State<'_, Arc<Shared>>, app: AppHandle, path: String) -> Result<Value, String> {
+    let p = expand(path.trim());
+    let meta = std::fs::metadata(&p).map_err(|e| format!("{e}"))?;
+    if meta.is_dir() {
+        let mut counter = 0;
+        let mut tree = format!("[folder: {}]\n", p.display());
+        tree.push_str(&dir_tree(&p, 0, &mut counter));
+        if counter == 0 {
+            return Err("empty folder".into());
+        }
+        let label = format!("{}/ ({} entries)", p.display(), counter);
+        sh.attachments.lock().unwrap().push((label, tree));
+        emit_attachments(&sh, &app);
+        return Ok(json!({"ok": true, "kind": "folder", "entries": counter}));
+    }
+    let content = hi_derola::files::read_attach(&p.display().to_string()).map_err(|e| format!("{e:#}"))?;
+    let size = content.len();
+    sh.attachments.lock().unwrap().push((p.display().to_string(), content));
+    emit_attachments(&sh, &app);
+    Ok(json!({"ok": true, "kind": "file", "size": size}))
+}
+
+#[tauri::command]
+fn detach(sh: State<'_, Arc<Shared>>, app: AppHandle, index: usize) {
+    let mut at = sh.attachments.lock().unwrap();
+    if index < at.len() {
+        at.remove(index);
+    }
+    drop(at);
+    emit_attachments(&sh, &app);
+}
+
 fn note(s: impl Into<String>) -> Value {
     json!({"cmd": true, "note": s.into()})
 }
@@ -205,9 +481,7 @@ fn command(sh: &Shared, app: &AppHandle, line: &str) -> Value {
              mutations (write/edit/bash/mcp) ask for confirmation, allow all skips further asks",
         ),
         "/clear" | "/new" => {
-            sh.session.lock().unwrap().clear();
-            sh.attachments.lock().unwrap().clear();
-            sh.allow_all.store(false, Ordering::Relaxed);
+            start_new(sh, app);
             note("new session")
         }
         "/model" => {
@@ -235,7 +509,6 @@ fn command(sh: &Shared, app: &AppHandle, line: &str) -> Value {
             let cfg = sh.cfg.lock().unwrap().clone();
             let key = cfg.api_key().unwrap_or_default();
             let tx = sh.tx.clone();
-            let app2 = app.clone();
             tauri::async_runtime::spawn(async move {
                 let msg = match provider::list_models(&cfg.provider.kind, cfg.provider.base_url.as_deref(), &key).await {
                     Ok(list) if list.is_empty() => "no models found".into(),
@@ -243,7 +516,6 @@ fn command(sh: &Shared, app: &AppHandle, line: &str) -> Value {
                     Err(e) => format!("error: {e:#}"),
                 };
                 let _ = tx.send(ApiEvent::Note(msg));
-                let _ = app2;
             });
             note("fetching models...")
         }
@@ -255,6 +527,7 @@ fn command(sh: &Shared, app: &AppHandle, line: &str) -> Value {
                     Ok(content) => {
                         let size = content.len();
                         sh.attachments.lock().unwrap().push((arg.to_string(), content));
+                        emit_attachments(sh, app);
                         note(format!("attached {arg} ({size} bytes)"))
                     }
                     Err(e) => note(format!("error: {e:#}")),
@@ -289,11 +562,26 @@ fn send(sh: State<'_, Arc<Shared>>, app: AppHandle, text: String) -> Result<Valu
         at.clear();
     }
     composed.push_str(&text);
+    {
+        let mut title = sh.title.lock().unwrap();
+        if title.trim().is_empty() {
+            *title = sessions::title_from(&text);
+        }
+    }
+    if *sh.created.lock().unwrap() == 0 {
+        *sh.created.lock().unwrap() = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+    }
     let (system, messages) = {
         let mut ses = sh.session.lock().unwrap();
         ses.push(Role::User, composed);
         (ses.system.clone(), ses.messages.clone())
     };
+    persist(&sh);
+    emit_sessions(&app);
+    emit_attachments(&sh, &app);
     let cfg = sh.cfg.lock().unwrap().clone();
     let req = ChatRequest {
         system,
@@ -326,10 +614,30 @@ pub fn run() -> Result<()> {
             let provider = cfg
                 .api_key()
                 .and_then(|k| provider::build(&cfg.provider.kind, cfg.provider.base_url.clone(), k).ok());
+            let restore = sessions::latest();
+            let (sid, title, created, session) = match restore {
+                Some(st) => (
+                    st.id.clone(),
+                    st.title.clone(),
+                    st.created,
+                    Session {
+                        system: if st.system.trim().is_empty() {
+                            system_prompt()
+                        } else {
+                            st.system
+                        },
+                        messages: st.messages,
+                    },
+                ),
+                None => (sessions::new_id(), String::new(), 0, Session::new(system_prompt())),
+            };
             let sh = Arc::new(Shared {
                 cfg: Mutex::new(cfg),
                 provider: Mutex::new(provider),
-                session: Mutex::new(Session::new(system_prompt())),
+                session: Mutex::new(session),
+                sid: Mutex::new(sid),
+                title: Mutex::new(title),
+                created: Mutex::new(created),
                 confirm: Mutex::new(None),
                 inflight: Mutex::new(None),
                 tokens: Mutex::new((0, 0)),
@@ -352,7 +660,9 @@ pub fn run() -> Result<()> {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            init, save, send, confirm, allow_all, stop, list_models, mcp_reconnect, undo, redo
+            init, save, send, confirm, allow_all, stop, list_models, mcp_reconnect, undo, redo,
+            list_sessions, new_session, open_session, delete_session, list_dir, attach_path,
+            detach, set_theme
         ])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow!("{e}"))?;
