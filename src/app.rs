@@ -87,7 +87,7 @@ impl App {
         let cwd = std::env::current_dir()
             .map(|p| p.display().to_string())
             .unwrap_or_default();
-        let system = format!(
+        let mut system = format!(
             "You are hi-derola, a coding assistant running in the user's terminal.\n\
              Working directory: {cwd}\n\
              Be concise and practical. Use markdown for formatting.\n\n\
@@ -97,6 +97,11 @@ impl App {
              Prefer read_file before modifying a file. \
              write_file writes the complete file content."
         );
+        let agents = crate::agents_md();
+        if !agents.is_empty() {
+            system.push_str("\n\n");
+            system.push_str(&agents);
+        }
         let status = format!("{} · {}", provider.name(), model);
         Self {
             cfg,

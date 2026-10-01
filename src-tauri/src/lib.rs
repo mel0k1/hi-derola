@@ -32,7 +32,7 @@ fn system_prompt() -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_default();
-    format!(
+    let mut system = format!(
         "You are hi-derola, a coding assistant running on the user's machine.\n\
          Working directory: {cwd}\n\
          Be concise and practical. Use markdown for formatting.\n\n\
@@ -41,7 +41,13 @@ fn system_prompt() -> String {
          contents. Use glob and grep to locate code before reading. \
          Prefer read_file before modifying a file. \
          write_file writes the complete file content."
-    )
+    );
+    let agents = hi_derola::agents_md();
+    if !agents.is_empty() {
+        system.push_str("\n\n");
+        system.push_str(&agents);
+    }
+    system
 }
 
 fn diff_json(rows: Vec<hi_derola::diff::Row>) -> Value {
