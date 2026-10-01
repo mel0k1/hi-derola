@@ -1,0 +1,152 @@
+import { LineEdit, Button } from "std-widgets.slint";
+
+export struct MsgItem {
+    role: string,
+    text: string,
+}
+
+export component MainWindow inherits Window {
+    title: "Hi!Derola";
+    preferred-width: 960px;
+    preferred-height: 680px;
+    background: #0e1014;
+
+    in property <[MsgItem]> messages;
+    in property <string> status;
+    in property <bool> waiting;
+    in property <bool> confirming;
+    in property <string> confirm-name;
+    in property <string> confirm-detail;
+    in-out property <string> draft;
+
+    callback submit(string);
+    callback confirm(bool);
+    callback allow-all();
+    callback stop();
+
+    function role-color(role: string) -> color {
+        return role == "you" ? #e8ecf5
+             : role == "info" ? #6a737d
+             : role == "diff-add" ? #9ece6a
+             : role == "diff-del" ? #f7768e
+             : role == "diff-ctx" ? #565f89
+             : #c8d0e0;
+    }
+
+    VerticalLayout {
+        padding: 12px;
+        spacing: 10px;
+
+        HorizontalLayout {
+            spacing: 8px;
+            Text {
+                text: "Hi!Derola";
+                color: #7aa2f7;
+                font-size: 17px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+            Rectangle {}
+            Text {
+                text: root.status;
+                color: #6a737d;
+                font-size: 12px;
+                vertical-alignment: center;
+            }
+        }
+
+        Rectangle {
+            border-radius: 6px;
+            background: #12151c;
+            border-width: 1px;
+            border-color: #1d2330;
+            clip: true;
+
+            fl := Flickable {
+                viewport-width: self.width;
+                viewport-height: content.preferred-height + 20px;
+                changed viewport-height => {
+                    fl.viewport-y = Math.min(0, fl.height - fl.viewport-height);
+                }
+
+                content := VerticalLayout {
+                    padding: 10px;
+                    spacing: 6px;
+
+                    for m in root.messages: Text {
+                        text: m.text;
+                        color: root.role-color(m.role);
+                        font-size: m.role == "info" || m.role == "diff-add" || m.role == "diff-del" || m.role == "diff-ctx" ? 12px : 14px;
+                        wrap: word-wrap;
+                        horizontal-stretch: 1;
+                    }
+                }
+            }
+        }
+
+        if root.confirming: Rectangle {
+            background: #161a23;
+            border-radius: 6px;
+            border-width: 1px;
+            border-color: #2a3140;
+            height: 180px;
+
+            VerticalLayout {
+                padding: 10px;
+                spacing: 8px;
+
+                HorizontalLayout {
+                    spacing: 8px;
+                    Text {
+                        text: "confirm · " + root.confirm-name;
+                        color: #f7768e;
+                        font-size: 13px;
+                        font-weight: 700;
+                        vertical-alignment: center;
+                    }
+                    Rectangle {}
+                    Button { text: "allow all"; clicked => { root.allow-all(); } }
+                    Button { text: "skip"; clicked => { root.confirm(false); } }
+                    Button { text: "run"; clicked => { root.confirm(true); } }
+                }
+
+                Flickable {
+                    viewport-width: self.width;
+                    viewport-height: detail.preferred-height + 8px;
+
+                    detail := Text {
+                        text: root.confirm-detail;
+                        color: #9aa4b8;
+                        font-size: 12px;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+        }
+
+        HorizontalLayout {
+            spacing: 8px;
+            if !root.confirming: LineEdit {
+                text <=> root.draft;
+                placeholder-text: root.waiting ? "thinking..." : "ask hi-derola, /help for commands";
+                enabled: !root.waiting;
+                horizontal-stretch: 1;
+                accepted => {
+                    root.submit(self.text);
+                    self.text = "";
+                }
+            }
+            if !root.confirming && !root.waiting: Button {
+                text: "send";
+                clicked => {
+                    root.submit(root.draft);
+                    root.draft = "";
+                }
+            }
+            if !root.confirming && root.waiting: Button {
+                text: "stop";
+                clicked => { root.stop(); }
+            }
+        }
+    }
+}

@@ -134,3 +134,46 @@ pub fn render(src: &str) -> Vec<Line<'static>> {
     flush(&mut out, &mut cur, quote);
     out
 }
+
+pub fn plain(src: &str) -> String {
+    let mut opts = Options::empty();
+    opts.insert(Options::ENABLE_STRIKETHROUGH);
+    opts.insert(Options::ENABLE_TASKLISTS);
+    let mut out = String::new();
+    let mut lists: Vec<Option<u64>> = Vec::new();
+    for ev in Parser::new_ext(src, opts) {
+        match ev {
+            Event::Start(tag) => match tag {
+                Tag::CodeBlock(_) => out.push('\n'),
+                Tag::List(start) => lists.push(start),
+                Tag::Item => {
+                    let mut marker = "- ".to_string();
+                    if let Some(Some(c)) = lists.last_mut() {
+                        marker = format!("{c}. ");
+                        *c += 1;
+                    }
+                    out.push_str(&"  ".repeat(lists.len().saturating_sub(1)));
+                    out.push_str(&marker);
+                }
+                Tag::BlockQuote(_) => out.push_str("> "),
+                _ => {}
+            },
+            Event::End(tag) => match tag {
+                TagEnd::Paragraph | TagEnd::Heading(_) => out.push_str("\n\n"),
+                TagEnd::CodeBlock => out.push_str("\n\n"),
+                TagEnd::List(_) => {
+                    lists.pop();
+                }
+                TagEnd::Item => out.push('\n'),
+                _ => {}
+            },
+            Event::Text(t) => out.push_str(&t),
+            Event::Code(c) => out.push_str(&c),
+            Event::SoftBreak | Event::HardBreak => out.push('\n'),
+            Event::Rule => out.push_str("────────────\n\n"),
+            Event::TaskListMarker(done) => out.push_str(if done { "[x] " } else { "[ ] " }),
+            _ => {}
+        }
+    }
+    out.trim().to_string()
+}
