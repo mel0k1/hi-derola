@@ -25,6 +25,7 @@ pub struct Shared {
     attachments: Mutex<Vec<(String, String)>>,
     mcp: Mutex<Option<Arc<McpClient>>>,
     allow_all: Arc<AtomicBool>,
+    titled: AtomicBool,
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
@@ -95,6 +96,74 @@ fn emit_attachments(sh: &Shared, app: &AppHandle) {
     let _ = app.emit("ev", json!({"t": "attachments", "list": list}));
 }
 
+fn clip_chars(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
+}
+
+fn autotitle(app: &AppHandle, sh: &Arc<Shared>, msgs: &[hi_derola::chat::Message]) {
+    if msgs.len() < 2 {
+        return;
+    }
+    let Some(provider) = sh.provider.lock().unwrap().clone() else {
+        return;
+    };
+    if sh.titled.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let mut user_text = String::new();
+    let mut bot_text = String::new();
+    for m in msgs {
+        match m.role {
+            Role::User if user_text.is_empty() => user_text = m.content.clone(),
+            Role::Assistant if !m.content.trim().is_empty() && bot_text.is_empty() => {
+                bot_text = m.content.clone();
+            }
+            _ => {}
+        }
+        if !user_text.is_empty() && !bot_text.is_empty() {
+            break;
+        }
+    }
+    if user_text.trim().is_empty() {
+        return;
+    }
+    let cfg = sh.cfg.lock().unwrap().clone();
+    let req = ChatRequest {
+        system: "You generate short chat session titles. Reply with only the title: 2-6 words in the language of the message, no quotes, no trailing punctuation.".into(),
+        messages: vec![hi_derola::chat::Message::new(
+            Role::User,
+            format!(
+                "User message:\n{}\n\nAssistant reply:\n{}\n\nThe title is:",
+                clip_chars(&user_text, 600),
+                clip_chars(&bot_text, 400)
+            ),
+        )],
+        model: cfg.provider.model.clone(),
+        max_tokens: cfg.provider.max_tokens,
+        temperature: cfg.provider.temperature,
+        top_p: cfg.provider.top_p,
+        stream: false,
+        tools: Vec::new(),
+    };
+    let app2 = app.clone();
+    let sh2 = sh.clone();
+    tauri::async_runtime::spawn(async move {
+        let (btx, _brx) = mpsc::unbounded_channel();
+        let Ok(r) = provider.chat(&req, &btx).await else {
+            return;
+        };
+        let raw = r.text.lines().next().unwrap_or("").trim();
+        let raw = raw.trim_matches(|c| c == '"' || c == '\'');
+        let t: String = raw.chars().take(48).collect();
+        if t.trim().is_empty() {
+            return;
+        }
+        *sh2.title.lock().unwrap() = t;
+        persist(&sh2);
+        emit_sessions(&app2, &sh2);
+    });
+}
+
 fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Shared>) {
     tauri::async_runtime::spawn(async move {
         while let Some(ev) = rx.recv().await {
@@ -116,6 +185,7 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     json!({"t": "usage", "input": input, "output": output})
                 }
                 ApiEvent::Done { text, messages } => {
+                    autotitle(&app, &sh, &messages);
                     sh.session.lock().unwrap().messages = messages;
                     snapshot::end_turn();
                     persist(&sh);
@@ -142,6 +212,7 @@ fn start_new(sh: &Shared, app: &AppHandle) {
     sh.session.lock().unwrap().clear();
     sh.attachments.lock().unwrap().clear();
     sh.allow_all.store(false, Ordering::Relaxed);
+    sh.titled.store(false, Ordering::Relaxed);
     *sh.sid.lock().unwrap() = sessions::new_id();
     *sh.title.lock().unwrap() = String::new();
     *sh.created.lock().unwrap() = 0;
@@ -316,6 +387,7 @@ fn open_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) -> Resul
     *sh.title.lock().unwrap() = st.title.clone();
     *sh.created.lock().unwrap() = st.created;
     *sh.tokens.lock().unwrap() = (0, 0);
+    sh.titled.store(true, Ordering::Relaxed);
     sh.attachments.lock().unwrap().clear();
     sh.confirm.lock().unwrap().take();
     emit_attachments(&sh, &app);
@@ -336,6 +408,7 @@ fn delete_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) -> Res
         sh.session.lock().unwrap().clear();
         sh.attachments.lock().unwrap().clear();
         sh.allow_all.store(false, Ordering::Relaxed);
+        sh.titled.store(false, Ordering::Relaxed);
         *sh.sid.lock().unwrap() = sessions::new_id();
         *sh.title.lock().unwrap() = String::new();
         *sh.created.lock().unwrap() = 0;
@@ -683,6 +756,7 @@ pub fn run() -> Result<()> {
                 attachments: Mutex::new(Vec::new()),
                 mcp: Mutex::new(None),
                 allow_all: Arc::new(AtomicBool::new(false)),
+                titled: AtomicBool::new(restore.is_some()),
                 tx: tx.clone(),
             });
             let logs = tauri::async_runtime::block_on(async {

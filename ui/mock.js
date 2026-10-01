@@ -211,6 +211,14 @@
       saveState();
       emitSessions();
       emit({ t: "done", text: answer });
+      setTimeout(() => {
+        if (!s.autoTitled) {
+          s.autoTitled = true;
+          s.title = "Demo: " + titleFrom(text).split(" ").slice(0, 3).join(" ");
+          saveState();
+          emitSessions();
+        }
+      }, 600);
     })();
   }
 
