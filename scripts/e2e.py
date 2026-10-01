@@ -31,7 +31,8 @@ def make_crlf_file():
     return p
 
 
-SCENARIO = {"edit_done": False, "steer_started": False, "steer_done": False}
+SCENARIO = {"edit_done": False, "steer_started": False, "steer_done": False,
+            "ask_done": False, "fetch_done": False, "sub_done": False}
 
 
 def sse_response(handler, chunks):
@@ -59,12 +60,39 @@ class Mock(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def do_GET(self):
+        html = ("<html><head><style>.x{color:red}</style></head>"
+                "<body><h1>Page</h1><p>hello <b>fetch</b> &amp; bye</p>"
+                "<script>bad()</script></body></html>")
+        body = html.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         msgs = body.get("messages", [])
         last_user = next((m["content"] for m in reversed(msgs) if m["role"] == "user"), "")
         has_file_block = "[file: README.md]" in last_user
         tool_msgs = [m for m in msgs if m["role"] == "tool"]
+
+        def respond(chunks, handler=None):
+            handler = handler or self
+            if body.get("stream") is False:
+                data = json.dumps({"choices": [
+                    {"message": {"role": c.get("role", "assistant"), "content": c.get("content", "")},
+                     "finish_reason": "stop"} for c in chunks
+                ]})
+                raw = data.encode()
+                handler.send_response(200)
+                handler.send_header("Content-Type", "application/json")
+                handler.send_header("Content-Length", str(len(raw)))
+                handler.end_headers()
+                handler.wfile.write(raw)
+                return
+            sse_response(handler, chunks)
 
         if not SCENARIO["edit_done"]:
             check("mention block reached the model", has_file_block)
@@ -78,24 +106,67 @@ class Mock(BaseHTTPRequestHandler):
                 check("tolerant edit applied", tool_msgs[-1]["content"].startswith("edited app.txt"))
                 SCENARIO["edit_done"] = True
                 chunks = [{"role": "assistant", "content": "EDIT_OK"}]
-            sse_response(self, chunks)
-        elif not SCENARIO["steer_started"]:
+            respond(chunks)
+            return
+        if not SCENARIO["steer_started"] or not SCENARIO["steer_done"]:
             if last_user.endswith("start long task"):
                 SCENARIO["steer_started"] = True
                 time.sleep(1.5)
                 chunks = tool_call_chunks("bash", json.dumps({"command": "rm -rf /tmp/hiderola-e2e-nothing"}))
-                sse_response(self, chunks)
+                respond(chunks)
+            elif not SCENARIO["steer_done"]:
+                denied = any("denied by permissions" in m["content"] for m in tool_msgs)
+                check("permission deny reached the model", denied)
+                steered = "second" in last_user
+                check("steered message reached the model", steered)
+                SCENARIO["steer_done"] = True
+                respond([{"role": "assistant", "content": "STEER_DENY_OK"}])
             else:
-                sse_response(self, [{"role": "assistant", "content": "EDIT_OK"}])
-        elif not SCENARIO["steer_done"]:
-            denied = any("denied by permissions" in m["content"] for m in tool_msgs)
-            check("permission deny reached the model", denied)
-            steered = "second" in last_user
-            check("steered message reached the model", steered)
-            SCENARIO["steer_done"] = True
-            sse_response(self, [{"role": "assistant", "content": "STEER_DENY_OK"}])
-        else:
-            sse_response(self, [{"role": "assistant", "content": "STEER_DENY_OK"}])
+                respond([{"role": "assistant", "content": "EDIT_OK"}])
+            return
+        if not SCENARIO["ask_done"]:
+            answered = any("User has answered" in m["content"] for m in tool_msgs)
+            if answered:
+                SCENARIO["ask_done"] = True
+                chunks = [{"role": "assistant", "content": "ASK_OK"}]
+            else:
+                chunks = tool_call_chunks("question", json.dumps({
+                    "questions": [{
+                        "question": "Which color?",
+                        "header": "color",
+                        "options": [{"label": "red"}, {"label": "blue"}],
+                    }]
+                }))
+            respond(chunks)
+            return
+        if not SCENARIO["fetch_done"]:
+            fetched = any("hello **fetch**" in m["content"] for m in tool_msgs)
+            if fetched:
+                SCENARIO["fetch_done"] = True
+                chunks = [{"role": "assistant", "content": "FETCH_OK"}]
+            else:
+                chunks = tool_call_chunks("webfetch", json.dumps({
+                    "url": f"http://127.0.0.1:{PORT}/page"
+                }))
+            respond(chunks)
+            return
+        is_sub = bool(msgs) and msgs[0]["role"] == "system" and "subagent" in msgs[0]["content"]
+        if is_sub:
+            respond([{"role": "assistant", "content": "SUB_DONE: found 3 files"}])
+            return
+        if not SCENARIO["sub_done"]:
+            sub_result = any("SUB_DONE" in m["content"] for m in tool_msgs)
+            if sub_result:
+                SCENARIO["sub_done"] = True
+                chunks = [{"role": "assistant", "content": "SUBAGENT_OK"}]
+            else:
+                chunks = tool_call_chunks("subagent", json.dumps({
+                    "description": "explore",
+                    "prompt": "count files",
+                }))
+            respond(chunks)
+            return
+        respond([{"role": "assistant", "content": "SUBAGENT_OK"}])
 
 
 def strip(s):
@@ -136,7 +207,7 @@ def run_pty():
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
 
     out = ""
-    deadline = time.time() + 90
+    deadline = time.time() + 150
     sent = 0
     t_sent3 = 0.0
 
@@ -180,6 +251,30 @@ def run_pty():
             os.write(fd, b"\r")
             sent = 4
         elif sent == 4 and "STEER_DENY_OK" in plain:
+            time.sleep(0.3)
+            type_str("ask me")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            sent = 5
+        elif sent == 5 and "Which color?" in plain:
+            time.sleep(0.4)
+            type_str("blue")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            sent = 6
+        elif sent == 6 and "ASK_OK" in plain:
+            time.sleep(0.3)
+            type_str("fetch page")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            sent = 7
+        elif sent == 7 and "FETCH_OK" in plain:
+            time.sleep(0.3)
+            type_str("spawn sub")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            sent = 8
+        elif sent == 8 and "SUBAGENT_OK" in plain:
             break
     try:
         os.kill(pid, signal.SIGKILL)
@@ -210,7 +305,14 @@ check("queued note shown", "queued: will steer the current run" in plain)
 check("steer note shown", "steer: second" in plain)
 check("deny note shown", "denied by permissions" in plain)
 check("steer+deny answer rendered", "STEER_DENY_OK" in plain)
+check("question options rendered", "Which color?" in plain and "blue" in plain)
+check("question answered", "ASK_OK" in plain)
+check("webfetch markdown returned", "FETCH_OK" in plain)
+check("subagent ran and returned", "SUBAGENT_OK" in plain)
+check("subagent progress note", "subagent started: explore" in plain)
 
 shutil.rmtree(WORKDIR, ignore_errors=True)
+with open("/tmp/hiderola-e2e-log.txt", "w") as f:
+    f.write(raw)
 print("WORKDIR", WORKDIR)
 sys.exit(1 if failures else 0)

@@ -361,10 +361,14 @@ impl App {
         self.status = self.status_line();
     }
 
-    fn ask_key(&mut self, code: KeyCode) {
+    fn ask_key(&mut self, key: KeyEvent) {
+        let code = key.code;
         let Some(a) = self.ask.take() else {
             self.phase = Phase::Idle;
             return;
+        };
+        let mut restore = |app: &mut Self, a: AskCtx| {
+            app.ask = Some(a);
         };
         match code {
             KeyCode::Enter => {
@@ -377,15 +381,27 @@ impl App {
                 let _ = a.rx.send(String::new());
                 self.info("skipped");
             }
+            KeyCode::Backspace => {
+                self.input.pop();
+                restore(self, a);
+                return;
+            }
             KeyCode::Char(c @ '1'..='9')
-                if self.input.is_empty() && key_seq(c) < a.opts.len() =>
+                if self.input.is_empty() && key.modifiers.is_empty() && key_seq(c) < a.opts.len() =>
             {
                 let label = a.opts[key_seq(c)].clone();
                 self.info(format!("answered: {label}"));
                 let _ = a.rx.send(label);
             }
+            KeyCode::Char(c)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                self.input.push(c);
+                restore(self, a);
+                return;
+            }
             _ => {
-                self.ask = Some(a);
+                restore(self, a);
                 return;
             }
         }
@@ -408,7 +424,7 @@ impl App {
                 return;
             }
             Phase::Ask => {
-                self.ask_key(key.code);
+                self.ask_key(key);
                 return;
             }
             Phase::Waiting => {
