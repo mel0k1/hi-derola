@@ -132,6 +132,7 @@ pub fn glob(root: &str, pattern: &str) -> Result<Vec<String>> {
     if !std::path::Path::new(root).is_dir() {
         bail!("glob: not a directory: {root}");
     }
+    let root = &crate::files::norm(root);
     let pats = expand_braces(pattern);
     let mut files = Vec::new();
     crate::files::walk_files(root, 0, &mut files);
@@ -151,6 +152,7 @@ pub fn glob(root: &str, pattern: &str) -> Result<Vec<String>> {
 }
 
 pub fn grep(root: &str, pattern: &str, include: Option<&str>) -> Result<Vec<GrepHit>> {
+    let root = &crate::files::norm(root);
     let re = regex::Regex::new(pattern).map_err(|e| anyhow::anyhow!("grep: {e}"))?;
     let mut files = Vec::new();
     crate::files::walk_files(root, 0, &mut files);

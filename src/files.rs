@@ -28,6 +28,14 @@ pub fn apply(block: &WriteBlock) -> Result<usize> {
     Ok(block.content.lines().count())
 }
 
+pub fn norm(p: &str) -> String {
+    if std::path::MAIN_SEPARATOR == '/' {
+        p.to_string()
+    } else {
+        p.replace(std::path::MAIN_SEPARATOR, "/")
+    }
+}
+
 const MAX_WALK: usize = 4000;
 const MAX_DEPTH: usize = 8;
 
@@ -52,11 +60,7 @@ pub fn walk_files(dir: &str, depth: usize, out: &mut Vec<String>) {
         if path.is_dir() {
             walk_files(&path.display().to_string(), depth + 1, out);
         } else if path.is_file() {
-            let mut display = path.display().to_string();
-            if std::path::MAIN_SEPARATOR != '/' {
-                display = display.replace(std::path::MAIN_SEPARATOR, "/");
-            }
-            out.push(display);
+            out.push(norm(&path.display().to_string()));
         }
     }
 }

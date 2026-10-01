@@ -85,7 +85,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "bash".into(),
-            description: "Run a shell command and return stdout/stderr combined, with the exit code on failure.".into(),
+            description: "Run a shell command (sh on unix, cmd on Windows) and return stdout/stderr combined, with the exit code on failure.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -274,9 +274,12 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
             let Some(cmd) = v["command"].as_str() else {
                 bail!("bash: command required");
             };
-            let out =
-                tokio::time::timeout(BASH_TIMEOUT, tokio::process::Command::new("sh").arg("-c").arg(cmd).output())
-                    .await;
+            let (prog, flag) = shell();
+            let out = tokio::time::timeout(
+                BASH_TIMEOUT,
+                tokio::process::Command::new(prog).arg(flag).arg(cmd).output(),
+            )
+            .await;
             match out {
                 Err(_) => Ok("command timed out (120s)".into()),
                 Ok(res) => {
@@ -314,6 +317,20 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
     }
 }
 
+#[cfg(windows)]
+fn shell() -> (&'static str, &'static str) {
+    ("cmd", "/C")
+}
+
+#[cfg(not(windows))]
+fn shell() -> (&'static str, &'static str) {
+    ("sh", "-c")
+}
+
+fn norm(p: &str) -> String {
+    crate::files::norm(p)
+}
+
 fn walk(dir: &str, depth: usize, out: &mut Vec<String>) {
     if depth > 3 || out.len() >= MAX_LIST {
         return;
@@ -332,7 +349,7 @@ fn walk(dir: &str, depth: usize, out: &mut Vec<String>) {
             continue;
         }
         let path = e.path();
-        let display = path.display().to_string();
+        let display = norm(&path.display().to_string());
         if path.is_dir() {
             out.push(format!("{display}/"));
             walk(&display, depth + 1, out);
