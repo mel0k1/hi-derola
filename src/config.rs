@@ -38,11 +38,18 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpConfig {
     pub name: String,
+    #[serde(default)]
+    pub r#type: Option<String>,
+    #[serde(default)]
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
 }
 
 pub fn config_path() -> PathBuf {

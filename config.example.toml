@@ -24,8 +24,16 @@ stream = true
 # temperature = 0.7
 # top_p = 0.9
 
-# mcp servers (stdio), tools exposed as mcp__<name>__<tool>, calls ask y/n/a
+# mcp servers, tools exposed as mcp__<name>__<tool>, calls ask y/n/a
+# local server over stdio
 # [[mcp]]
 # name = "fs"
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+# remote server over streamable http
+# [[mcp]]
+# name = "search"
+# type = "remote"
+# url = "https://example.com/mcp"
+# headers = { Authorization = "Bearer ..." }
