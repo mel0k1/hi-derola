@@ -8,6 +8,7 @@ mod md;
 mod mcp;
 mod provider;
 mod search;
+mod snapshot;
 mod tools;
 mod ui;
 

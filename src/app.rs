@@ -67,7 +67,11 @@ pub struct App {
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
-const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /clear         start new session\n  /quit          exit\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/list/bash + mcp servers, mutations ask y/n/a";
+const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /clear         start new session\n  /quit          exit\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/list/glob/grep/bash + mcp servers, mutations ask y/n/a";
+
+pub fn help_text() -> &'static str {
+    HELP
+}
 
 fn fmt_tokens(n: u64) -> String {
     if n < 1000 {
@@ -87,8 +91,10 @@ impl App {
             "You are hi-derola, a coding assistant running in the user's terminal.\n\
              Working directory: {cwd}\n\
              Be concise and practical. Use markdown for formatting.\n\n\
-             Use the provided tools to work with files and run commands instead of printing \
-             code fences with file contents. Prefer read_file before modifying a file. \
+             Use the provided tools (read_file, write_file, edit, glob, grep, list_files, bash) \
+             to work with files and run commands instead of printing code fences with file \
+             contents. Use glob and grep to locate code before reading. \
+             Prefer read_file before modifying a file. \
              write_file writes the complete file content."
         );
         let status = format!("{} · {}", provider.name(), model);
@@ -213,12 +219,14 @@ impl App {
                 self.phase = Phase::Idle;
                 self.streaming = None;
                 self.reasoning = None;
+                crate::snapshot::end_turn();
             }
             ApiEvent::Failed(e) => {
                 self.info(format!("error: {e}"));
                 self.phase = Phase::Idle;
                 self.streaming = None;
                 self.reasoning = None;
+                crate::snapshot::end_turn();
             }
         }
         self.status = self.status_line();
@@ -231,6 +239,7 @@ impl App {
         self.reasoning = None;
         self.info("cancelled");
         self.status = self.status_line();
+        crate::snapshot::end_turn();
     }
 
     fn status_line(&self) -> String {
@@ -397,6 +406,7 @@ impl App {
         self.scroll_up = 0;
         self.phase = Phase::Waiting;
         self.status = self.status_line();
+        crate::snapshot::begin_turn();
 
         let provider = self.provider.clone();
         let tx = self.tx.clone();
@@ -464,6 +474,14 @@ impl App {
                         Err(e) => self.info(format!("error: {e:#}")),
                     }
                 }
+            }
+            "/undo" | "/u" => match crate::snapshot::undo() {
+                Some(s) => self.info(s),
+                None => self.info("nothing to undo"),
+            },
+            "/redo" => match crate::snapshot::redo() {
+                Some(s) => self.info(s),
+                None => self.info("nothing to redo"),
             }
             _ => self.info(format!("unknown command: {cmd}, try /help")),
         }
