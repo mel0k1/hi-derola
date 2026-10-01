@@ -69,12 +69,14 @@ max_rounds = 15
 output_budget = 32768
 
 # tool permissions: allow | ask | deny
-# missing tool defaults to: write_file/edit/bash/mcp ask, read-only tools allow
+# missing tool defaults to: write_file/edit/bash/mcp ask, read-only tools (incl. webfetch/subagent) allow
 [permissions]
 # edit = "ask"
 # write_file = "ask"
 # bash = "ask"
 # mcp = "ask"
+# webfetch = "ask"
+# subagent = "ask"
 
 # wildcard rules, first match wins
 # pattern matches the command for bash, the path for edit/write_file, the tool name for mcp

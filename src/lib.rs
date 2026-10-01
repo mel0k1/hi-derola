@@ -14,6 +14,7 @@ pub mod sessions;
 pub mod snapshot;
 pub mod tools;
 pub mod ui;
+pub mod web;
 
 const MAX_AGENTS_MD: usize = 16 * 1024;
 

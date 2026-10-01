@@ -26,6 +26,10 @@ pub struct PermCfg {
     #[serde(default)]
     pub mcp: Option<String>,
     #[serde(default)]
+    pub webfetch: Option<String>,
+    #[serde(default)]
+    pub subagent: Option<String>,
+    #[serde(default)]
     pub rules: Vec<PermRule>,
 }
 
@@ -46,6 +50,8 @@ impl PermCfg {
             "write_file" => self.write_file.as_deref(),
             "bash" => self.bash.as_deref(),
             "mcp" => self.mcp.as_deref(),
+            "webfetch" => self.webfetch.as_deref(),
+            "subagent" => self.subagent.as_deref(),
             _ => None,
         };
         match field {
@@ -68,6 +74,12 @@ fn split_tool(tool: &str, args: &str) -> (String, String) {
                 .or_else(|| v["command"].as_str())
                 .unwrap_or("")
                 .to_string();
+            (tool.to_string(), subject)
+        }
+        "webfetch" => {
+            let v: serde_json::Value =
+                serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
+            let subject = v["url"].as_str().unwrap_or("").to_string();
             (tool.to_string(), subject)
         }
         other => (other.to_string(), String::new()),
@@ -185,6 +197,37 @@ mod tests {
         };
         assert_eq!(mcp_rule.check("mcp__fs__write", "{}"), Perm::Deny);
         assert_eq!(mcp_rule.check("mcp__web__get", "{}"), Perm::Ask);
+
+        let wf = PermCfg {
+            webfetch: Some("deny".into()),
+            ..Default::default()
+        };
+        assert_eq!(wf.check("webfetch", r#"{"url":"https://x"}"#), Perm::Deny);
+        assert_eq!(PermCfg::default().check("webfetch", r#"{"url":"https://x"}"#), Perm::Allow);
+        assert_eq!(
+            PermCfg::default().check("webfetch", r#"{"url":"https://evil.com"}"#),
+            Perm::Allow
+        );
+
+        let wf_rule = PermCfg {
+            rules: vec![PermRule {
+                tool: "webfetch".into(),
+                pattern: Some("https://evil.com/*".into()),
+                permission: "deny".into(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            wf_rule.check("webfetch", r#"{"url":"https://evil.com/x"}"#),
+            Perm::Deny
+        );
+
+        let sa = PermCfg {
+            subagent: Some("ask".into()),
+            ..Default::default()
+        };
+        assert_eq!(sa.check("subagent", r#"{"description":"d"}"#), Perm::Ask);
+        assert_eq!(PermCfg::default().check("subagent", "{}"), Perm::Allow);
     }
 
     #[test]

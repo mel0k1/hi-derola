@@ -115,6 +115,19 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "webfetch".into(),
+            description: "Fetch content from an HTTP or HTTPS URL. HTML pages are converted to markdown, textual content types are returned as-is. Read-only.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The HTTP or HTTPS URL to fetch"},
+                    "format": {"type": "string", "enum": ["markdown", "text", "html"], "description": "Output format for HTML pages, default markdown"},
+                    "timeout": {"type": "integer", "description": "Timeout in seconds, default 30, max 120"}
+                },
+                "required": ["url"]
+            }),
+        },
+        ToolSpec {
             name: "question".into(),
             description: "Ask the user questions during execution: gather preferences, clarify ambiguous instructions, get decisions on implementation choices. A free-form answer is always available. If you recommend an option, put it first and add \"(Recommended)\" at the end of the label.".into(),
             parameters: json!({
@@ -173,6 +186,7 @@ pub fn detail(name: &str, args: &str) -> String {
             }
         }
         "bash" => v["command"].as_str().unwrap_or("").to_string(),
+        "webfetch" => v["url"].as_str().unwrap_or("").to_string(),
         "question" => v["questions"][0]["question"]
             .as_str()
             .unwrap_or("")
@@ -330,6 +344,14 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
                 s.push_str(&format!("\n  Line {}: {}", h.line, h.text));
             }
             Ok(s)
+        }
+        "webfetch" => {
+            let Some(url) = v["url"].as_str() else {
+                bail!("webfetch: url required");
+            };
+            let format = v["format"].as_str().unwrap_or("markdown");
+            let timeout = v["timeout"].as_u64().unwrap_or(30);
+            crate::web::fetch_markdown(url, format, timeout).await
         }
         "bash" => {
             let Some(cmd) = v["command"].as_str() else {
