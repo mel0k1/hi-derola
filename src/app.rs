@@ -552,6 +552,7 @@ impl App {
             max_rounds: self.cfg.agent.max_rounds,
             output_budget: self.cfg.agent.output_budget,
             perm: self.cfg.permissions.clone(),
+            nested: false,
         };
         let req = ChatRequest {
             system: self.session.system.clone(),

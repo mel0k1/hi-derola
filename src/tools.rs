@@ -162,6 +162,18 @@ pub fn specs() -> Vec<ToolSpec> {
                 "required": ["questions"]
             }),
         },
+        ToolSpec {
+            name: "subagent".into(),
+            description: "Spawns a subagent in a fresh context to work on the task and returns its final response. Include all relevant context and instructions in the prompt: the subagent starts with no history. Use for isolated research, exploration or bulk changes. Cannot ask the user questions.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "description": {"type": "string", "description": "A short 3-5 word label for the task, displayed to the user"},
+                    "prompt": {"type": "string", "description": "The task for the subagent to perform"}
+                },
+                "required": ["description", "prompt"]
+            }),
+        },
     ]
 }
 

@@ -11,11 +11,13 @@ use crate::mcp::McpClient;
 use crate::provider::{ApiEvent, ChatRequest, Provider};
 use crate::tools;
 
+#[derive(Clone)]
 pub struct AgentCfg {
     pub context_limit: u64,
     pub max_rounds: usize,
     pub output_budget: usize,
     pub perm: crate::perm::PermCfg,
+    pub nested: bool,
 }
 
 impl Default for AgentCfg {
@@ -25,6 +27,7 @@ impl Default for AgentCfg {
             max_rounds: 15,
             output_budget: 32 * 1024,
             perm: Default::default(),
+            nested: false,
         }
     }
 }
@@ -55,7 +58,11 @@ pub async fn run(
     queue: Arc<Mutex<Vec<String>>>,
     cfg: AgentCfg,
 ) -> Result<()> {
-    let mut specs = tools::specs();
+    let mut specs = if cfg.nested {
+        tools::specs_nested()
+    } else {
+        tools::specs()
+    };
     if let Some(m) = &mcp {
         specs.extend(m.specs().await);
     }
@@ -184,6 +191,46 @@ pub async fn run(
                     Ok(a) => a,
                     Err(e) => format!("error: {e:#}"),
                 }
+            } else if call.name == "subagent" {
+                let v: Value = serde_json::from_str(&call.args).unwrap_or(Value::Null);
+                let prompt = v["prompt"].as_str().unwrap_or("").to_string();
+                let desc = v["description"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string();
+                if prompt.is_empty() {
+                    "error: subagent: prompt required".to_string()
+                } else if cfg.nested {
+                    "error: nested subagents are not allowed".to_string()
+                } else {
+                    let sub_req = ChatRequest {
+                        system: subagent_system(),
+                        messages: vec![Message::new(Role::User, prompt)],
+                        model: req.model.clone(),
+                        max_tokens: req.max_tokens,
+                        temperature: req.temperature,
+                        top_p: req.top_p,
+                        stream: false,
+                        tools: Vec::new(),
+                    };
+                    let _ = tx.send(ApiEvent::Note(format!("subagent started: {desc}")));
+                    match run_subagent(
+                        provider.clone(),
+                        sub_req,
+                        cfg.clone(),
+                        allow_all.clone(),
+                        &tx,
+                        mcp.clone(),
+                    )
+                    .await
+                    {
+                        Ok(t) => {
+                            let _ = tx.send(ApiEvent::Note(format!("subagent done: {desc}")));
+                            t
+                        }
+                        Err(e) => format!("error: subagent failed: {e:#}"),
+                    }
+                }
             } else {
                 match tools::execute(&call.name, &call.args, mcp.as_deref()).await {
                     Ok(o) => o,
@@ -226,6 +273,68 @@ async fn ask_user(args: &str, tx: &UnboundedSender<ApiEvent>) -> Result<String> 
         "User has answered your questions: {}. You can now continue with the user's answers in mind.",
         answer.trim()
     ))
+}
+
+pub fn subagent_system() -> String {
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    format!(
+        "You are a focused subagent of hi-derola working in the user's working directory: {cwd}\n\
+         Complete the given task autonomously using the available tools. \
+         The final message is returned to the parent agent as the tool result, so make it a \
+         complete summary: what was done, files changed, key results, anything the parent must know. \
+         The user cannot see this conversation and cannot answer questions: do not ask."
+    )
+}
+
+async fn run_subagent(
+    provider: Arc<dyn Provider>,
+    req: ChatRequest,
+    cfg: AgentCfg,
+    allow_all: Arc<AtomicBool>,
+    tx: &UnboundedSender<ApiEvent>,
+    mcp: Option<Arc<McpClient>>,
+) -> Result<String> {
+    let (stx, mut srx) = tokio::sync::mpsc::unbounded_channel();
+    let fwd_tx = tx.clone();
+    let result: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let r2 = result.clone();
+    let fwd = tokio::spawn(async move {
+        while let Some(ev) = srx.recv().await {
+            match ev {
+                ApiEvent::Done { text, .. } => *r2.lock().unwrap() = Some(text),
+                ApiEvent::Note(_)
+                | ApiEvent::Tool { .. }
+                | ApiEvent::Confirm { .. }
+                | ApiEvent::Usage { .. }
+                | ApiEvent::Failed(_) => {
+                    let _ = fwd_tx.send(ev);
+                }
+                _ => {}
+            }
+        }
+    });
+    let sub_cfg = AgentCfg {
+        nested: true,
+        ..cfg
+    };
+    let res = Box::pin(run(
+        provider,
+        req,
+        stx,
+        allow_all,
+        mcp,
+        Arc::new(Mutex::new(Vec::new())),
+        sub_cfg,
+    ))
+    .await;
+    fwd.abort();
+    res?;
+    let text = result.lock().unwrap().take();
+    Ok(
+        text.unwrap_or_else(|| "(subagent finished without a final message)".into()),
+    )
 }
 
 async fn wrap_up(
