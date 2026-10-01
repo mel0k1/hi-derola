@@ -7,6 +7,7 @@ mod files;
 mod md;
 mod mcp;
 mod provider;
+mod search;
 mod tools;
 mod ui;
 

@@ -59,6 +59,31 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "glob".into(),
+            description: "Find files by glob pattern. Returns up to 100 paths.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Glob pattern, e.g. **/*.rs, supports **, *, ?, [class], {a,b}"},
+                    "path": {"type": "string", "description": "Directory to search, defaults to the working directory"}
+                },
+                "required": ["pattern"]
+            }),
+        },
+        ToolSpec {
+            name: "grep".into(),
+            description: "Search file contents with a regular expression. Returns up to 100 matches grouped by file.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Regular expression to search for"},
+                    "path": {"type": "string", "description": "Directory to search, defaults to the working directory"},
+                    "include": {"type": "string", "description": "Optional glob filter for file names, e.g. *.ts or *.{h,cpp}"}
+                },
+                "required": ["pattern"]
+            }),
+        },
+        ToolSpec {
             name: "bash".into(),
             description: "Run a shell command and return stdout/stderr combined, with the exit code on failure.".into(),
             parameters: json!({
@@ -81,6 +106,13 @@ pub fn detail(name: &str, args: &str) -> String {
     let d = match name {
         "read_file" | "write_file" | "edit" => v["path"].as_str().unwrap_or("").to_string(),
         "list_files" => v["path"].as_str().unwrap_or(".").to_string(),
+        "glob" | "grep" => {
+            let p = v["pattern"].as_str().unwrap_or("").to_string();
+            match v["include"].as_str() {
+                Some(i) => format!("{p} ({i})"),
+                None => p,
+            }
+        }
         "bash" => v["command"].as_str().unwrap_or("").to_string(),
         _ => {
             let d = args.lines().next().unwrap_or("").to_string();
@@ -196,6 +228,45 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
             let mut s = out.join("\n");
             if out.len() >= MAX_LIST {
                 s.push_str(&format!("\n... truncated at {MAX_LIST} entries"));
+            }
+            Ok(s)
+        }
+        "glob" => {
+            let Some(pattern) = v["pattern"].as_str() else {
+                bail!("glob: pattern required");
+            };
+            let dir = v["path"].as_str().unwrap_or(".");
+            let files = crate::search::glob(dir, pattern)?;
+            if files.is_empty() {
+                return Ok(format!("{pattern}: no files found"));
+            }
+            let mut s = files.join("\n");
+            if files.len() >= crate::search::MAX_RESULTS {
+                s.push_str(&format!("\n... truncated at {} results", crate::search::MAX_RESULTS));
+            }
+            Ok(s)
+        }
+        "grep" => {
+            let Some(pattern) = v["pattern"].as_str() else {
+                bail!("grep: pattern required");
+            };
+            let dir = v["path"].as_str().unwrap_or(".");
+            let include = v["include"].as_str();
+            let hits = crate::search::grep(dir, pattern, include)?;
+            if hits.is_empty() {
+                return Ok(format!("{pattern}: no matches"));
+            }
+            let mut s = format!("Found {} matches", hits.len());
+            if hits.len() >= crate::search::MAX_RESULTS {
+                s.push_str(" (more matches available)");
+            }
+            let mut cur = String::new();
+            for h in hits {
+                if h.path != cur {
+                    cur = h.path.clone();
+                    s.push_str(&format!("\n{cur}:"));
+                }
+                s.push_str(&format!("\n  Line {}: {}", h.line, h.text));
             }
             Ok(s)
         }

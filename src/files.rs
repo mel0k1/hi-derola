@@ -27,3 +27,36 @@ pub fn apply(block: &WriteBlock) -> Result<usize> {
     std::fs::write(path, &block.content).map_err(|e| anyhow::anyhow!("{}: {e}", block.path))?;
     Ok(block.content.lines().count())
 }
+
+const MAX_WALK: usize = 4000;
+const MAX_DEPTH: usize = 8;
+
+pub fn walk_files(dir: &str, depth: usize, out: &mut Vec<String>) {
+    if depth > MAX_DEPTH || out.len() >= MAX_WALK {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).collect();
+    entries.sort_by_key(|e| e.file_name());
+    for e in entries {
+        if out.len() >= MAX_WALK {
+            return;
+        }
+        let name = e.file_name().to_string_lossy().to_string();
+        if matches!(name.as_str(), ".git" | "target" | "node_modules") {
+            continue;
+        }
+        let path = e.path();
+        if path.is_dir() {
+            walk_files(&path.display().to_string(), depth + 1, out);
+        } else if path.is_file() {
+            let mut display = path.display().to_string();
+            if std::path::MAIN_SEPARATOR != '/' {
+                display = display.replace(std::path::MAIN_SEPARATOR, "/");
+            }
+            out.push(display);
+        }
+    }
+}
