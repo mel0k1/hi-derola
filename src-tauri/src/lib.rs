@@ -404,6 +404,19 @@ fn list_dir(path: Option<String>) -> Result<Value, String> {
 
 const MAX_DIR_ENTRIES: usize = 400;
 
+#[tauri::command]
+fn list_project_files() -> Vec<String> {
+    let mut out = Vec::new();
+    hi_derola::files::walk_files(".", 0, &mut out);
+    out.sort();
+    out.into_iter()
+        .map(|p| {
+            let p = p.trim_start_matches("./");
+            hi_derola::files::norm(p)
+        })
+        .collect()
+}
+
 fn dir_tree(root: &std::path::Path, depth: u8, counter: &mut usize) -> String {
     let mut out = String::new();
     let Ok(rd) = std::fs::read_dir(root) else {
@@ -567,7 +580,22 @@ fn send(sh: State<'_, Arc<Shared>>, app: AppHandle, text: String) -> Result<Valu
         }
         at.clear();
     }
+    let (mention_blocks, mention_ok, mention_miss) = hi_derola::files::mentions(&text);
+    composed.push_str(&mention_blocks);
     composed.push_str(&text);
+    if !mention_ok.is_empty() || !mention_miss.is_empty() {
+        let mut note_line = String::new();
+        if !mention_ok.is_empty() {
+            note_line.push_str(&format!("@mentions attached: {}", mention_ok.join(", ")));
+        }
+        if !mention_miss.is_empty() {
+            if !note_line.is_empty() {
+                note_line.push_str(" · ");
+            }
+            note_line.push_str(&format!("not found: {}", mention_miss.join(", ")));
+        }
+        let _ = sh.tx.send(ApiEvent::Note(note_line));
+    }
     {
         let mut title = sh.title.lock().unwrap();
         if title.trim().is_empty() {
@@ -673,7 +701,7 @@ pub fn run() -> Result<()> {
         .invoke_handler(tauri::generate_handler![
             init, save, send, confirm, allow_all, stop, list_models, mcp_reconnect, undo, redo,
             list_sessions, new_session, open_session, delete_session, list_dir, attach_path,
-            detach, set_theme
+            detach, set_theme, list_project_files
         ])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow!("{e}"))?;

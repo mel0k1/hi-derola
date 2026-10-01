@@ -365,6 +365,17 @@
     async mcp_reconnect() {
       return ["mcp: no servers configured"];
     },
+    async list_project_files() {
+      const out = [];
+      const walk = (n, prefix) => {
+        for (const k of Object.keys(n).sort()) {
+          if (typeof n[k] === "string") out.push(prefix + k);
+          else walk(n[k], prefix + k + "/");
+        }
+      };
+      walk(FS.home.z.demo, "");
+      return out;
+    },
     async list_dir({ path }) {
       const raw = path ? path : display(absDir());
       const target = resolve(raw);

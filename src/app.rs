@@ -401,6 +401,8 @@ impl App {
         for (path, content) in &self.attachments {
             composed.push_str(&format!("[file: {path}]\n{content}\n\n"));
         }
+        let (mention_blocks, mention_ok, mention_miss) = files::mentions(&text);
+        composed.push_str(&mention_blocks);
         composed.push_str(&text);
         self.attachments.clear();
         self.input.clear();
@@ -409,6 +411,19 @@ impl App {
             kind: Kind::You,
             text,
         });
+        if !mention_ok.is_empty() || !mention_miss.is_empty() {
+            let mut line = String::new();
+            if !mention_ok.is_empty() {
+                line.push_str(&format!("@mentions attached: {}", mention_ok.join(", ")));
+            }
+            if !mention_miss.is_empty() {
+                if !line.is_empty() {
+                    line.push_str(" · ");
+                }
+                line.push_str(&format!("not found: {}", mention_miss.join(", ")));
+            }
+            self.info(line);
+        }
         self.scroll_up = 0;
         self.phase = Phase::Waiting;
         self.status = self.status_line();

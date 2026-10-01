@@ -632,6 +632,7 @@ async function doSend() {
   const input = $("input");
   const text = input.value.trim();
   if (!text || waiting || confirmOpen || settingsOpen || filesOpen) return;
+  hideMention();
   input.value = "";
   autosize();
   clearWelcome();
@@ -949,7 +950,89 @@ function autosize() {
   input.style.height = Math.min(input.scrollHeight, 220) + "px";
 }
 
-$("input").addEventListener("input", autosize);
+/* file mentions */
+
+let MFILES = null;
+let mention = null;
+let mentionSeq = 0;
+
+function mentionToken() {
+  const input = $("input");
+  const pos = input.selectionStart;
+  const before = input.value.slice(0, pos);
+  const m = before.match(/(?:^|\s)@([^\s@]*)$/);
+  if (!m) return null;
+  return { query: m[1], from: pos - m[1].length - 1, to: pos };
+}
+
+function showMention() {
+  const t = mentionToken();
+  const seq = ++mentionSeq;
+  if (!t) {
+    hideMention();
+    return;
+  }
+  const proceed = async () => {
+    if (!MFILES) {
+      MFILES = await invoke("list_project_files").catch(() => []);
+      if (MFILES.length > 800) MFILES.length = 800;
+    }
+    if (seq !== mentionSeq) return;
+    const q = t.query.toLowerCase();
+    const pool = q ? MFILES.filter((f) => f.toLowerCase().includes(q)) : MFILES;
+    const items = pool.slice(0, 7);
+    if (!items.length) {
+      hideMention();
+      return;
+    }
+    mention = { ...t, items, idx: 0 };
+    renderMention();
+  };
+  proceed();
+}
+
+function hideMention() {
+  mention = null;
+  $("mention").classList.add("hidden");
+}
+
+function renderMention() {
+  if (!mention) return;
+  const box = $("mention");
+  box.replaceChildren();
+  mention.items.forEach((p, i) => {
+    const row = el("div", "mrow" + (i === mention.idx ? " active" : ""));
+    row.innerHTML = `<span class="ic">${icon("file")}</span>`;
+    row.appendChild(el("span", null, p));
+    row.onmousedown = (e) => {
+      e.preventDefault();
+      mention.idx = i;
+      completeMention();
+    };
+    box.appendChild(row);
+  });
+  box.classList.remove("hidden");
+}
+
+function completeMention() {
+  if (!mention) return;
+  const input = $("input");
+  const path = mention.items[mention.idx];
+  const start = mention.from;
+  const end = mention.to;
+  input.value = input.value.slice(0, start) + "@" + path + " " + input.value.slice(end);
+  const caret = start + path.length + 2;
+  input.setSelectionRange(caret, caret);
+  hideMention();
+  autosize();
+  input.focus();
+}
+
+$("input").addEventListener("input", () => {
+  autosize();
+  showMention();
+});
+$("input").addEventListener("click", hideMention);
 
 /* hotkeys */
 
@@ -982,6 +1065,23 @@ window.addEventListener("keydown", (e) => {
       closeSettings();
     }
     return;
+  }
+  if (mention && e.target === $("input")) {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Tab" || e.key === "Enter" || e.key === "Escape") {
+      e.preventDefault();
+      if (e.key === "ArrowDown") {
+        mention.idx = (mention.idx + 1) % mention.items.length;
+        renderMention();
+      } else if (e.key === "ArrowUp") {
+        mention.idx = (mention.idx - 1 + mention.items.length) % mention.items.length;
+        renderMention();
+      } else if (e.key === "Tab" || e.key === "Enter") {
+        completeMention();
+      } else {
+        hideMention();
+      }
+      return;
+    }
   }
   const hit = (action) => sameCombo(comboFromEvent(e), parseCombo(KEYS[action]));
   if (waiting && hit("stop")) {
