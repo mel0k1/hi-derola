@@ -6,32 +6,59 @@
   <title>Hi!Derola</title>
   <link rel="stylesheet" href="style.css" />
 </head>
-<body>
-  <header id="topbar">
-    <div class="logo">Hi!<span>Derola</span></div>
-    <div class="top-actions">
-      <select id="model-select" title="model"></select>
-      <button class="ghost" id="btn-undo" title="undo file changes (ctrl+z)">undo</button>
-      <button class="ghost" id="btn-redo" title="redo (ctrl+shift+z)">redo</button>
-      <button class="ghost" id="btn-new" title="new session">new</button>
-      <button class="ghost" id="btn-settings" title="settings">settings</button>
+<body data-theme="dark">
+
+  <aside id="sidebar">
+    <div class="sb-head">
+      <div class="logo"><span class="ic" data-icon="spark"></span>Hi!<span>Derola</span></div>
     </div>
-  </header>
-
-  <main id="chat">
-    <div id="chat-col">
-      <div id="welcome" class="welcome">hi-derola &middot; ask anything &middot; /help for commands</div>
+    <button id="btn-new" class="new-chat"><span class="ic" data-icon="plus"></span>new chat</button>
+    <div class="sb-label">history</div>
+    <nav id="session-list"></nav>
+    <div class="sb-foot">
+      <button id="btn-theme" class="icon-btn" title="toggle theme (ctrl+shift+t)"><span class="ic" data-icon="sun"></span></button>
+      <button id="btn-settings" class="icon-btn" title="settings (ctrl+,)"><span class="ic" data-icon="sliders"></span></button>
+      <span class="sb-fill"></span>
+      <span class="sb-hint" id="sb-cwd"></span>
     </div>
-  </main>
+  </aside>
 
-  <footer id="inputbar">
-    <textarea id="input" rows="1" placeholder="message &middot; /help for commands"></textarea>
-    <button id="btn-send" class="accent">send</button>
-  </footer>
+  <div id="main">
+    <header id="topbar">
+      <button id="btn-sidebar" class="icon-btn" title="toggle sidebar (ctrl+b)"><span class="ic" data-icon="menu"></span></button>
+      <div class="brand-center">Hi!<span>Derola</span></div>
+      <div class="top-actions">
+        <select id="model-select" title="model"></select>
+        <button id="btn-undo" class="icon-btn" title="undo file changes (ctrl+z)"><span class="ic" data-icon="undo"></span></button>
+        <button id="btn-redo" class="icon-btn" title="redo (ctrl+shift+z)"><span class="ic" data-icon="redo"></span></button>
+      </div>
+    </header>
 
-  <div id="statusbar">
-    <div id="status-left">hi-derola</div>
-    <div id="status-right"></div>
+    <main id="chat">
+      <div id="chat-col">
+        <div id="welcome">
+          <div class="w-logo"><span class="ic" data-icon="spark"></span></div>
+          <div class="w-brand">Hi!<span>Derola</span></div>
+          <div class="w-tag">a fast coding assistant in pure rust</div>
+          <div class="w-hint">ask anything &middot; attach files with <span class="ic sm" data-icon="paperclip"></span> &middot; /help for commands</div>
+        </div>
+      </div>
+    </main>
+
+    <div id="chips"><div id="chips-inner"></div></div>
+
+    <footer id="inputbar">
+      <div id="inputbar-inner">
+        <button id="btn-attach" class="icon-btn" title="attach file or folder"><span class="ic" data-icon="paperclip"></span></button>
+        <textarea id="input" rows="1" placeholder="message &middot; /help for commands"></textarea>
+        <button id="btn-send" class="accent" title="send"><span class="ic" data-icon="send"></span></button>
+      </div>
+    </footer>
+
+    <div id="statusbar">
+      <div id="status-left">hi-derola</div>
+      <div id="status-right"></div>
+    </div>
   </div>
 
   <div id="confirm-overlay" class="overlay hidden">
@@ -47,11 +74,29 @@
     </div>
   </div>
 
+  <div id="files-overlay" class="overlay hidden">
+    <div class="panel files-panel">
+      <div class="files-head">
+        <span><span class="ic" data-icon="paperclip"></span> attach files</span>
+        <button id="files-close" class="icon-btn"><span class="ic" data-icon="x"></span></button>
+      </div>
+      <div class="files-path">
+        <button id="files-up" class="icon-btn" title="parent folder"><span class="ic" data-icon="up"></span></button>
+        <span id="files-crumb" class="mono"></span>
+      </div>
+      <div id="files-list"></div>
+      <div class="files-actions">
+        <span class="hint">click a file to attach &middot; folders attach as tree</span>
+        <button id="files-here" class="ghost"><span class="ic sm" data-icon="folder"></span> attach current folder</button>
+      </div>
+    </div>
+  </div>
+
   <div id="settings-overlay" class="overlay hidden">
     <div class="panel settings-panel">
       <div class="settings-head">
         <span>settings</span>
-        <button id="settings-close" class="ghost">&times;</button>
+        <button id="settings-close" class="icon-btn"><span class="ic" data-icon="x"></span></button>
       </div>
       <div class="settings-body">
         <section>

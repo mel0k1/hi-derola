@@ -79,8 +79,9 @@ fn persist(sh: &Shared) {
     let _ = sessions::save(&st);
 }
 
-fn emit_sessions(app: &AppHandle) {
-    let _ = app.emit("ev", json!({"t": "sessions", "list": sessions::list()}));
+fn emit_sessions(app: &AppHandle, sh: &Shared) {
+    let sid = sh.sid.lock().unwrap().clone();
+    let _ = app.emit("ev", json!({"t": "sessions", "list": sessions::list(), "sid": sid}));
 }
 
 fn emit_attachments(sh: &Shared, app: &AppHandle) {
@@ -112,7 +113,7 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     sh.session.lock().unwrap().messages = messages;
                     snapshot::end_turn();
                     persist(&sh);
-                    emit_sessions(&app);
+                    emit_sessions(&app, &sh);
                     json!({"t": "done", "text": text})
                 }
                 ApiEvent::Failed(e) => {
@@ -139,7 +140,7 @@ fn start_new(sh: &Shared, app: &AppHandle) {
     *sh.title.lock().unwrap() = String::new();
     *sh.created.lock().unwrap() = 0;
     *sh.tokens.lock().unwrap() = (0, 0);
-    emit_sessions(app);
+    emit_sessions(app, sh);
     emit_attachments(sh, app);
     let _ = app.emit("ev", json!({"t": "cleared"}));
 }
@@ -321,7 +322,6 @@ fn open_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) -> Resul
         "transcript": transcript(&st.messages),
     }))
 }
-
 #[tauri::command]
 fn delete_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) -> Result<Value, String> {
     sessions::delete(&id).map_err(|e| format!("{e:#}"))?;
@@ -335,7 +335,7 @@ fn delete_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) -> Res
         *sh.created.lock().unwrap() = 0;
         let _ = app.emit("ev", json!({"t": "cleared"}));
     }
-    emit_sessions(&app);
+    emit_sessions(&app, &sh);
     Ok(json!({"ok": true, "current": current}))
 }
 
@@ -580,7 +580,7 @@ fn send(sh: State<'_, Arc<Shared>>, app: AppHandle, text: String) -> Result<Valu
         (ses.system.clone(), ses.messages.clone())
     };
     persist(&sh);
-    emit_sessions(&app);
+    emit_sessions(&app, &sh);
     emit_attachments(&sh, &app);
     let cfg = sh.cfg.lock().unwrap().clone();
     let req = ChatRequest {
