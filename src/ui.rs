@@ -74,12 +74,11 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
         }
         lines.push(Line::from(""));
     }
-    let total = wrapped_height(&lines, area.width);
+    let p = Paragraph::new(lines).wrap(Wrap { trim: false });
+    let total = p.line_count(area.width);
     let view_h = area.height as usize;
     let offset = total.saturating_sub(view_h).saturating_sub(app.scroll_up);
-    let p = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .scroll((offset.min(u16::MAX as usize) as u16, 0));
+    let p = p.scroll((offset.min(u16::MAX as usize) as u16, 0));
     f.render_widget(p, area);
 }
 
@@ -87,14 +86,6 @@ fn push_body(lines: &mut Vec<Line>, text: &str) {
     for l in text.lines() {
         lines.push(Line::from(format!("  {l}")));
     }
-}
-
-fn wrapped_height(lines: &[Line], width: u16) -> usize {
-    let w = width.max(1) as usize;
-    lines
-        .iter()
-        .map(|l| l.width().div_ceil(w).max(1))
-        .sum()
 }
 
 fn draw_input(f: &mut Frame, app: &App, area: Rect) {

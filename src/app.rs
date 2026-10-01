@@ -185,6 +185,7 @@ impl App {
             ApiEvent::Note(s) => self.info(s),
             ApiEvent::Tool { name, detail, diff } => {
                 self.flush_stream();
+                self.reasoning = None;
                 self.info(format!("tool {name} {detail}"));
                 if !diff.is_empty() {
                     self.entries.push(Entry {
