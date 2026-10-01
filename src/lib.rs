@@ -6,6 +6,7 @@ pub mod diff;
 pub mod files;
 pub mod md;
 pub mod mcp;
+pub mod models;
 pub mod provider;
 pub mod search;
 pub mod sessions;

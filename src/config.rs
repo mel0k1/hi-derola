@@ -39,7 +39,7 @@ impl Default for AgentConfig {
 }
 
 fn default_context_limit() -> u64 {
-    100_000
+    0
 }
 
 fn default_max_rounds() -> usize {

@@ -19,7 +19,7 @@ pub struct AgentCfg {
 impl Default for AgentCfg {
     fn default() -> Self {
         Self {
-            context_limit: 100_000,
+            context_limit: 0,
             max_rounds: 15,
             output_budget: 32 * 1024,
         }
@@ -30,6 +30,18 @@ const COMPACT_KEEP: usize = 6;
 const COMPACT_MIN_MSGS: usize = 8;
 const EMPTY_RETRIES: usize = 2;
 const OVERFLOW_RETRIES: usize = 2;
+
+fn effective_limit(cfg: &AgentCfg, model: &str) -> u64 {
+    if cfg.context_limit > 0 {
+        return cfg.context_limit;
+    }
+    let mi = crate::models::lookup(model);
+    if mi.window > 0 {
+        mi.window / 10 * 9
+    } else {
+        0
+    }
+}
 
 pub async fn run(
     provider: Arc<dyn Provider>,
@@ -44,6 +56,7 @@ pub async fn run(
         specs.extend(m.specs().await);
     }
     req.tools = specs;
+    let ctx_limit = effective_limit(&cfg, &req.model);
     let mut msgs = req.messages.clone();
     let mut round = 0;
     let mut empty_retries = 0usize;
@@ -55,7 +68,7 @@ pub async fn run(
             return wrap_up(provider, &mut req, &mut msgs, &tx, cfg.max_rounds).await;
         }
         let est = est_tokens(&msgs) as u64;
-        if cfg.context_limit > 0 && used.max(est) * 4 > cfg.context_limit * 3 {
+        if ctx_limit > 0 && used.max(est) * 4 > ctx_limit * 3 {
             if compact(&provider, &req, &mut msgs, &tx).await {
                 used = 0;
                 req.messages = msgs.clone();
