@@ -140,9 +140,9 @@ fn start_new(sh: &Shared, app: &AppHandle) {
     *sh.title.lock().unwrap() = String::new();
     *sh.created.lock().unwrap() = 0;
     *sh.tokens.lock().unwrap() = (0, 0);
+    let _ = app.emit("ev", json!({"t": "cleared"}));
     emit_sessions(app, sh);
     emit_attachments(sh, app);
-    let _ = app.emit("ev", json!({"t": "cleared"}));
 }
 
 #[tauri::command]
