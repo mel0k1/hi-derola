@@ -26,6 +26,7 @@ pub struct Shared {
     attachments: Mutex<Vec<(String, String)>>,
     mcp: Mutex<Option<Arc<McpClient>>>,
     allow_all: Arc<AtomicBool>,
+    queue: Arc<Mutex<Vec<String>>>,
     titled: AtomicBool,
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
@@ -104,6 +105,75 @@ fn clip_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
+fn launch(sh: &Arc<Shared>) -> Result<(), String> {
+    let Some(provider) = sh.provider.lock().unwrap().clone() else {
+        return Err("no api key: open settings and add one".into());
+    };
+    let cfg = sh.cfg.lock().unwrap().clone();
+    let (system, messages) = {
+        let ses = sh.session.lock().unwrap();
+        (ses.system.clone(), ses.messages.clone())
+    };
+    let req = ChatRequest {
+        system,
+        messages,
+        model: cfg.provider.model.clone(),
+        max_tokens: cfg.provider.max_tokens,
+        temperature: cfg.provider.temperature,
+        top_p: cfg.provider.top_p,
+        stream: cfg.provider.stream,
+        tools: Vec::new(),
+    };
+    let mcp = sh.mcp.lock().unwrap().clone();
+    let agent_cfg = hi_derola::agent::AgentCfg {
+        context_limit: cfg.agent.context_limit,
+        max_rounds: cfg.agent.max_rounds,
+        output_budget: cfg.agent.output_budget,
+    };
+    let sh2 = sh.clone();
+    let handle = tauri::async_runtime::spawn(async move {
+        if let Err(e) = agent::run(
+            provider,
+            req,
+            sh2.tx.clone(),
+            sh2.allow_all.clone(),
+            mcp,
+            sh2.queue.clone(),
+            agent_cfg,
+        )
+        .await
+        {
+            let _ = sh2.tx.send(ApiEvent::Failed(format!("{e:#}")));
+        }
+    });
+    *sh.inflight.lock().unwrap() = Some(handle);
+    Ok(())
+}
+
+fn resume_queue(app: &AppHandle, sh: &Arc<Shared>) {
+    let next = {
+        let mut q = sh.queue.lock().unwrap();
+        if q.is_empty() {
+            None
+        } else {
+            Some(q.remove(0))
+        }
+    };
+    let Some(composed) = next else {
+        return;
+    };
+    {
+        let mut ses = sh.session.lock().unwrap();
+        ses.push(Role::User, composed);
+    }
+    persist(sh);
+    emit_sessions(app, sh);
+    let _ = app.emit("ev", json!({"t": "queued"}));
+    if let Err(e) = launch(sh) {
+        let _ = app.emit("ev", json!({"t": "failed", "s": e}));
+    }
+}
+
 fn autotitle(app: &AppHandle, sh: &Arc<Shared>, msgs: &[hi_derola::chat::Message]) {
     if msgs.len() < 2 {
         return;
@@ -171,6 +241,7 @@ fn autotitle(app: &AppHandle, sh: &Arc<Shared>, msgs: &[hi_derola::chat::Message
 fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Shared>) {
     tauri::async_runtime::spawn(async move {
         while let Some(ev) = rx.recv().await {
+            let mut resume = false;
             let payload = match ev {
                 ApiEvent::Chunk(s) => json!({"t": "chunk", "s": s}),
                 ApiEvent::Reasoning(s) => json!({"t": "reasoning", "s": s}),
@@ -201,10 +272,12 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     snapshot::end_turn();
                     persist(&sh);
                     emit_sessions(&app, &sh);
+                    resume = true;
                     json!({"t": "done", "text": text})
                 }
                 ApiEvent::Failed(e) => {
                     snapshot::end_turn();
+                    resume = true;
                     json!({"t": "failed", "s": e})
                 }
             };
@@ -214,6 +287,9 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                 }
             }
             let _ = app.emit("ev", payload);
+            if resume {
+                resume_queue(&app, &sh);
+            }
         }
     });
 }
@@ -324,7 +400,12 @@ fn stop(sh: State<'_, Arc<Shared>>, app: AppHandle) {
     }
     snapshot::end_turn();
     let _ = app.emit("ev", json!({"t": "note", "s": "cancelled"}));
-    let _ = app.emit("ev", json!({"t": "idle"}));
+    let empty = sh.queue.lock().unwrap().is_empty();
+    if empty {
+        let _ = app.emit("ev", json!({"t": "idle"}));
+    } else {
+        resume_queue(&app, &sh);
+    }
 }
 
 #[tauri::command]
@@ -658,10 +739,6 @@ fn send(sh: State<'_, Arc<Shared>>, app: AppHandle, text: String) -> Result<Valu
     if text.starts_with('/') {
         return Ok(command(&sh, &app, &text));
     }
-    let provider = sh.provider.lock().unwrap().clone();
-    let Some(provider) = provider else {
-        return Err("no api key: open settings and add one".into());
-    };
     let mut composed = String::new();
     {
         let mut at = sh.attachments.lock().unwrap();
@@ -698,38 +775,20 @@ fn send(sh: State<'_, Arc<Shared>>, app: AppHandle, text: String) -> Result<Valu
             .map(|d| d.as_secs())
             .unwrap_or(0);
     }
-    let (system, messages) = {
+    if sh.inflight.lock().unwrap().is_some() {
+        sh.queue.lock().unwrap().push(composed);
+        emit_attachments(&sh, &app);
+        let _ = sh.tx.send(ApiEvent::Note("queued: will steer the current run".into()));
+        return Ok(json!({"cmd": false, "queued": true}));
+    }
+    {
         let mut ses = sh.session.lock().unwrap();
         ses.push(Role::User, composed);
-        (ses.system.clone(), ses.messages.clone())
-    };
+    }
     persist(&sh);
     emit_sessions(&app, &sh);
     emit_attachments(&sh, &app);
-    let cfg = sh.cfg.lock().unwrap().clone();
-    let req = ChatRequest {
-        system,
-        messages,
-        model: cfg.provider.model.clone(),
-        max_tokens: cfg.provider.max_tokens,
-        temperature: cfg.provider.temperature,
-        top_p: cfg.provider.top_p,
-        stream: cfg.provider.stream,
-        tools: Vec::new(),
-    };
-    let sh2: Arc<Shared> = sh.inner().clone();
-    let mcp = sh.mcp.lock().unwrap().clone();
-    let agent_cfg = hi_derola::agent::AgentCfg {
-        context_limit: cfg.agent.context_limit,
-        max_rounds: cfg.agent.max_rounds,
-        output_budget: cfg.agent.output_budget,
-    };
-    let handle = tauri::async_runtime::spawn(async move {
-        if let Err(e) = agent::run(provider, req, sh2.tx.clone(), sh2.allow_all.clone(), mcp, agent_cfg).await {
-            let _ = sh2.tx.send(ApiEvent::Failed(format!("{e:#}")));
-        }
-    });
-    *sh.inflight.lock().unwrap() = Some(handle);
+    launch(&sh)?;
     Ok(json!({"cmd": false}))
 }
 
@@ -774,6 +833,7 @@ pub fn run() -> Result<()> {
                 attachments: Mutex::new(Vec::new()),
                 mcp: Mutex::new(None),
                 allow_all: Arc::new(AtomicBool::new(false)),
+                queue: Arc::new(Mutex::new(Vec::new())),
                 titled: AtomicBool::new(restore.is_some()),
                 tx: tx.clone(),
             });

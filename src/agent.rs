@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, Result};
 use tokio::sync::mpsc::UnboundedSender;
@@ -49,6 +49,7 @@ pub async fn run(
     tx: UnboundedSender<ApiEvent>,
     allow_all: Arc<AtomicBool>,
     mcp: Option<Arc<McpClient>>,
+    queue: Arc<Mutex<Vec<String>>>,
     cfg: AgentCfg,
 ) -> Result<()> {
     let mut specs = tools::specs();
@@ -73,6 +74,16 @@ pub async fn run(
                 used = 0;
                 req.messages = msgs.clone();
             }
+        }
+        let mut steered = false;
+        for text in queue.lock().unwrap().drain(..) {
+            let head: String = text.chars().take(60).collect();
+            let _ = tx.send(ApiEvent::Note(format!("steer: {head}")));
+            msgs.push(Message::new(Role::User, text));
+            steered = true;
+        }
+        if steered {
+            req.messages = msgs.clone();
         }
         let (itx, mut irx) = tokio::sync::mpsc::unbounded_channel();
         let counter = Arc::new(AtomicU64::new(0));
@@ -137,7 +148,9 @@ pub async fn run(
                 diff: tools::preview(&call.name, &call.args),
             })
             .map_err(|_| anyhow!("closed"))?;
-            if tools::needs_confirm(&call.name) && !allow_all.load(Ordering::Relaxed) {
+            let mutating = matches!(call.name.as_str(), "write_file" | "edit" | "bash")
+                || call.name.starts_with("mcp__");
+            if mutating && !allow_all.load(Ordering::Relaxed) {
                 let (otx, orx) = oneshot::channel();
                 tx.send(ApiEvent::Confirm {
                     name: call.name.clone(),

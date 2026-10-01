@@ -28,6 +28,8 @@
   let allowAllFlag = false;
   let pendingConfirm = null;
   let runAbort = false;
+  let running = false;
+  let queue = [];
   const listeners = [];
 
   function load(k) {
@@ -153,8 +155,8 @@
   function fakeRun(text) {
     const s = current();
     const msgs = [];
-    msgs.push({ role: "user", content: text });
     runAbort = false;
+    running = true;
     (async () => {
       emit({ t: "usage", input: 1200, output: 0 });
       for (const piece of ["Let me check the project layout first.\n", "The entry point is src/main.rs.\n"]) {
@@ -219,7 +221,21 @@
           emitSessions();
         }
       }, 600);
-    })();
+    })().finally(() => {
+      running = false;
+      if (queue.length) {
+        const next = queue.shift();
+        const s2 = current();
+        if (s2) {
+          s2.messages.push({ role: "user", content: next });
+          s2.updated = Math.floor(Date.now() / 1000);
+          saveState();
+          emitSessions();
+        }
+        emit({ t: "queued" });
+        fakeRun(next);
+      }
+    });
   }
 
   const commands = {
@@ -357,6 +373,11 @@
         if (attached.length) line += "@mentions attached: " + attached.join(", ");
         if (missing.length) line += (line ? " · " : "") + "not found: " + missing.join(", ");
         emit({ t: "note", s: line });
+      }
+      if (running) {
+        queue.push(composed);
+        emit({ t: "note", s: "queued: will steer the current run" });
+        return { cmd: false, queued: true };
       }
       s.messages.push({ role: "user", content: composed });
       saveState();

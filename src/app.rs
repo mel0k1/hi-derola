@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use crossterm::event::{
@@ -61,6 +61,7 @@ pub struct App {
     pub should_quit: bool,
     pub status: String,
     allow_all: Arc<AtomicBool>,
+    queue: Arc<Mutex<Vec<String>>>,
     history: Vec<String>,
     hist_idx: usize,
     draft: String,
@@ -68,7 +69,7 @@ pub struct App {
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
-const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /clear         start new session\n  /quit          exit\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/list/glob/grep/bash + mcp servers, mutations ask y/n/a";
+const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /clear         start new session\n  /quit          exit\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/list/glob/grep/bash + mcp servers, mutations ask y/n/a\nqueue:\n  messages sent while busy are queued, they steer the current run";
 
 pub fn help_text() -> &'static str {
     HELP
@@ -131,6 +132,7 @@ impl App {
             should_quit: false,
             status,
             allow_all: Arc::new(AtomicBool::new(false)),
+            queue: Arc::new(Mutex::new(Vec::new())),
             history: Vec::new(),
             hist_idx: 0,
             draft: String::new(),
@@ -325,6 +327,7 @@ impl App {
             }
             Phase::Waiting => {
                 match key.code {
+                    KeyCode::Enter => self.submit(inflight),
                     KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                         self.input.clear();
                     }
@@ -420,7 +423,6 @@ impl App {
         composed.push_str(&text);
         self.attachments.clear();
         self.input.clear();
-        self.session.push(Role::User, composed);
         self.entries.push(Entry {
             kind: Kind::You,
             text,
@@ -438,15 +440,27 @@ impl App {
             }
             self.info(line);
         }
+        if !matches!(self.phase, Phase::Idle) {
+            self.queue.lock().unwrap().push(composed);
+            self.info("queued: will steer the current run");
+            return;
+        }
+        self.session.push(Role::User, composed);
         self.scroll_up = 0;
+        self.start_run(inflight);
+    }
+
+    fn start_run(&mut self, inflight: &mut Option<tokio::task::JoinHandle<()>>) {
         self.phase = Phase::Waiting;
         self.status = self.status_line();
+        self.scroll_up = 0;
         crate::snapshot::begin_turn();
 
         let provider = self.provider.clone();
         let tx = self.tx.clone();
         let allow_all = self.allow_all.clone();
         let mcp = self.mcp.clone();
+        let queue = self.queue.clone();
         let agent_cfg = crate::agent::AgentCfg {
             context_limit: self.cfg.agent.context_limit,
             max_rounds: self.cfg.agent.max_rounds,
@@ -463,11 +477,30 @@ impl App {
             tools: Vec::new(),
         };
         let handle = tokio::spawn(async move {
-            if let Err(e) = agent::run(provider, req, tx.clone(), allow_all, mcp, agent_cfg).await {
+            if let Err(e) = agent::run(provider, req, tx.clone(), allow_all, mcp, queue, agent_cfg).await {
                 let _ = tx.send(ApiEvent::Failed(format!("{e:#}")));
             }
         });
         *inflight = Some(handle);
+    }
+
+    pub fn resume_queued(&mut self, inflight: &mut Option<tokio::task::JoinHandle<()>>) {
+        if !matches!(self.phase, Phase::Idle) || self.confirm.is_some() {
+            return;
+        }
+        let next = {
+            let mut q = self.queue.lock().unwrap();
+            if q.is_empty() {
+                None
+            } else {
+                Some(q.remove(0))
+            }
+        };
+        if let Some(composed) = next {
+            self.session.push(Role::User, composed);
+            self.info("running queued message");
+            self.start_run(inflight);
+        }
     }
 
     fn command(&mut self, line: &str) {
@@ -567,6 +600,7 @@ pub async fn run(
         while let Ok(ev) = rx.try_recv() {
             app.on_api(ev);
         }
+        app.resume_queued(&mut inflight);
         if app.should_quit {
             break Ok(());
         }
@@ -587,6 +621,7 @@ pub async fn run(
                         }
                         while rx.try_recv().is_ok() {}
                         app.cancelled();
+                        app.resume_queued(&mut inflight);
                     } else {
                         app.on_key(k, &mut inflight);
                     }

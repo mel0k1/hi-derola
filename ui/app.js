@@ -621,6 +621,10 @@ async function handleEvent(ev) {
       waiting = false;
       applyStatus();
       break;
+    case "queued":
+      waiting = true;
+      applyStatus();
+      break;
     case "model":
       MODEL = ev.name;
       KIND = ev.kind || KIND;
@@ -638,7 +642,7 @@ async function handleEvent(ev) {
 async function doSend() {
   const input = $("input");
   const text = input.value.trim();
-  if (!text || waiting || confirmOpen || settingsOpen || filesOpen) return;
+  if (!text || confirmOpen || settingsOpen || filesOpen) return;
   hideMention();
   input.value = "";
   autosize();
