@@ -4,7 +4,11 @@ A high-performance, lightweight chat and autonomous coding assistant written in 
 
 ## features
 
-- minimalist dark desktop GUI (tauri, webview) plus a full TUI (ratatui) with `--tui` or when no display is available
+- desktop GUI (tauri, webview) plus a full TUI (ratatui) with `--tui` or when no display is available
+- main screen: chat history sidebar on the left, brand in the center, chat input at the bottom, file/folder attach right under it
+- chat sessions persist to disk (`~/.local/share/hi-derola/sessions`), sidebar lists past chats, tap to reopen, delete with two clicks
+- dark and light themes, toggled from the sidebar, remembered in config
+- inline icons, attachment chips, file browser with folder trees, no npm toolchain — static html/css/js
 - windows, linux, macos — shell commands run via `cmd /C` on windows, `sh -c` elsewhere
 - multi-provider: any OpenAI-compatible endpoint (OpenAI, OpenRouter, ...) + native Anthropic
 - streaming responses and reasoning in a separate collapsible thinking block (GUI)
@@ -57,6 +61,12 @@ open_settings = "ctrl+comma"
 undo = "ctrl+z"
 redo = "ctrl+shift+z"
 toggle_thinking = "ctrl+t"
+toggle_sidebar = "ctrl+b"
+toggle_theme = "ctrl+shift+t"
+
+# interface
+[ui]
+# theme = "light"                                # dark (default) | light
 ```
 
 ## commands (both UIs)
