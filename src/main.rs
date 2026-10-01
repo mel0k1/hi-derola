@@ -1,19 +1,5 @@
-mod agent;
-mod app;
-mod chat;
-mod config;
-mod diff;
-mod files;
-mod gui;
-mod md;
-mod mcp;
-mod provider;
-mod search;
-mod snapshot;
-mod tools;
-mod ui;
-
 use anyhow::{Context, Result};
+use hi_derola::{app, config, provider};
 
 fn main() -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -28,14 +14,13 @@ fn main() -> Result<()> {
     let has_display = cfg!(windows)
         || std::env::var_os("DISPLAY").is_some()
         || std::env::var_os("WAYLAND_DISPLAY").is_some();
-    if tui || !has_display {
-        runtime.block_on(async move {
-            let mut terminal = ratatui::init();
-            let res = app::run(&mut terminal, cfg, provider).await;
-            ratatui::restore();
-            res
-        })
-    } else {
-        gui::run(cfg, provider, &runtime)
+    if has_display && !tui {
+        eprintln!("desktop gui lives in hi-derola-gui: cargo run -p hi-derola-gui (starting tui now)");
     }
+    runtime.block_on(async move {
+        let mut terminal = ratatui::init();
+        let res = app::run(&mut terminal, cfg, provider).await;
+        ratatui::restore();
+        res
+    })
 }

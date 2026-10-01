@@ -1,0 +1,13 @@
+pub mod agent;
+pub mod app;
+pub mod chat;
+pub mod config;
+pub mod diff;
+pub mod files;
+pub mod md;
+pub mod mcp;
+pub mod provider;
+pub mod search;
+pub mod snapshot;
+pub mod tools;
+pub mod ui;
