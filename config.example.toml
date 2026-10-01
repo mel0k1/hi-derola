@@ -67,3 +67,23 @@ context_limit = 0
 max_rounds = 15
 # max chars of a single tool result kept in the context
 output_budget = 32768
+
+# tool permissions: allow | ask | deny
+# missing tool defaults to: write_file/edit/bash/mcp ask, read-only tools allow
+[permissions]
+# edit = "ask"
+# write_file = "ask"
+# bash = "ask"
+# mcp = "ask"
+
+# wildcard rules, first match wins
+# pattern matches the command for bash, the path for edit/write_file, the tool name for mcp
+# [[permissions.rules]]
+# tool = "bash"
+# pattern = "git *"
+# permission = "allow"
+
+# [[permissions.rules]]
+# tool = "bash"
+# pattern = "rm *"
+# permission = "deny"

@@ -831,6 +831,22 @@ function fillMcpList() {
   box.style.whiteSpace = "pre-wrap";
 }
 
+function fillPermList() {
+  const box = $("s-perm");
+  const p = (CFG && CFG.permissions) || {};
+  const lines = [];
+  for (const k of ["edit", "write_file", "bash", "mcp"]) {
+    if (p[k]) lines.push(k + " = " + p[k]);
+  }
+  for (const r of p.rules || []) {
+    lines.push(`${r.tool} ${r.pattern || "*"} = ${r.permission}`);
+  }
+  box.textContent = lines.length
+    ? lines.join("\n")
+    : "default: mutations (write/edit/bash/mcp) ask, reads allowed";
+  box.style.whiteSpace = "pre-wrap";
+}
+
 function openSettings() {
   const p = CFG.provider;
   $("s-type").value = p.type || "openai";
@@ -847,6 +863,7 @@ function openSettings() {
   $("s-msg").textContent = "";
   buildKeysGrid(KEYS);
   fillMcpList();
+  fillPermList();
   settingsOpen = true;
   $("settings-overlay").classList.remove("hidden");
 }
@@ -918,6 +935,8 @@ $("s-save").onclick = async () => {
     mcp: (CFG && CFG.mcp) || [],
     keys: readKeysGrid(),
     ui: { theme: document.body.dataset.theme },
+    agent: (CFG && CFG.agent) || undefined,
+    permissions: (CFG && CFG.permissions) || undefined,
   };
   try {
     await invoke("save", { cfg });

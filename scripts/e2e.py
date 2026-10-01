@@ -31,7 +31,7 @@ def make_crlf_file():
     return p
 
 
-SCENARIO = {"edit_done": False}
+SCENARIO = {"edit_done": False, "steer_started": False, "steer_done": False}
 
 
 def sse_response(handler, chunks):
@@ -62,7 +62,6 @@ class Mock(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         msgs = body.get("messages", [])
-        self.json_ok = False
         last_user = next((m["content"] for m in reversed(msgs) if m["role"] == "user"), "")
         has_file_block = "[file: README.md]" in last_user
         tool_msgs = [m for m in msgs if m["role"] == "tool"]
@@ -80,8 +79,23 @@ class Mock(BaseHTTPRequestHandler):
                 SCENARIO["edit_done"] = True
                 chunks = [{"role": "assistant", "content": "EDIT_OK"}]
             sse_response(self, chunks)
+        elif not SCENARIO["steer_started"]:
+            if last_user.endswith("start long task"):
+                SCENARIO["steer_started"] = True
+                time.sleep(1.5)
+                chunks = tool_call_chunks("bash", json.dumps({"command": "rm -rf /tmp/hiderola-e2e-nothing"}))
+                sse_response(self, chunks)
+            else:
+                sse_response(self, [{"role": "assistant", "content": "EDIT_OK"}])
+        elif not SCENARIO["steer_done"]:
+            denied = any("denied by permissions" in m["content"] for m in tool_msgs)
+            check("permission deny reached the model", denied)
+            steered = "second" in last_user
+            check("steered message reached the model", steered)
+            SCENARIO["steer_done"] = True
+            sse_response(self, [{"role": "assistant", "content": "STEER_DENY_OK"}])
         else:
-            sse_response(self, [{"role": "assistant", "content": "EDIT_OK"}])
+            sse_response(self, [{"role": "assistant", "content": "STEER_DENY_OK"}])
 
 
 def strip(s):
@@ -102,8 +116,12 @@ def run_pty():
             f'base_url = "http://127.0.0.1:{PORT}"\n'
             'api_key = "test"\n'
             "stream = true\n"
+            "\n[permissions]\n"
+            "\n[[permissions.rules]]\n"
+            'tool = "bash"\n'
+            'pattern = "rm *"\n'
+            'permission = "deny"\n'
         )
-    os.makedirs(os.path.join(cfg_dir, "hi-derola"), exist_ok=True)
 
     pid, fd = pty.fork()
     if pid == 0:
@@ -118,11 +136,11 @@ def run_pty():
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
 
     out = ""
-    deadline = time.time() + 60
-    steps = ["check @README.md and fix app.txt", "y"]
+    deadline = time.time() + 90
     sent = 0
+    t_sent3 = 0.0
 
-    def type_str(fd, s):
+    def type_str(s):
         for ch in s:
             os.write(fd, ch.encode())
             time.sleep(0.015)
@@ -140,16 +158,28 @@ def run_pty():
         plain = strip(out)
         if sent == 0 and "type a message" in plain:
             time.sleep(0.5)
-            type_str(fd, steps[0])
+            type_str("check @README.md and fix app.txt")
             time.sleep(0.3)
             os.write(fd, b"\r")
             sent = 1
             time.sleep(0.3)
         elif sent == 1 and ("y/n" in plain or "run edit" in plain.lower()):
             time.sleep(0.3)
-            os.write(fd, steps[1].encode())
+            os.write(fd, b"y")
             sent = 2
         elif sent == 2 and "EDIT_OK" in plain:
+            time.sleep(0.3)
+            type_str("start long task")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            t_sent3 = time.time()
+            sent = 3
+        elif sent == 3 and "thinking" in plain and time.time() - t_sent3 > 0.6:
+            type_str("second")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            sent = 4
+        elif sent == 4 and "STEER_DENY_OK" in plain:
             break
     try:
         os.kill(pid, signal.SIGKILL)
@@ -176,6 +206,10 @@ check("mention note", "attached" in plain)
 with open(os.path.join(WORKDIR, "app.txt"), "rb") as f:
     disk = f.read()
 check("edit written with CRLF preserved", disk == b"value = 2\r\nname = demo\r\nend\r\n")
+check("queued note shown", "queued: will steer the current run" in plain)
+check("steer note shown", "steer: second" in plain)
+check("deny note shown", "denied by permissions" in plain)
+check("steer+deny answer rendered", "STEER_DENY_OK" in plain)
 
 shutil.rmtree(WORKDIR, ignore_errors=True)
 print("WORKDIR", WORKDIR)

@@ -16,6 +16,8 @@ pub struct Config {
     pub ui: UiConfig,
     #[serde(default)]
     pub agent: AgentConfig,
+    #[serde(default)]
+    pub permissions: crate::perm::PermCfg,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

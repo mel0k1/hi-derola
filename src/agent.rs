@@ -14,6 +14,7 @@ pub struct AgentCfg {
     pub context_limit: u64,
     pub max_rounds: usize,
     pub output_budget: usize,
+    pub perm: crate::perm::PermCfg,
 }
 
 impl Default for AgentCfg {
@@ -22,6 +23,7 @@ impl Default for AgentCfg {
             context_limit: 0,
             max_rounds: 15,
             output_budget: 32 * 1024,
+            perm: Default::default(),
         }
     }
 }
@@ -148,20 +150,32 @@ pub async fn run(
                 diff: tools::preview(&call.name, &call.args),
             })
             .map_err(|_| anyhow!("closed"))?;
-            let mutating = matches!(call.name.as_str(), "write_file" | "edit" | "bash")
-                || call.name.starts_with("mcp__");
-            if mutating && !allow_all.load(Ordering::Relaxed) {
-                let (otx, orx) = oneshot::channel();
-                tx.send(ApiEvent::Confirm {
-                    name: call.name.clone(),
-                    args: call.args.clone(),
-                    rx: otx,
-                })
-                .map_err(|_| anyhow!("closed"))?;
-                if !orx.await.unwrap_or(false) {
-                    msgs.push(Message::tool(&call.id, "user denied this action"));
+            match cfg.perm.check(&call.name, &call.args) {
+                crate::perm::Perm::Deny => {
+                    let _ = tx.send(ApiEvent::Note(format!(
+                        "{} denied by permissions config",
+                        call.name
+                    )));
+                    msgs.push(Message::tool(&call.id, "denied by permissions config"));
                     req.messages = msgs.clone();
                     continue;
+                }
+                crate::perm::Perm::Allow => {}
+                crate::perm::Perm::Ask => {
+                    if !allow_all.load(Ordering::Relaxed) {
+                        let (otx, orx) = oneshot::channel();
+                        tx.send(ApiEvent::Confirm {
+                            name: call.name.clone(),
+                            args: call.args.clone(),
+                            rx: otx,
+                        })
+                        .map_err(|_| anyhow!("closed"))?;
+                        if !orx.await.unwrap_or(false) {
+                            msgs.push(Message::tool(&call.id, "user denied this action"));
+                            req.messages = msgs.clone();
+                            continue;
+                        }
+                    }
                 }
             }
             let out = match tools::execute(&call.name, &call.args, mcp.as_deref()).await {

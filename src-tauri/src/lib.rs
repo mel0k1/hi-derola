@@ -129,6 +129,7 @@ fn launch(sh: &Arc<Shared>) -> Result<(), String> {
         context_limit: cfg.agent.context_limit,
         max_rounds: cfg.agent.max_rounds,
         output_budget: cfg.agent.output_budget,
+        perm: cfg.permissions.clone(),
     };
     let sh2 = sh.clone();
     let handle = tauri::async_runtime::spawn(async move {

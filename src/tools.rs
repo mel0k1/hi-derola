@@ -117,10 +117,6 @@ pub fn specs() -> Vec<ToolSpec> {
     ]
 }
 
-pub fn needs_confirm(name: &str) -> bool {
-    matches!(name, "write_file" | "edit" | "bash") || name.starts_with("mcp__")
-}
-
 pub fn detail(name: &str, args: &str) -> String {
     let v: Value = serde_json::from_str(args).unwrap_or(Value::Null);
     let d = match name {
