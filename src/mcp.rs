@@ -283,6 +283,8 @@ pub struct McpClient {
     servers: Mutex<Vec<McpServer>>,
 }
 
+pub type McpSlot = std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<McpClient>>>>;
+
 pub async fn connect_all(cfgs: &[McpConfig]) -> (Option<std::sync::Arc<McpClient>>, Vec<String>) {
     let mut servers = Vec::new();
     let mut logs = Vec::new();

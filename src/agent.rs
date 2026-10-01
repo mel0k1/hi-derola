@@ -7,7 +7,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 use crate::chat::{Message, Role};
-use crate::mcp::McpClient;
+use crate::mcp::McpSlot;
 use crate::provider::{ApiEvent, ChatRequest, Provider};
 use crate::tools;
 
@@ -54,19 +54,10 @@ pub async fn run(
     mut req: ChatRequest,
     tx: UnboundedSender<ApiEvent>,
     allow_all: Arc<AtomicBool>,
-    mcp: Option<Arc<McpClient>>,
+    mcp: McpSlot,
     queue: Arc<Mutex<Vec<String>>>,
     cfg: AgentCfg,
 ) -> Result<()> {
-    let mut specs = if cfg.nested {
-        tools::specs_nested()
-    } else {
-        tools::specs()
-    };
-    if let Some(m) = &mcp {
-        specs.extend(m.specs().await);
-    }
-    req.tools = specs;
     let ctx_limit = effective_limit(&cfg, &req.model);
     let mut msgs = req.messages.clone();
     let mut round = 0;
@@ -75,6 +66,16 @@ pub async fn run(
     let mut used: u64 = 0;
     loop {
         round += 1;
+        let mcp_now = mcp.lock().unwrap().clone();
+        let mut specs = if cfg.nested {
+            tools::specs_nested()
+        } else {
+            tools::specs()
+        };
+        if let Some(m) = &mcp_now {
+            specs.extend(m.specs().await);
+        }
+        req.tools = specs;
         if round > cfg.max_rounds {
             return wrap_up(provider, &mut req, &mut msgs, &tx, cfg.max_rounds).await;
         }
@@ -232,7 +233,7 @@ pub async fn run(
                     }
                 }
             } else {
-                match tools::execute(&call.name, &call.args, mcp.as_deref()).await {
+                match tools::execute(&call.name, &call.args, mcp_now.as_deref()).await {
                     Ok(o) => o,
                     Err(e) => format!("error: {e:#}"),
                 }
@@ -294,7 +295,7 @@ async fn run_subagent(
     cfg: AgentCfg,
     allow_all: Arc<AtomicBool>,
     tx: &UnboundedSender<ApiEvent>,
-    mcp: Option<Arc<McpClient>>,
+    mcp: McpSlot,
 ) -> Result<String> {
     let (stx, mut srx) = tokio::sync::mpsc::unbounded_channel();
     let fwd_tx = tx.clone();

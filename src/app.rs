@@ -13,7 +13,7 @@ use crate::agent;
 use crate::chat::{Role, Session};
 use crate::config::Config;
 use crate::files;
-use crate::mcp::{self, McpClient};
+use crate::mcp::{self, McpSlot};
 use crate::provider::{ApiEvent, ChatRequest, Provider};
 use crate::ui;
 
@@ -72,7 +72,7 @@ pub struct App {
     history: Vec<String>,
     hist_idx: usize,
     draft: String,
-    mcp: Option<Arc<McpClient>>,
+    mcp: McpSlot,
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
@@ -149,7 +149,7 @@ impl App {
             history: Vec::new(),
             hist_idx: 0,
             draft: String::new(),
-            mcp: None,
+            mcp: Arc::new(Mutex::new(None)),
             tx,
         }
     }
@@ -160,7 +160,7 @@ impl App {
         for l in logs {
             self.info(l);
         }
-        self.mcp = client;
+        *self.mcp.lock().unwrap() = client;
     }
 
     fn info(&mut self, text: impl Into<String>) {

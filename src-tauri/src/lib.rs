@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use hi_derola::agent;
 use hi_derola::chat::{Role, Session};
 use hi_derola::config::Config;
-use hi_derola::mcp::{self, McpClient};
+use hi_derola::mcp::{self, McpSlot};
 use hi_derola::provider::{self, ApiEvent, ChatRequest, Provider};
 use hi_derola::sessions::{self, SessionMeta, StoredSession};
 use hi_derola::{models, snapshot, tools};
@@ -25,7 +25,7 @@ pub struct Shared {
     tokens: Mutex<(u64, u64)>,
     cost: Mutex<f64>,
     attachments: Mutex<Vec<(String, String)>>,
-    mcp: Mutex<Option<Arc<McpClient>>>,
+    mcp: McpSlot,
     allow_all: Arc<AtomicBool>,
     queue: Arc<Mutex<Vec<String>>>,
     titled: AtomicBool,
@@ -124,7 +124,7 @@ fn launch(sh: &Arc<Shared>) -> Result<(), String> {
         stream: cfg.provider.stream,
         tools: Vec::new(),
     };
-    let mcp = sh.mcp.lock().unwrap().clone();
+    let mcp = sh.mcp.clone();
     let agent_cfg = hi_derola::agent::AgentCfg {
         context_limit: cfg.agent.context_limit,
         max_rounds: cfg.agent.max_rounds,
@@ -849,7 +849,7 @@ pub fn run() -> Result<()> {
                 tokens: Mutex::new(restore.as_ref().map(|s| (s.tokens_in, s.tokens_out)).unwrap_or((0, 0))),
                 cost: Mutex::new(restore.as_ref().map(|s| s.cost).unwrap_or(0.0)),
                 attachments: Mutex::new(Vec::new()),
-                mcp: Mutex::new(None),
+                mcp: Arc::new(Mutex::new(None)),
                 allow_all: Arc::new(AtomicBool::new(false)),
                 queue: Arc::new(Mutex::new(Vec::new())),
                 titled: AtomicBool::new(restore.is_some()),
