@@ -57,3 +57,12 @@ toggle_theme = "ctrl+shift+t"
 [ui]
 # dark (default) | light
 # theme = "light"
+
+# agent loop
+[agent]
+# model context budget in tokens, compaction starts at 75%
+context_limit = 100000
+# tool rounds per message, then the model is asked to wrap up
+max_rounds = 15
+# max chars of a single tool result kept in the context
+output_budget = 32768

@@ -14,11 +14,12 @@ A high-performance, lightweight chat and autonomous coding assistant written in 
 - streaming responses and reasoning in a separate collapsible thinking block (GUI)
 - api key, endpoint and model are editable right in the GUI settings; the model dropdown is filled from the provider's `/models` endpoint
 - configurable hotkeys (`[keys]` in config or capture fields in GUI settings)
-- tool calling: read_file, write_file, edit, list_files, glob, grep, bash + MCP servers
+- tool calling: read_file (line numbers, offset/limit), write_file, edit, list_files, glob, grep, bash (workdir, timeout, tail output) + MCP servers
 - diff preview before edit/write approval, colored in GUI and TUI, mutations require confirmation
 - snapshots: every turn is snapshotted, `/undo` / `/redo` reverts file changes
 - mcp servers over stdio and streamable http: tools exposed as `mcp__<name>__<tool>`
-- markdown rendering in answers, token usage counters, automatic retry with backoff on 429/5xx
+- agent loop: context compaction when the window fills (on overflow too), per-tool output budget, graceful wrap-up at the round limit
+- markdown rendering in answers, token usage counters, automatic retry with backoff on 429/5xx and empty replies
 
 ## run
 
@@ -67,6 +68,12 @@ toggle_theme = "ctrl+shift+t"
 # interface
 [ui]
 # theme = "light"                                # dark (default) | light
+
+# agent loop
+[agent]
+context_limit = 100000                           # tokens, compaction starts at 75%
+max_rounds = 15                                  # tool rounds per message
+output_budget = 32768                            # max chars of one tool result
 ```
 
 ## commands (both UIs)

@@ -595,8 +595,13 @@ fn send(sh: State<'_, Arc<Shared>>, app: AppHandle, text: String) -> Result<Valu
     };
     let sh2: Arc<Shared> = sh.inner().clone();
     let mcp = sh.mcp.lock().unwrap().clone();
+    let agent_cfg = hi_derola::agent::AgentCfg {
+        context_limit: cfg.agent.context_limit,
+        max_rounds: cfg.agent.max_rounds,
+        output_budget: cfg.agent.output_budget,
+    };
     let handle = tauri::async_runtime::spawn(async move {
-        if let Err(e) = agent::run(provider, req, sh2.tx.clone(), sh2.allow_all.clone(), mcp).await {
+        if let Err(e) = agent::run(provider, req, sh2.tx.clone(), sh2.allow_all.clone(), mcp, agent_cfg).await {
             let _ = sh2.tx.send(ApiEvent::Failed(format!("{e:#}")));
         }
     });

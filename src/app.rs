@@ -413,6 +413,11 @@ impl App {
         let tx = self.tx.clone();
         let allow_all = self.allow_all.clone();
         let mcp = self.mcp.clone();
+        let agent_cfg = crate::agent::AgentCfg {
+            context_limit: self.cfg.agent.context_limit,
+            max_rounds: self.cfg.agent.max_rounds,
+            output_budget: self.cfg.agent.output_budget,
+        };
         let req = ChatRequest {
             system: self.session.system.clone(),
             messages: self.session.messages.clone(),
@@ -424,7 +429,7 @@ impl App {
             tools: Vec::new(),
         };
         let handle = tokio::spawn(async move {
-            if let Err(e) = agent::run(provider, req, tx.clone(), allow_all, mcp).await {
+            if let Err(e) = agent::run(provider, req, tx.clone(), allow_all, mcp, agent_cfg).await {
                 let _ = tx.send(ApiEvent::Failed(format!("{e:#}")));
             }
         });

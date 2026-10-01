@@ -14,6 +14,40 @@ pub struct Config {
     pub keys: BTreeMap<String, String>,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub agent: AgentConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentConfig {
+    #[serde(default = "default_context_limit")]
+    pub context_limit: u64,
+    #[serde(default = "default_max_rounds")]
+    pub max_rounds: usize,
+    #[serde(default = "default_output_budget")]
+    pub output_budget: usize,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            context_limit: default_context_limit(),
+            max_rounds: default_max_rounds(),
+            output_budget: default_output_budget(),
+        }
+    }
+}
+
+fn default_context_limit() -> u64 {
+    100_000
+}
+
+fn default_max_rounds() -> usize {
+    15
+}
+
+fn default_output_budget() -> usize {
+    32 * 1024
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

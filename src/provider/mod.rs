@@ -125,9 +125,9 @@ pub fn truncate(s: &str) -> String {
     out
 }
 
-const RETRY_MAX_ATTEMPTS: usize = 3;
+const RETRY_MAX_ATTEMPTS: usize = 10;
 const RETRY_INITIAL_MS: u64 = 2000;
-const RETRY_CAP_MS: u64 = 10_000;
+const RETRY_CAP_MS: u64 = 20_000;
 
 fn retryable_status(code: u16) -> bool {
     matches!(code, 408 | 429 | 500 | 502 | 503 | 504 | 529)
