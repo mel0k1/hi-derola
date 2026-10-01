@@ -12,6 +12,7 @@ model = "anthropic/claude-sonnet-4.5"
 base_url = "https://openrouter.ai/api/v1"
 
 # api key, or env HI_DEROLA_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY
+# can also be set in the GUI settings
 api_key = ""
 
 # optional response limit
@@ -37,3 +38,15 @@ stream = true
 # type = "remote"
 # url = "https://example.com/mcp"
 # headers = { Authorization = "Bearer ..." }
+
+# gui hotkeys, combos: enter, escape, tab, ctrl+x, shift+enter, alt+f, comma...
+# set to "none" to disable, unknown keys fall back to defaults
+[keys]
+send = "enter"
+newline = "shift+enter"
+stop = "escape"
+new_session = "ctrl+n"
+open_settings = "ctrl+comma"
+undo = "ctrl+z"
+redo = "ctrl+shift+z"
+toggle_thinking = "ctrl+t"

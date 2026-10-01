@@ -10,7 +10,20 @@ pub struct Config {
     pub provider: ProviderConfig,
     #[serde(default)]
     pub mcp: Vec<McpConfig>,
+    #[serde(default)]
+    pub keys: BTreeMap<String, String>,
 }
+
+pub const DEFAULT_KEYS: &[(&str, &str)] = &[
+    ("send", "enter"),
+    ("newline", "shift+enter"),
+    ("stop", "escape"),
+    ("new_session", "ctrl+n"),
+    ("open_settings", "ctrl+comma"),
+    ("undo", "ctrl+z"),
+    ("redo", "ctrl+shift+z"),
+    ("toggle_thinking", "ctrl+t"),
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
@@ -60,20 +73,29 @@ pub fn config_path() -> PathBuf {
 }
 
 impl Config {
-    pub fn load() -> Result<Self> {
+    pub fn load_or_default() -> Result<(Self, bool)> {
         let path = config_path();
         if !path.exists() {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).context("create config dir")?;
             }
             std::fs::write(&path, EXAMPLE).context("write config")?;
-            bail!(
-                "config created at {}, fill api_key and restart",
-                path.display()
-            );
+            let cfg: Config = toml::from_str(EXAMPLE).context("parse config")?;
+            return Ok((cfg, true));
         }
         let raw = std::fs::read_to_string(&path).context("read config")?;
         let cfg: Config = toml::from_str(&raw).context("parse config")?;
+        Ok((cfg, false))
+    }
+
+    pub fn load() -> Result<Self> {
+        let (cfg, created) = Self::load_or_default()?;
+        if created {
+            bail!(
+                "config created at {}, fill api_key and restart",
+                config_path().display()
+            );
+        }
         Ok(cfg)
     }
 
@@ -81,6 +103,22 @@ impl Config {
         let raw = toml::to_string_pretty(self).context("serialize config")?;
         std::fs::write(config_path(), raw)?;
         Ok(())
+    }
+
+    pub fn keys(&self) -> BTreeMap<String, String> {
+        let mut out: BTreeMap<String, String> = DEFAULT_KEYS
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        for (k, v) in &self.keys {
+            let v = v.trim().to_lowercase();
+            if v == "none" {
+                out.remove(k);
+            } else if !v.is_empty() {
+                out.insert(k.clone(), v);
+            }
+        }
+        out
     }
 
     pub fn api_key(&self) -> Option<String> {
