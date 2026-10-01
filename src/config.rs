@@ -12,6 +12,14 @@ pub struct Config {
     pub mcp: Vec<McpConfig>,
     #[serde(default)]
     pub keys: BTreeMap<String, String>,
+    #[serde(default)]
+    pub ui: UiConfig,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UiConfig {
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 pub const DEFAULT_KEYS: &[(&str, &str)] = &[
@@ -23,6 +31,8 @@ pub const DEFAULT_KEYS: &[(&str, &str)] = &[
     ("undo", "ctrl+z"),
     ("redo", "ctrl+shift+z"),
     ("toggle_thinking", "ctrl+t"),
+    ("toggle_sidebar", "ctrl+b"),
+    ("toggle_theme", "ctrl+shift+t"),
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

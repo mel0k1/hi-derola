@@ -50,3 +50,10 @@ open_settings = "ctrl+comma"
 undo = "ctrl+z"
 redo = "ctrl+shift+z"
 toggle_thinking = "ctrl+t"
+toggle_sidebar = "ctrl+b"
+toggle_theme = "ctrl+shift+t"
+
+# interface
+[ui]
+# dark (default) | light
+# theme = "light"
