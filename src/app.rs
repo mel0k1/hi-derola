@@ -67,7 +67,7 @@ pub struct App {
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
-const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /clear         start new session\n  /quit          exit\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/list/glob/grep/bash + mcp servers, mutations ask y/n/a";
+const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /clear         start new session\n  /quit          exit\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/list/glob/grep/bash + mcp servers, mutations ask y/n/a";
 
 pub fn help_text() -> &'static str {
     HELP
@@ -460,6 +460,30 @@ impl App {
                         Err(e) => self.info(format!("model: {} (not saved: {e:#})", self.model)),
                     }
                 }
+            }
+            "/models" => {
+                let kind = self.cfg.provider.kind.clone();
+                let base = self.cfg.provider.base_url.clone();
+                let key = self.cfg.api_key().unwrap_or_default();
+                let tx = self.tx.clone();
+                self.info("fetching models...");
+                tokio::spawn(async move {
+                    match crate::provider::list_models(&kind, base.as_deref(), &key).await {
+                        Ok(list) if list.is_empty() => {
+                            let _ = tx.send(ApiEvent::Note("no models found".into()));
+                        }
+                        Ok(list) => {
+                            let _ = tx.send(ApiEvent::Note(format!(
+                                "models ({}):\n{}",
+                                list.len(),
+                                list.join("\n")
+                            )));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(ApiEvent::Note(format!("error: {e:#}")));
+                        }
+                    }
+                });
             }
             "/file" => {
                 if arg.is_empty() {

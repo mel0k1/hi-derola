@@ -57,6 +57,63 @@ pub fn build(kind: &str, base_url: Option<String>, api_key: String) -> Result<Ar
     }
 }
 
+pub async fn list_models(kind: &str, base_url: Option<&str>, api_key: &str) -> Result<Vec<String>> {
+    let http = reqwest::Client::new();
+    let (url, headers): (String, Vec<(&'static str, String)>) = match kind {
+        "anthropic" => {
+            let base = base_url
+                .map(|s| s.trim_end_matches('/').to_string())
+                .unwrap_or_else(|| "https://api.anthropic.com".into());
+            (
+                format!("{base}/v1/models?limit=1000"),
+                vec![
+                    ("x-api-key", api_key.to_string()),
+                    ("anthropic-version", "2023-06-01".into()),
+                ],
+            )
+        }
+        _ => {
+            let base = base_url
+                .map(|s| s.trim_end_matches('/').to_string())
+                .unwrap_or_else(|| "https://api.openai.com/v1".into());
+            (
+                format!("{base}/models"),
+                vec![("Authorization", format!("Bearer {api_key}"))],
+            )
+        }
+    };
+    let mut req = http.get(&url);
+    for (k, v) in headers {
+        req = req.header(k, v);
+    }
+    req = req.header("User-Agent", "hi-derola");
+    let resp = req.send().await?;
+    let status = resp.status();
+    let text = resp.text().await?;
+    if !status.is_success() {
+        bail!("{} {}", status, truncate(&text));
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+    let mut out = Vec::new();
+    if let Some(items) = v["data"].as_array() {
+        for it in items {
+            let id = it["id"]
+                .as_str()
+                .map(|s| s.to_string())
+                .or_else(|| it.as_str().map(|s| s.to_string()));
+            if let Some(id) = id {
+                if !id.is_empty() {
+                    out.push(id);
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
+}
+
 pub fn truncate(s: &str) -> String {
     let end = s
         .char_indices()
