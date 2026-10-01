@@ -8,6 +8,7 @@ pub mod md;
 pub mod mcp;
 pub mod provider;
 pub mod search;
+pub mod sessions;
 pub mod snapshot;
 pub mod tools;
 pub mod ui;
