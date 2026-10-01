@@ -201,14 +201,13 @@ function newChat() {
   invoke("new_session").catch((e) => note(String(e)));
 }
 
+const WELCOME_HTML = $("welcome") ? $("welcome").outerHTML : "";
+
 function clearChat() {
-  $("chat-col").replaceChildren();
-  const w = $("welcome").cloneNode(true);
-  w.id = "welcome";
-  w.querySelectorAll(".ic[data-icon]").forEach((n) => {
+  $("chat-col").innerHTML = WELCOME_HTML;
+  $("chat-col").querySelectorAll(".ic[data-icon]").forEach((n) => {
     n.innerHTML = icon(n.dataset.icon);
   });
-  $("chat-col").appendChild(w);
   streamRaw = null;
   streamBody = null;
   think = null;
@@ -438,13 +437,18 @@ function addDiff(container, rows) {
 
 /* attachments */
 
+function chipName(p) {
+  const base = p.replace(/\s*\(\d+ entries?\)\s*$/, "").replace(/[\\/]+$/, "");
+  return base.split(/[\\/]/).pop() || p;
+}
+
 function renderChips(list) {
   const box = $("chips-inner");
   box.replaceChildren();
   list.forEach((p, i) => {
     const c = el("div", "chip");
     c.innerHTML = icon("file");
-    c.appendChild(el("span", "chip-name", p.split(/[\\/]/).pop()));
+    c.appendChild(el("span", "chip-name", chipName(p)));
     const rm = el("button", "icon-btn");
     rm.innerHTML = icon("x");
     rm.title = "remove";
@@ -473,8 +477,7 @@ async function browse(path) {
   if (!d.entries.length) list.appendChild(el("div", "sess-empty", "empty folder"));
   for (const e of d.entries) {
     const row = el("div", "frow");
-    row.innerHTML = icon(e.dir ? "folder" : "file");
-    row.querySelector(".ic").classList.add(e.dir ? "dir-ic" : "file-ic");
+    row.innerHTML = `<span class="ic ${e.dir ? "dir-ic" : "file-ic"}">${icon(e.dir ? "folder" : "file")}</span>`;
     row.appendChild(el("span", "fname", e.dir ? e.name + "/" : e.name));
     row.appendChild(el("span", "fsize", e.dir ? "" : fmtTokens(e.size) + "b"));
     row.onclick = async () => {
@@ -490,7 +493,8 @@ async function browse(path) {
 }
 
 function joinPath(dir, name) {
-  return (dir === "~" || dir.endsWith("/") ? dir : dir + "/") + name;
+  if (dir === "~") dir = "~/";
+  return dir.endsWith("/") || dir.endsWith("\\") ? dir + name : dir + "/" + name;
 }
 
 async function attach(path) {
@@ -630,18 +634,6 @@ async function doSend() {
   if (!text || waiting || confirmOpen || settingsOpen || filesOpen) return;
   input.value = "";
   autosize();
-  let res;
-  try {
-    res = await invoke("send", { text });
-  } catch (e) {
-    note(String(e));
-    if (String(e).includes("api key")) openSettings();
-    return;
-  }
-  if (res.cmd) {
-    if (res.note) note(res.note);
-    return;
-  }
   clearWelcome();
   const m = el("div", "msg you");
   m.appendChild(el("div", "who", "you"));
@@ -650,6 +642,23 @@ async function doSend() {
   autoscroll();
   waiting = true;
   applyStatus();
+  let res;
+  try {
+    res = await invoke("send", { text });
+  } catch (e) {
+    m.remove();
+    waiting = false;
+    applyStatus();
+    note(String(e));
+    if (String(e).includes("api key")) openSettings();
+    return;
+  }
+  if (res.cmd) {
+    m.remove();
+    waiting = false;
+    applyStatus();
+    if (res.note) note(res.note);
+  }
 }
 
 async function runCmd(text) {
