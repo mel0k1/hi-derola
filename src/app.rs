@@ -57,6 +57,7 @@ pub struct App {
     pub reasoning: Option<usize>,
     pub tokens_in: u64,
     pub tokens_out: u64,
+    pub cost: f64,
     pub should_quit: bool,
     pub status: String,
     allow_all: Arc<AtomicBool>,
@@ -78,6 +79,14 @@ fn fmt_tokens(n: u64) -> String {
         n.to_string()
     } else {
         format!("{:.1}k", n as f64 / 1000.0)
+    }
+}
+
+fn fmt_cost(c: f64) -> String {
+    if c >= 1.0 {
+        format!("${c:.2}")
+    } else {
+        format!("${c:.4}")
     }
 }
 
@@ -118,6 +127,7 @@ impl App {
             reasoning: None,
             tokens_in: 0,
             tokens_out: 0,
+            cost: 0.0,
             should_quit: false,
             status,
             allow_all: Arc::new(AtomicBool::new(false)),
@@ -209,6 +219,7 @@ impl App {
             ApiEvent::Usage { input, output } => {
                 self.tokens_in += input;
                 self.tokens_out += output;
+                self.cost += crate::models::cost(&self.model, input, output);
             }
             ApiEvent::Done { text, messages } => {
                 if let Some(i) = self.streaming {
@@ -263,6 +274,9 @@ impl App {
                         fmt_tokens(self.tokens_in),
                         fmt_tokens(self.tokens_out)
                     ));
+                }
+                if self.cost > 0.0 {
+                    s.push_str(&format!(" · {}", fmt_cost(self.cost)));
                 }
                 s
             }

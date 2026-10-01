@@ -5,7 +5,7 @@ use hi_derola::config::Config;
 use hi_derola::mcp::{self, McpClient};
 use hi_derola::provider::{self, ApiEvent, ChatRequest, Provider};
 use hi_derola::sessions::{self, SessionMeta, StoredSession};
-use hi_derola::{snapshot, tools};
+use hi_derola::{models, snapshot, tools};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,6 +22,7 @@ pub struct Shared {
     confirm: Mutex<Option<oneshot::Sender<bool>>>,
     inflight: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     tokens: Mutex<(u64, u64)>,
+    cost: Mutex<f64>,
     attachments: Mutex<Vec<(String, String)>>,
     mcp: Mutex<Option<Arc<McpClient>>>,
     allow_all: Arc<AtomicBool>,
@@ -81,6 +82,9 @@ fn persist(sh: &Shared) {
         updated: 0,
         system: ses.system.clone(),
         messages: ses.messages.clone(),
+        tokens_in: sh.tokens.lock().unwrap().0,
+        tokens_out: sh.tokens.lock().unwrap().1,
+        cost: *sh.cost.lock().unwrap(),
     };
     drop(ses);
     let _ = sessions::save(&st);
@@ -179,10 +183,17 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     confirm_payload(&name, &args)
                 }
                 ApiEvent::Usage { input, output } => {
+                    let model = sh.cfg.lock().unwrap().provider.model.clone();
+                    let delta = models::cost(&model, input, output);
                     let mut t = sh.tokens.lock().unwrap();
                     t.0 += input;
                     t.1 += output;
-                    json!({"t": "usage", "input": input, "output": output})
+                    drop(t);
+                    let mut c = sh.cost.lock().unwrap();
+                    *c += delta;
+                    let total = *c;
+                    drop(c);
+                    json!({"t": "usage", "input": input, "output": output, "cost": total})
                 }
                 ApiEvent::Done { text, messages } => {
                     autotitle(&app, &sh, &messages);
@@ -217,6 +228,7 @@ fn start_new(sh: &Shared, app: &AppHandle) {
     *sh.title.lock().unwrap() = String::new();
     *sh.created.lock().unwrap() = 0;
     *sh.tokens.lock().unwrap() = (0, 0);
+    *sh.cost.lock().unwrap() = 0.0;
     let _ = app.emit("ev", json!({"t": "cleared"}));
     emit_sessions(app, sh);
     emit_attachments(sh, app);
@@ -386,17 +398,20 @@ fn open_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) -> Resul
     *sh.sid.lock().unwrap() = st.id.clone();
     *sh.title.lock().unwrap() = st.title.clone();
     *sh.created.lock().unwrap() = st.created;
-    *sh.tokens.lock().unwrap() = (0, 0);
+    *sh.tokens.lock().unwrap() = (st.tokens_in, st.tokens_out);
+    *sh.cost.lock().unwrap() = st.cost;
     sh.titled.store(true, Ordering::Relaxed);
     sh.attachments.lock().unwrap().clear();
     sh.confirm.lock().unwrap().take();
     emit_attachments(&sh, &app);
-    let _ = app.emit("ev", json!({"t": "usage", "input": 0, "output": 0}));
     Ok(json!({
         "id": st.id,
         "title": st.title,
         "created": st.created,
         "updated": st.updated,
+        "tokens_in": st.tokens_in,
+        "tokens_out": st.tokens_out,
+        "cost": st.cost,
         "transcript": transcript(&st.messages),
     }))
 }
@@ -412,6 +427,8 @@ fn delete_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) -> Res
         *sh.sid.lock().unwrap() = sessions::new_id();
         *sh.title.lock().unwrap() = String::new();
         *sh.created.lock().unwrap() = 0;
+        *sh.tokens.lock().unwrap() = (0, 0);
+        *sh.cost.lock().unwrap() = 0.0;
         let _ = app.emit("ev", json!({"t": "cleared"}));
     }
     emit_sessions(&app, &sh);
@@ -727,7 +744,7 @@ pub fn run() -> Result<()> {
                 .api_key()
                 .and_then(|k| provider::build(&cfg.provider.kind, cfg.provider.base_url.clone(), k).ok());
             let restore = sessions::latest();
-            let (sid, title, created, session) = match restore {
+            let (sid, title, created, session) = match &restore {
                 Some(st) => (
                     st.id.clone(),
                     st.title.clone(),
@@ -736,9 +753,9 @@ pub fn run() -> Result<()> {
                         system: if st.system.trim().is_empty() {
                             system_prompt()
                         } else {
-                            st.system
+                            st.system.clone()
                         },
-                        messages: st.messages,
+                        messages: st.messages.clone(),
                     },
                 ),
                 None => (sessions::new_id(), String::new(), 0, Session::new(system_prompt())),
@@ -752,7 +769,8 @@ pub fn run() -> Result<()> {
                 created: Mutex::new(created),
                 confirm: Mutex::new(None),
                 inflight: Mutex::new(None),
-                tokens: Mutex::new((0, 0)),
+                tokens: Mutex::new(restore.as_ref().map(|s| (s.tokens_in, s.tokens_out)).unwrap_or((0, 0))),
+                cost: Mutex::new(restore.as_ref().map(|s| s.cost).unwrap_or(0.0)),
                 attachments: Mutex::new(Vec::new()),
                 mcp: Mutex::new(None),
                 allow_all: Arc::new(AtomicBool::new(false)),

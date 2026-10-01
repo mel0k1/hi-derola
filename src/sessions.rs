@@ -11,6 +11,8 @@ pub struct SessionMeta {
     pub created: u64,
     pub updated: u64,
     pub count: usize,
+    #[serde(default)]
+    pub cost: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +23,12 @@ pub struct StoredSession {
     pub updated: u64,
     pub system: String,
     pub messages: Vec<Message>,
+    #[serde(default)]
+    pub tokens_in: u64,
+    #[serde(default)]
+    pub tokens_out: u64,
+    #[serde(default)]
+    pub cost: f64,
 }
 
 pub fn store_dir() -> PathBuf {
@@ -141,6 +149,7 @@ pub fn list() -> Vec<SessionMeta> {
             created: v.created,
             updated: v.updated,
             count: v.messages.len(),
+            cost: v.cost,
         });
     }
     out.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| b.created.cmp(&a.created)));
@@ -209,6 +218,9 @@ mod tests {
                 }]),
                 Message::tool("t1", "ok"),
             ],
+            tokens_in: 0,
+            tokens_out: 0,
+            cost: 0.0,
         };
         save(&st).unwrap();
         let got = load(&st.id).unwrap();
@@ -249,6 +261,9 @@ mod tests {
             updated: 1,
             system: String::new(),
             messages: vec![],
+            tokens_in: 0,
+            tokens_out: 0,
+            cost: 0.0,
         };
         save(&a).unwrap();
         a.id = "s-2-test".into();

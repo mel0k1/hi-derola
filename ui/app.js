@@ -22,7 +22,7 @@ let streamRaw = null;
 let streamBody = null;
 let renderTimer = null;
 let think = null;
-let tokens = { in: 0, out: 0 };
+let tokens = { in: 0, out: 0, cost: 0 };
 
 /* icons */
 
@@ -125,7 +125,8 @@ function renderSessions() {
     const item = el("div", "sess" + (s.id === SID ? " active" : ""));
     const main = el("div", "sess-main");
     main.appendChild(el("div", "sess-title", s.title || "new chat"));
-    main.appendChild(el("div", "sess-meta", `${s.count} msgs · ${fmtRel(s.updated)}`));
+    const meta = `${s.count} msgs · ${fmtRel(s.updated)}` + (s.cost > 0 ? ` · ${fmtCost(s.cost)}` : "");
+    main.appendChild(el("div", "sess-meta", meta));
     item.appendChild(main);
     const del = el("button", "icon-btn sess-del");
     del.innerHTML = icon("trash");
@@ -164,6 +165,7 @@ async function openSession(id) {
     return;
   }
   SID = st.id;
+  tokens = { in: st.tokens_in || 0, out: st.tokens_out || 0, cost: st.cost || 0 };
   $("chat-col").replaceChildren();
   streamRaw = null;
   streamBody = null;
@@ -211,7 +213,7 @@ function clearChat() {
   streamRaw = null;
   streamBody = null;
   think = null;
-  tokens = { in: 0, out: 0 };
+  tokens = { in: 0, out: 0, cost: 0 };
   applyStatus();
 }
 
@@ -219,6 +221,10 @@ function clearChat() {
 
 function fmtTokens(n) {
   return n < 1000 ? String(n) : (n / 1000).toFixed(1) + "k";
+}
+
+function fmtCost(c) {
+  return "$" + (c >= 1 ? c.toFixed(2) : c.toFixed(4));
 }
 
 function applyStatus() {
@@ -229,10 +235,10 @@ function applyStatus() {
     right.classList.add("busy");
   } else {
     right.classList.remove("busy");
-    right.textContent =
-      tokens.in || tokens.out
-        ? `${fmtTokens(tokens.in)} in · ${fmtTokens(tokens.out)} out`
-        : "";
+    let s = "";
+    if (tokens.in || tokens.out) s = `${fmtTokens(tokens.in)} in · ${fmtTokens(tokens.out)} out`;
+    if (tokens.cost > 0) s += (s ? " · " : "") + fmtCost(tokens.cost);
+    right.textContent = s;
   }
 }
 
@@ -566,6 +572,7 @@ async function handleEvent(ev) {
     case "usage":
       tokens.in += ev.input;
       tokens.out += ev.output;
+      if (typeof ev.cost === "number") tokens.cost = ev.cost;
       applyStatus();
       break;
     case "attachments":
