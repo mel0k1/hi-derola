@@ -15,6 +15,10 @@ A high-performance, lightweight chat and autonomous coding assistant written in 
 - api key, endpoint and model are editable right in the GUI settings; the model dropdown is filled from the provider's `/models` endpoint
 - configurable hotkeys (`[keys]` in config or capture fields in GUI settings)
 - tool calling: read_file (line numbers, offset/limit), write_file, edit (tolerant to CRLF/LF, BOM and trailing whitespace), list_files, glob, grep, bash (workdir, timeout, tail output), webfetch (http/https, html converted to markdown/text) + MCP servers
+- lsp diagnostics after write_file/edit: edits are pushed to a language server (rust-analyzer, pyright, typescript-language-server, gopls, clangd — auto-detected on PATH) and errors/warnings come back to the model in the tool result, so it fixes its own mistakes immediately
+- formatters after write_file/edit: rustfmt, gofmt and prettier run on the touched file automatically (prettier is picked from node_modules/.bin or PATH)
+- glob/grep/list_files respect .gitignore and .ignore and skip hidden files
+- prompt caching: anthropic requests mark system/tools/last message with cache_control, openai requests get a prompt_cache_key — long agent loops stop re-paying the full prompt
 - background bash: `background: true` runs a command as a task (`bg-2`) — useful for dev servers and long builds; the tool returns immediately, the output streams live (GUI card with a kill button) and the full result arrives as a new message when the command finishes, `task_status` lists tasks and shows the running output, `task_kill` stops a task
 - todo tools: `todowrite` / `todoread` keep a structured task list (content, status, priority) for multi-step work; the live list renders as a card in the GUI and info lines in the TUI, and is stored with the session
 - question tool pauses the run and asks the user multiple-choice questions right in the UI (free-form answer, esc skips)
