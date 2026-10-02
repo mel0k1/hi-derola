@@ -367,7 +367,7 @@ impl App {
             self.phase = Phase::Idle;
             return;
         };
-        let mut restore = |app: &mut Self, a: AskCtx| {
+        let restore = |app: &mut Self, a: AskCtx| {
             app.ask = Some(a);
         };
         match code {

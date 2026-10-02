@@ -129,7 +129,6 @@ impl McpServer {
             cmd.args(&cfg.args).envs(&cfg.env);
             #[cfg(windows)]
             {
-                use std::os::windows::process::CommandExt;
                 cmd.creation_flags(0x0800_0000);
             }
             let mut child = cmd
