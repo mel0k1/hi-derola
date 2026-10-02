@@ -79,7 +79,7 @@ pub struct App {
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
-const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/list/glob/grep/bash (background: true)/webfetch + question, subagent (background), task_status, task_kill, todowrite/todoread, skill, mcp servers\nconfirm:\n  y run  n skip  a allow all  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
+const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/list/glob/grep/bash (background: true)/webfetch + question, subagent (background), task_status, task_kill, todowrite/todoread, skill, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
 
 pub fn help_text() -> &'static str {
     HELP
@@ -369,7 +369,7 @@ impl App {
                     let feedback = self.input.trim().to_string();
                     self.input.clear();
                     self.confirm_feedback = false;
-                    let _ = c.rx.send(ConfirmReply { approved: false, feedback });
+                    let _ = c.rx.send(ConfirmReply { approved: false, feedback, always: false });
                     self.info("rejected with feedback");
                 }
                 KeyCode::Esc => {
@@ -402,11 +402,21 @@ impl App {
         }
         match code {
             KeyCode::Char('y') => {
-                let _ = c.rx.send(ConfirmReply { approved: true, feedback: String::new() });
+                let _ = c.rx.send(ConfirmReply { approved: true, feedback: String::new(), always: false });
             }
             KeyCode::Char('a') => {
                 self.allow_all.store(true, Ordering::Relaxed);
-                let _ = c.rx.send(ConfirmReply { approved: true, feedback: String::new() });
+                let _ = c.rx.send(ConfirmReply { approved: true, feedback: String::new(), always: false });
+            }
+            KeyCode::Char('w') => {
+                if let Some(rule) = crate::perm::derive_rule(&c.name, &c.args) {
+                    if let Err(e) = crate::config::Config::append_perm_rule(rule.clone()) {
+                        self.info(format!("rule not saved: {e:#}"));
+                    }
+                    self.cfg.permissions.rules.push(rule);
+                    self.info("always allowed: rule saved to config");
+                }
+                let _ = c.rx.send(ConfirmReply { approved: true, feedback: String::new(), always: true });
             }
             KeyCode::Char('f') => {
                 self.input.clear();

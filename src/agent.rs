@@ -82,7 +82,7 @@ pub async fn run(
     allow_all: Arc<AtomicBool>,
     mcp: McpSlot,
     queue: Arc<Mutex<Vec<String>>>,
-    cfg: AgentCfg,
+    mut cfg: AgentCfg,
 ) -> Result<()> {
     let ctx_limit = effective_limit(&cfg, &req.model);
     let configured_max = req.max_tokens;
@@ -236,6 +236,11 @@ pub async fn run(
                             msgs.push(Message::tool(&call.id, deny_message(&call.name, &reply.feedback)));
                             req.messages = msgs.clone();
                             continue;
+                        }
+                        if reply.always {
+                            if let Some(rule) = crate::perm::derive_rule(&call.name, &call.args) {
+                                cfg.perm.rules.push(rule);
+                            }
                         }
                     }
                 }

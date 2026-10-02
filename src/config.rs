@@ -167,6 +167,16 @@ impl Config {
         Ok(())
     }
 
+    /// persist an "always allow" permission rule into config.toml
+    pub fn append_perm_rule(rule: crate::perm::PermRule) -> Result<()> {
+        let (mut cfg, created) = Self::load_or_default()?;
+        if created {
+            bail!("config not initialized");
+        }
+        cfg.permissions.rules.push(rule);
+        cfg.save()
+    }
+
     pub fn keys(&self) -> BTreeMap<String, String> {
         let mut out: BTreeMap<String, String> = DEFAULT_KEYS
             .iter()

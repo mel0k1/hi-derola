@@ -40,6 +40,8 @@ pub enum ApiEvent {
 pub struct ConfirmReply {
     pub approved: bool,
     pub feedback: String,
+    /// approve and save a wildcard allow-rule for this tool into the config
+    pub always: bool,
 }
 
 #[derive(Clone)]

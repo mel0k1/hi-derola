@@ -20,7 +20,7 @@ pub struct Shared {
     sid: Mutex<String>,
     title: Mutex<String>,
     created: Mutex<u64>,
-    confirm: Mutex<Option<oneshot::Sender<ConfirmReply>>>,
+    confirm: Mutex<Option<(oneshot::Sender<ConfirmReply>, String, String)>>,
     ask: Mutex<Option<oneshot::Sender<String>>>,
     inflight: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     tokens: Mutex<(u64, u64)>,
@@ -267,7 +267,7 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     "t": "tool", "name": name, "detail": detail, "diff": diff_json(diff),
                 }),
                 ApiEvent::Confirm { name, args, rx } => {
-                    *sh.confirm.lock().unwrap() = Some(rx);
+                    *sh.confirm.lock().unwrap() = Some((rx, name.clone(), args.clone()));
                     confirm_payload(&name, &args)
                 }
                 ApiEvent::Ask { name, args, rx } => {
@@ -420,11 +420,26 @@ async fn list_models(
 }
 
 #[tauri::command]
-async fn confirm(sh: State<'_, Arc<Shared>>, ok: bool, feedback: Option<String>) -> Result<(), String> {
-    if let Some(c) = sh.confirm.lock().unwrap().take() {
+async fn confirm(
+    sh: State<'_, Arc<Shared>>,
+    ok: bool,
+    feedback: Option<String>,
+    always: Option<bool>,
+) -> Result<(), String> {
+    if let Some((c, name, args)) = sh.confirm.lock().unwrap().take() {
+        let always = always.unwrap_or(false);
+        if ok && always {
+            if let Some(rule) = hi_derola::perm::derive_rule(&name, &args) {
+                if let Err(e) = hi_derola::config::Config::append_perm_rule(rule.clone()) {
+                    eprintln!("perm rule not saved: {e:#}");
+                }
+                sh.cfg.lock().unwrap().permissions.rules.push(rule);
+            }
+        }
         let _ = c.send(ConfirmReply {
             approved: ok,
             feedback: feedback.unwrap_or_default(),
+            always,
         });
     }
     Ok(())
@@ -441,8 +456,8 @@ async fn answer(sh: State<'_, Arc<Shared>>, text: String) -> Result<(), String> 
 #[tauri::command]
 async fn allow_all(sh: State<'_, Arc<Shared>>) -> Result<(), String> {
     sh.allow_all.store(true, Ordering::Relaxed);
-    if let Some(c) = sh.confirm.lock().unwrap().take() {
-        let _ = c.send(ConfirmReply { approved: true, feedback: String::new() });
+    if let Some((c, _, _)) = sh.confirm.lock().unwrap().take() {
+        let _ = c.send(ConfirmReply { approved: true, feedback: String::new(), always: false });
     }
     Ok(())
 }
@@ -466,7 +481,7 @@ async fn stop(sh: State<'_, Arc<Shared>>, app: AppHandle) -> Result<(), String> 
     if let Some(h) = sh.inflight.lock().unwrap().take() {
         h.abort();
     }
-    if let Some(c) = sh.confirm.lock().unwrap().take() {
+    if let Some((c, _, _)) = sh.confirm.lock().unwrap().take() {
         let _ = c.send(ConfirmReply::default());
     }
     if let Some(a) = sh.ask.lock().unwrap().take() {

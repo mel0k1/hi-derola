@@ -165,6 +165,57 @@ fn parse(s: &str) -> Perm {
     }
 }
 
+/// build an allow-rule to persist when the user answers "always allow";
+/// bash -> "<first words> *", files -> "*.<ext>", urls -> "scheme://host/*"
+pub fn derive_rule(tool: &str, args: &str) -> Option<PermRule> {
+    let v: serde_json::Value = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
+    let (key, pattern) = match tool {
+        "bash" => {
+            let cmd = v["command"].as_str()?.trim();
+            let words: Vec<&str> = cmd.split_whitespace().take(2).collect();
+            if words.is_empty() {
+                return None;
+            }
+            (tool.to_string(), format!("{} *", words.join(" ")))
+        }
+        "edit" | "write_file" => {
+            let path = v["path"].as_str().unwrap_or("");
+            let ext = std::path::Path::new(path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            let p = if ext.is_empty() {
+                "*".to_string()
+            } else {
+                format!("*.{ext}")
+            };
+            (tool.to_string(), p)
+        }
+        "webfetch" => {
+            let url = v["url"].as_str().unwrap_or("");
+            let (scheme, rest) = url.split_once("://")?;
+            let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+            if host.is_empty() {
+                return None;
+            }
+            ("webfetch".to_string(), format!("{scheme}://{host}/*"))
+        }
+        t if t.starts_with("mcp__") => {
+            let srv = t.strip_prefix("mcp__")?.split("__").next()?;
+            if srv.is_empty() {
+                return None;
+            }
+            ("mcp".to_string(), format!("{srv}__*"))
+        }
+        _ => (tool.to_string(), "*".to_string()),
+    };
+    Some(PermRule {
+        tool: key,
+        pattern: Some(pattern),
+        permission: "allow".into(),
+    })
+}
+
 /// wildcard match: * = any run, ? = any single char
 pub fn wc(pattern: &str, text: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
@@ -292,6 +343,27 @@ mod tests {
         };
         assert_eq!(sa.check("subagent", r#"{"description":"d"}"#), Perm::Ask);
         assert_eq!(PermCfg::default().check("subagent", "{}"), Perm::Allow);
+    }
+
+    #[test]
+    fn always_rules() {
+        let r = derive_rule("bash", r#"{"command":"git push origin main"}"#).unwrap();
+        assert_eq!(r.tool, "bash");
+        assert_eq!(r.pattern.as_deref(), Some("git push *"));
+        assert_eq!(r.permission, "allow");
+        let r = derive_rule("edit", r#"{"path":"src/app.rs"}"#).unwrap();
+        assert_eq!(r.pattern.as_deref(), Some("*.rs"));
+        let cfg = PermCfg {
+            rules: vec![r],
+            ..Default::default()
+        };
+        assert_eq!(cfg.check("edit", r#"{"path":"src/other.rs"}"#), Perm::Allow);
+        let r = derive_rule("webfetch", r#"{"url":"https://example.com/a?b"}"#).unwrap();
+        assert_eq!(r.pattern.as_deref(), Some("https://example.com/*"));
+        let r = derive_rule("mcp__fs__read", "{}").unwrap();
+        assert_eq!(r.tool, "mcp");
+        assert_eq!(r.pattern.as_deref(), Some("fs__*"));
+        assert!(derive_rule("bash", r#"{"command":""}"#).is_none());
     }
 
     #[test]

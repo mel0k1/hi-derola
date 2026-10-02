@@ -742,14 +742,15 @@ $("model-select").onchange = async (e) => {
 
 /* confirm */
 
-function resolveConfirm(ok) {
+function resolveConfirm(ok, always = false) {
   confirmOpen = false;
   $("confirm-overlay").classList.add("hidden");
   const feedback = ok ? "" : $("c-feedback").value.trim();
-  invoke("confirm", { ok, feedback });
+  invoke("confirm", { ok, feedback, always });
   waiting = true;
   applyStatus();
   if (!ok) note(feedback ? "rejected with feedback" : "denied");
+  if (ok && always) note("always allowed: rule saved to config");
   $("input").focus();
 }
 
@@ -764,6 +765,7 @@ function allowAll() {
 
 $("c-run").onclick = () => resolveConfirm(true);
 $("c-deny").onclick = () => resolveConfirm(false);
+$("c-always").onclick = () => resolveConfirm(true, true);
 $("c-allow").onclick = () => allowAll();
 $("c-feedback").onkeydown = (e) => {
   if (e.key === "Enter") {
@@ -1301,6 +1303,9 @@ window.addEventListener("keydown", (e) => {
     } else if (c.name === "a" && !c.ctrl && !c.alt && !c.meta) {
       e.preventDefault();
       allowAll();
+    } else if (c.name === "w" && !c.ctrl && !c.alt && !c.meta) {
+      e.preventDefault();
+      resolveConfirm(true, true);
     }
     return;
   }
