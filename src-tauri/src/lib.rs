@@ -286,6 +286,10 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     resume = true;
                     json!({"t": "failed", "s": e})
                 }
+                ApiEvent::Wake => {
+                    resume = sh.inflight.lock().unwrap().is_none();
+                    json!({"t": "wake"})
+                }
             };
             if payload.get("t").and_then(|t| t.as_str()) == Some("note") {
                 if payload.get("s").and_then(|s| s.as_str()) == Some("") {

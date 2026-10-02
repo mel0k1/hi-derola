@@ -199,10 +199,65 @@ pub async fn run(
                     .as_str()
                     .unwrap_or("")
                     .to_string();
+                let background = v["background"].as_bool().unwrap_or(false);
                 if prompt.is_empty() {
                     "error: subagent: prompt required".to_string()
                 } else if cfg.nested {
                     "error: nested subagents are not allowed".to_string()
+                } else if background {
+                    let sub_req = ChatRequest {
+                        system: subagent_system(),
+                        messages: vec![Message::new(Role::User, prompt)],
+                        model: req.model.clone(),
+                        max_tokens: req.max_tokens,
+                        temperature: req.temperature,
+                        top_p: req.top_p,
+                        stream: false,
+                        tools: Vec::new(),
+                    };
+                    let id = crate::bg::start(&desc);
+                    let _ = tx.send(ApiEvent::Note(format!(
+                        "background task {id} started: {desc}"
+                    )));
+                    let tx2 = tx.clone();
+                    let provider2 = provider.clone();
+                    let cfg2 = cfg.clone();
+                    let allow2 = allow_all.clone();
+                    let mcp2 = mcp.clone();
+                    let queue2 = queue.clone();
+                    let budget = cfg.output_budget;
+                    let id2 = id.clone();
+                    let desc2 = desc.clone();
+                    tokio::spawn(async move {
+                        let msg =
+                            match run_subagent(provider2, sub_req, cfg2, allow2, &tx2, mcp2).await
+                            {
+                                Ok(text) => {
+                                    crate::bg::finish(&id2, Some(text.clone()));
+                                    let _ = tx2.send(ApiEvent::Note(format!(
+                                        "background task {id2} finished: {desc2}"
+                                    )));
+                                    tools::budget(
+                                        format!(
+                                            "Background task {id2} ({desc2}) finished. Result:\n{text}"
+                                        ),
+                                        budget,
+                                    )
+                                }
+                                Err(e) => {
+                                    crate::bg::finish(&id2, None);
+                                    let _ = tx2.send(ApiEvent::Note(format!(
+                                        "background task {id2} failed: {e:#}"
+                                    )));
+                                    format!("Background task {id2} ({desc2}) failed: {e:#}")
+                                }
+                            };
+                        queue2.lock().unwrap().push(msg);
+                        let _ = tx2.send(ApiEvent::Wake);
+                    });
+                    format!(
+                        "started in background as task {id}; keep working, the result will arrive as a new message when the task finishes (progress: task_status)"
+                    )
                 } else {
                     let sub_req = ChatRequest {
                         system: subagent_system(),
@@ -289,53 +344,58 @@ pub fn subagent_system() -> String {
     )
 }
 
-async fn run_subagent(
+fn run_subagent<'a>(
     provider: Arc<dyn Provider>,
     req: ChatRequest,
     cfg: AgentCfg,
     allow_all: Arc<AtomicBool>,
-    tx: &UnboundedSender<ApiEvent>,
+    tx: &'a UnboundedSender<ApiEvent>,
     mcp: McpSlot,
-) -> Result<String> {
-    let (stx, mut srx) = tokio::sync::mpsc::unbounded_channel();
-    let fwd_tx = tx.clone();
-    let result: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let r2 = result.clone();
-    let fwd = tokio::spawn(async move {
-        while let Some(ev) = srx.recv().await {
-            match ev {
-                ApiEvent::Done { text, .. } => *r2.lock().unwrap() = Some(text),
-                ApiEvent::Note(_)
-                | ApiEvent::Tool { .. }
-                | ApiEvent::Confirm { .. }
-                | ApiEvent::Usage { .. }
-                | ApiEvent::Failed(_) => {
-                    let _ = fwd_tx.send(ev);
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
+    Box::pin(async move {
+        let (stx, mut srx) = tokio::sync::mpsc::unbounded_channel();
+        let fwd_tx = tx.clone();
+        let result: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let r2 = result.clone();
+        let fwd = tokio::spawn(async move {
+            while let Some(ev) = srx.recv().await {
+                match ev {
+                    ApiEvent::Done { text, .. } => *r2.lock().unwrap() = Some(text),
+                    ApiEvent::Note(_)
+                    | ApiEvent::Tool { .. }
+                    | ApiEvent::Confirm { .. }
+                    | ApiEvent::Usage { .. }
+                    | ApiEvent::Failed(_) => {
+                        let _ = fwd_tx.send(ev);
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
+        });
+        let sub_cfg = AgentCfg {
+            nested: true,
+            ..cfg
+        };
+        let fut: std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> =
+            Box::pin(run(
+                provider,
+                req,
+                stx,
+                allow_all,
+                mcp,
+                Arc::new(Mutex::new(Vec::new())),
+                sub_cfg,
+            ));
+        let res = fut.await;
+        let _ = fwd.await; // fix: abort could drop the queued Done before it was captured
+        if let Err(e) = res {
+            return Err(e);
         }
-    });
-    let sub_cfg = AgentCfg {
-        nested: true,
-        ..cfg
-    };
-    let res = Box::pin(run(
-        provider,
-        req,
-        stx,
-        allow_all,
-        mcp,
-        Arc::new(Mutex::new(Vec::new())),
-        sub_cfg,
-    ))
-    .await;
-    fwd.abort();
-    res?;
-    let text = result.lock().unwrap().take();
-    Ok(
-        text.unwrap_or_else(|| "(subagent finished without a final message)".into()),
-    )
+        let text = result.lock().unwrap().take();
+        Ok(
+            text.unwrap_or_else(|| "(subagent finished without a final message)".into()),
+        )
+    })
 }
 
 async fn wrap_up(

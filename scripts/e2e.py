@@ -32,7 +32,8 @@ def make_crlf_file():
 
 
 SCENARIO = {"edit_done": False, "steer_started": False, "steer_done": False,
-            "ask_done": False, "fetch_done": False, "sub_done": False}
+            "ask_done": False, "fetch_done": False, "sub_done": False,
+            "bg_started": False, "bg_done": False, "bg_result_seen": False}
 
 
 def sse_response(handler, chunks):
@@ -152,7 +153,11 @@ class Mock(BaseHTTPRequestHandler):
             return
         is_sub = bool(msgs) and msgs[0]["role"] == "system" and "subagent" in msgs[0]["content"]
         if is_sub:
-            respond([{"role": "assistant", "content": "SUB_DONE: found 3 files"}])
+            prompt = next((m["content"] for m in msgs if m["role"] == "user"), "")
+            text = "SUB_DONE: found 3 files"
+            if "count bg files" in prompt:
+                text = "SUB_BG: bg task result 42"
+            respond([{"role": "assistant", "content": text}])
             return
         if not SCENARIO["sub_done"]:
             sub_result = any("SUB_DONE" in m["content"] for m in tool_msgs)
@@ -163,6 +168,24 @@ class Mock(BaseHTTPRequestHandler):
                 chunks = tool_call_chunks("subagent", json.dumps({
                     "description": "explore",
                     "prompt": "count files",
+                }))
+            respond(chunks)
+            return
+        if "Background task bg-1" in last_user:
+            SCENARIO["bg_done"] = True
+            SCENARIO["bg_result_seen"] = "SUB_BG: bg task result 42" in last_user
+            respond([{"role": "assistant", "content": "BG_DONE_OK"}])
+            return
+        if not SCENARIO["bg_started"]:
+            started = any("started in background" in m["content"] for m in tool_msgs)
+            if started:
+                SCENARIO["bg_started"] = True
+                chunks = [{"role": "assistant", "content": "BG_SPAWNED"}]
+            else:
+                chunks = tool_call_chunks("subagent", json.dumps({
+                    "description": "bg explore",
+                    "prompt": "count bg files",
+                    "background": True,
                 }))
             respond(chunks)
             return
@@ -275,6 +298,12 @@ def run_pty():
             os.write(fd, b"\r")
             sent = 8
         elif sent == 8 and "SUBAGENT_OK" in plain:
+            time.sleep(0.3)
+            type_str("spawn bg sub")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            sent = 9
+        elif sent == 9 and "BG_DONE_OK" in plain:
             break
     try:
         os.kill(pid, signal.SIGKILL)
@@ -310,6 +339,10 @@ check("question answered", "ASK_OK" in plain)
 check("webfetch markdown returned", "FETCH_OK" in plain)
 check("subagent ran and returned", "SUBAGENT_OK" in plain)
 check("subagent progress note", "subagent started: explore" in plain)
+check("background task started note", "background task bg-1 started: bg explore" in plain)
+check("background task finished note", "background task bg-1 finished: bg explore" in plain)
+check("background result reached the model", SCENARIO["bg_result_seen"])
+check("background answer rendered", "BG_DONE_OK" in plain)
 
 shutil.rmtree(WORKDIR, ignore_errors=True)
 with open("/tmp/hiderola-e2e-log.txt", "w") as f:

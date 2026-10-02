@@ -30,6 +30,7 @@ pub enum ApiEvent {
     Ask { name: String, args: String, rx: tokio::sync::oneshot::Sender<String> },
     Done { text: String, messages: Vec<Message> },
     Failed(String),
+    Wake,
 }
 
 pub struct ChatRequest {
