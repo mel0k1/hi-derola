@@ -273,6 +273,7 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     json!({"t": "usage", "input": input, "output": output, "cost": total})
                 }
                 ApiEvent::Done { text, messages } => {
+                    *sh.inflight.lock().unwrap() = None;
                     autotitle(&app, &sh, &messages);
                     sh.session.lock().unwrap().messages = messages;
                     snapshot::end_turn();
@@ -282,6 +283,7 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     json!({"t": "done", "text": text})
                 }
                 ApiEvent::Failed(e) => {
+                    *sh.inflight.lock().unwrap() = None;
                     snapshot::end_turn();
                     resume = true;
                     json!({"t": "failed", "s": e})
@@ -321,9 +323,9 @@ fn start_new(sh: &Shared, app: &AppHandle) {
 }
 
 #[tauri::command]
-fn init(sh: State<'_, Arc<Shared>>) -> Value {
+async fn init(sh: State<'_, Arc<Shared>>) -> Result<Value, String> {
     let cfg = sh.cfg.lock().unwrap().clone();
-    json!({
+    Ok(json!({
         "cfg": cfg,
         "keys": cfg.keys(),
         "cwd": std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default(),
@@ -333,11 +335,11 @@ fn init(sh: State<'_, Arc<Shared>>) -> Value {
         "sid": sh.sid.lock().unwrap().clone(),
         "title": sh.title.lock().unwrap().clone(),
         "theme": cfg.ui.theme.clone(),
-    })
+    }))
 }
 
 #[tauri::command]
-fn save(sh: State<'_, Arc<Shared>>, app: AppHandle, cfg: Config) -> Result<Value, String> {
+async fn save(sh: State<'_, Arc<Shared>>, app: AppHandle, cfg: Config) -> Result<Value, String> {
     let p = match cfg.api_key() {
         Some(k) => match provider::build(&cfg.provider.kind, cfg.provider.base_url.clone(), k) {
             Ok(p) => Some(p),
@@ -359,7 +361,7 @@ fn save(sh: State<'_, Arc<Shared>>, app: AppHandle, cfg: Config) -> Result<Value
 }
 
 #[tauri::command]
-fn set_theme(sh: State<'_, Arc<Shared>>, theme: String) -> Result<Value, String> {
+async fn set_theme(sh: State<'_, Arc<Shared>>, theme: String) -> Result<Value, String> {
     let mut cfg = sh.cfg.lock().unwrap();
     cfg.ui.theme = Some(theme.clone());
     cfg.save().map_err(|e| format!("{e:#}"))?;
@@ -386,29 +388,32 @@ async fn list_models(
 }
 
 #[tauri::command]
-fn confirm(sh: State<'_, Arc<Shared>>, ok: bool) {
+async fn confirm(sh: State<'_, Arc<Shared>>, ok: bool) -> Result<(), String> {
     if let Some(c) = sh.confirm.lock().unwrap().take() {
         let _ = c.send(ok);
     }
+    Ok(())
 }
 
 #[tauri::command]
-fn answer(sh: State<'_, Arc<Shared>>, text: String) {
+async fn answer(sh: State<'_, Arc<Shared>>, text: String) -> Result<(), String> {
     if let Some(a) = sh.ask.lock().unwrap().take() {
         let _ = a.send(text);
     }
+    Ok(())
 }
 
 #[tauri::command]
-fn allow_all(sh: State<'_, Arc<Shared>>) {
+async fn allow_all(sh: State<'_, Arc<Shared>>) -> Result<(), String> {
     sh.allow_all.store(true, Ordering::Relaxed);
     if let Some(c) = sh.confirm.lock().unwrap().take() {
         let _ = c.send(true);
     }
+    Ok(())
 }
 
 #[tauri::command]
-fn stop(sh: State<'_, Arc<Shared>>, app: AppHandle) {
+async fn stop(sh: State<'_, Arc<Shared>>, app: AppHandle) -> Result<(), String> {
     if let Some(h) = sh.inflight.lock().unwrap().take() {
         h.abort();
     }
@@ -426,6 +431,7 @@ fn stop(sh: State<'_, Arc<Shared>>, app: AppHandle) {
     } else {
         resume_queue(&app, &sh);
     }
+    Ok(())
 }
 
 #[tauri::command]
@@ -437,15 +443,15 @@ async fn mcp_reconnect(sh: State<'_, Arc<Shared>>) -> Result<Vec<String>, String
 }
 
 #[tauri::command]
-fn undo(sh: State<'_, Arc<Shared>>) -> Option<String> {
+async fn undo(sh: State<'_, Arc<Shared>>) -> Result<Option<String>, String> {
     let _ = &sh;
-    snapshot::undo()
+    Ok(snapshot::undo())
 }
 
 #[tauri::command]
-fn redo(sh: State<'_, Arc<Shared>>) -> Option<String> {
+async fn redo(sh: State<'_, Arc<Shared>>) -> Result<Option<String>, String> {
     let _ = &sh;
-    snapshot::redo()
+    Ok(snapshot::redo())
 }
 
 fn transcript(msgs: &[hi_derola::chat::Message]) -> Vec<Value> {
@@ -473,17 +479,18 @@ fn transcript(msgs: &[hi_derola::chat::Message]) -> Vec<Value> {
 }
 
 #[tauri::command]
-fn list_sessions() -> Vec<SessionMeta> {
+async fn list_sessions() -> Vec<SessionMeta> {
     sessions::list()
 }
 
 #[tauri::command]
-fn new_session(sh: State<'_, Arc<Shared>>, app: AppHandle) {
+async fn new_session(sh: State<'_, Arc<Shared>>, app: AppHandle) -> Result<(), String> {
     start_new(&sh, &app);
+    Ok(())
 }
 
 #[tauri::command]
-fn open_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) -> Result<Value, String> {
+async fn open_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) -> Result<Value, String> {
     if *sh.sid.lock().unwrap() != id {
         persist(&sh);
     }
@@ -518,7 +525,7 @@ fn open_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) -> Resul
     }))
 }
 #[tauri::command]
-fn delete_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) -> Result<Value, String> {
+async fn delete_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) -> Result<Value, String> {
     sessions::delete(&id).map_err(|e| format!("{e:#}"))?;
     let current = { *sh.sid.lock().unwrap() == id };
     if current {
@@ -550,7 +557,7 @@ fn expand(p: &str) -> std::path::PathBuf {
 }
 
 #[tauri::command]
-fn list_dir(path: Option<String>) -> Result<Value, String> {
+async fn list_dir(path: Option<String>) -> Result<Value, String> {
     let target = match path.as_deref().map(str::trim) {
         None | Some("") => std::env::current_dir().map_err(|e| e.to_string())?,
         Some(p) if p.starts_with('~') => expand(p),
@@ -597,7 +604,7 @@ fn list_dir(path: Option<String>) -> Result<Value, String> {
 const MAX_DIR_ENTRIES: usize = 400;
 
 #[tauri::command]
-fn list_project_files() -> Vec<String> {
+async fn list_project_files() -> Vec<String> {
     let mut out = Vec::new();
     hi_derola::files::walk_files(".", 0, &mut out);
     out.sort();
@@ -645,7 +652,7 @@ fn dir_tree(root: &std::path::Path, depth: u8, counter: &mut usize) -> String {
 }
 
 #[tauri::command]
-fn attach_path(sh: State<'_, Arc<Shared>>, app: AppHandle, path: String) -> Result<Value, String> {
+async fn attach_path(sh: State<'_, Arc<Shared>>, app: AppHandle, path: String) -> Result<Value, String> {
     let p = expand(path.trim());
     let meta = std::fs::metadata(&p).map_err(|e| format!("{e}"))?;
     if meta.is_dir() {
@@ -668,13 +675,14 @@ fn attach_path(sh: State<'_, Arc<Shared>>, app: AppHandle, path: String) -> Resu
 }
 
 #[tauri::command]
-fn detach(sh: State<'_, Arc<Shared>>, app: AppHandle, index: usize) {
+async fn detach(sh: State<'_, Arc<Shared>>, app: AppHandle, index: usize) -> Result<(), String> {
     let mut at = sh.attachments.lock().unwrap();
     if index < at.len() {
         at.remove(index);
     }
     drop(at);
     emit_attachments(&sh, &app);
+    Ok(())
 }
 
 fn note(s: impl Into<String>) -> Value {
@@ -752,7 +760,7 @@ fn command(sh: &Shared, app: &AppHandle, line: &str) -> Value {
 }
 
 #[tauri::command]
-fn send(sh: State<'_, Arc<Shared>>, app: AppHandle, text: String) -> Result<Value, String> {
+async fn send(sh: State<'_, Arc<Shared>>, app: AppHandle, text: String) -> Result<Value, String> {
     let text = text.trim().to_string();
     if text.is_empty() {
         return Ok(json!({"cmd": true, "note": ""}));
@@ -859,15 +867,16 @@ pub fn run() -> Result<()> {
                 titled: AtomicBool::new(restore.is_some()),
                 tx: tx.clone(),
             });
-            let logs = tauri::async_runtime::block_on(async {
-                let cfgs = sh.cfg.lock().unwrap().mcp.clone();
-                let (client, logs) = mcp::connect_all(&cfgs).await;
-                *sh.mcp.lock().unwrap() = client;
-                logs
+            let tx2 = tx.clone();
+            let mcp_slot = sh.mcp.clone();
+            let mcp_cfgs = sh.cfg.lock().unwrap().mcp.clone();
+            tauri::async_runtime::spawn(async move {
+                let (client, logs) = mcp::connect_all(&mcp_cfgs).await;
+                *mcp_slot.lock().unwrap() = client;
+                for l in logs {
+                    let _ = tx2.send(ApiEvent::Note(l));
+                }
             });
-            for l in logs {
-                let _ = tx.send(ApiEvent::Note(l));
-            }
             pump(rx, app.handle().clone(), sh.clone());
             app.manage(sh);
             Ok(())
