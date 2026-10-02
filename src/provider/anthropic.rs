@@ -174,9 +174,13 @@ impl Provider for Anthropic {
                         _ => {}
                     },
                     Some("message_start") => {
+                        let u = &v["message"]["usage"];
+                        let cache_read = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                        let cache_write = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
                         tx.send(ApiEvent::Usage {
-                            input: v["message"]["usage"]["input_tokens"].as_u64().unwrap_or(0),
+                            input: u["input_tokens"].as_u64().unwrap_or(0) + cache_read + cache_write,
                             output: 0,
+                            cached: cache_read,
                         })
                         .map_err(|_| anyhow::anyhow!("closed"))?;
                     }
@@ -184,6 +188,7 @@ impl Provider for Anthropic {
                         tx.send(ApiEvent::Usage {
                             input: 0,
                             output: v["usage"]["output_tokens"].as_u64().unwrap_or(0),
+                            cached: 0,
                         })
                         .map_err(|_| anyhow::anyhow!("closed"))?;
                     }
@@ -228,9 +233,12 @@ impl Provider for Anthropic {
             if !full.is_empty() {
                 let _ = tx.send(ApiEvent::Chunk(full.clone()));
             }
+            let cache_read = v["usage"]["cache_read_input_tokens"].as_u64().unwrap_or(0);
+            let cache_write = v["usage"]["cache_creation_input_tokens"].as_u64().unwrap_or(0);
             tx.send(ApiEvent::Usage {
-                input: v["usage"]["input_tokens"].as_u64().unwrap_or(0),
+                input: v["usage"]["input_tokens"].as_u64().unwrap_or(0) + cache_read + cache_write,
                 output: v["usage"]["output_tokens"].as_u64().unwrap_or(0),
+                cached: cache_read,
             })
             .map_err(|_| anyhow::anyhow!("closed"))?;
         }

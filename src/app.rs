@@ -65,6 +65,7 @@ pub struct App {
     pub reasoning: Option<usize>,
     pub tokens_in: u64,
     pub tokens_out: u64,
+    pub tokens_cached: u64,
     pub cost: f64,
     pub should_quit: bool,
     pub status: String,
@@ -144,6 +145,7 @@ impl App {
             reasoning: None,
             tokens_in: 0,
             tokens_out: 0,
+            tokens_cached: 0,
             cost: 0.0,
             should_quit: false,
             status,
@@ -274,10 +276,16 @@ impl App {
                 self.info(format!("todo list updated:\n{s}"));
             }
             ApiEvent::BgOut { .. } => {}
-            ApiEvent::Usage { input, output } => {
+            ApiEvent::Usage { input, output, cached } => {
                 self.tokens_in += input;
                 self.tokens_out += output;
-                self.cost += crate::models::cost(&self.model, input, output);
+                self.tokens_cached += cached;
+                let disc = if self.cfg.provider.kind == "anthropic" {
+                    0.1
+                } else {
+                    0.5
+                };
+                self.cost += crate::models::cost_cached(&self.model, input, output, cached, disc);
             }
             ApiEvent::Done { text, messages } => {
                 if let Some(i) = self.streaming {
@@ -337,6 +345,9 @@ impl App {
                         fmt_tokens(self.tokens_in),
                         fmt_tokens(self.tokens_out)
                     ));
+                    if self.tokens_cached > 0 {
+                        s.push_str(&format!(" ({} cached)", fmt_tokens(self.tokens_cached)));
+                    }
                 }
                 if self.cost > 0.0 {
                     s.push_str(&format!(" · {}", fmt_cost(self.cost)));

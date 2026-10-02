@@ -280,9 +280,14 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     json!({"t": "todo", "s": s})
                 }
                 ApiEvent::BgOut { id, chunk } => json!({"t": "bgout", "id": id, "s": chunk}),
-                ApiEvent::Usage { input, output } => {
+                ApiEvent::Usage { input, output, cached } => {
                     let model = sh.cfg.lock().unwrap().provider.model.clone();
-                    let delta = models::cost(&model, input, output);
+                    let disc = if sh.cfg.lock().unwrap().provider.kind == "anthropic" {
+                        0.1
+                    } else {
+                        0.5
+                    };
+                    let delta = models::cost_cached(&model, input, output, cached, disc);
                     let mut t = sh.tokens.lock().unwrap();
                     t.0 += input;
                     t.1 += output;
@@ -291,7 +296,7 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     *c += delta;
                     let total = *c;
                     drop(c);
-                    json!({"t": "usage", "input": input, "output": output, "cost": total})
+                    json!({"t": "usage", "input": input, "output": output, "cached": cached, "cost": total})
                 }
                 ApiEvent::Done { text, messages } => {
                     *sh.inflight.lock().unwrap() = None;

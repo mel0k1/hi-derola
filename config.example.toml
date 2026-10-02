@@ -80,6 +80,9 @@ enabled = true
 
 # tool permissions: allow | ask | deny
 # missing tool defaults to: write_file/edit/bash/mcp ask, read-only tools (incl. webfetch/subagent) allow
+# built-in protections (overridable by rules below):
+#   read_file on secret files (.env, .env.local, prod.env; *.env.example stays allowed) -> ask
+#   read/edit/list outside the working directory -> ask
 [permissions]
 # edit = "ask"
 # write_file = "ask"

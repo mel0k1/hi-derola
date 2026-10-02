@@ -172,6 +172,7 @@ impl Provider for OpenAi {
                     tx.send(ApiEvent::Usage {
                         input: u["prompt_tokens"].as_u64().unwrap_or(0),
                         output: u["completion_tokens"].as_u64().unwrap_or(0),
+                        cached: u["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0),
                     })
                     .map_err(|_| anyhow::anyhow!("closed"))?;
                 }
@@ -210,6 +211,7 @@ impl Provider for OpenAi {
                 tx.send(ApiEvent::Usage {
                     input: u["prompt_tokens"].as_u64().unwrap_or(0),
                     output: u["completion_tokens"].as_u64().unwrap_or(0),
+                    cached: u["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0),
                 })
                 .map_err(|_| anyhow::anyhow!("closed"))?;
             }

@@ -108,8 +108,17 @@ pub fn lookup(model: &str) -> ModelInfo {
 }
 
 pub fn cost(model: &str, input: u64, output: u64) -> f64 {
+    cost_cached(model, input, output, 0, 0.0)
+}
+
+/// cached tokens are billed at `cached_discount` of the input price
+/// (anthropic cache read ~0.1x, openai ~0.5x)
+pub fn cost_cached(model: &str, input: u64, output: u64, cached: u64, cached_discount: f64) -> f64 {
     let mi = lookup(model);
-    input as f64 / 1e6 * mi.input + output as f64 / 1e6 * mi.output
+    let fresh = input.saturating_sub(cached);
+    fresh as f64 / 1e6 * mi.input
+        + cached as f64 / 1e6 * mi.input * cached_discount
+        + output as f64 / 1e6 * mi.output
 }
 
 #[cfg(test)]
@@ -152,5 +161,14 @@ mod tests {
         let c = cost("gpt-4o", 1_000_000, 100_000);
         assert!((c - (2.5 + 1.0)).abs() < 1e-9);
         assert_eq!(cost("unknown-thing", 10_000_000, 0), 0.0);
+    }
+
+    #[test]
+    fn cost_cached_math() {
+        // 1m fresh + 1m cached at half price + 100k out
+        let c = cost_cached("gpt-4o", 2_000_000, 100_000, 1_000_000, 0.5);
+        assert!((c - (2.5 + 1.25 + 1.0)).abs() < 1e-9);
+        // cached larger than input must not go negative
+        assert!(cost_cached("gpt-4o", 100, 0, 5_000, 0.5) >= 0.0);
     }
 }

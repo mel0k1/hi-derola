@@ -249,7 +249,10 @@ function applyStatus() {
   } else {
     right.classList.remove("busy");
     let s = "";
-    if (tokens.in || tokens.out) s = `${fmtTokens(tokens.in)} in · ${fmtTokens(tokens.out)} out`;
+    if (tokens.in || tokens.out) {
+      s = `${fmtTokens(tokens.in)} in · ${fmtTokens(tokens.out)} out`;
+      if (tokens.cached > 0) s += ` (${fmtTokens(tokens.cached)} cached)`;
+    }
     if (tokens.cost > 0) s += (s ? " · " : "") + fmtCost(tokens.cost);
     right.textContent = s;
   }
@@ -608,6 +611,7 @@ async function handleEvent(ev) {
     case "usage":
       tokens.in += ev.input;
       tokens.out += ev.output;
+      tokens.cached = (tokens.cached || 0) + (ev.cached || 0);
       if (typeof ev.cost === "number") tokens.cost = ev.cost;
       applyStatus();
       break;

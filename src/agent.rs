@@ -39,8 +39,11 @@ impl Default for AgentCfg {
     }
 }
 
-const COMPACT_KEEP: usize = 6;
+const COMPACT_KEEP_TOKENS: usize = 15_000;
 const COMPACT_MIN_MSGS: usize = 8;
+const COMPACT_TOOL_CLIP: usize = 1_250;
+const IMG_TOKEN_EST: usize = 1_500;
+const OUTPUT_FLOOR: u64 = 1_024;
 const EMPTY_RETRIES: usize = 2;
 const OVERFLOW_RETRIES: usize = 2;
 
@@ -56,6 +59,22 @@ fn effective_limit(cfg: &AgentCfg, model: &str) -> u64 {
     }
 }
 
+/// shrink max_tokens so the reply fits in the remaining context window;
+/// never grows a user-configured cap, provider defaults stay intact when
+/// the context limit is unknown
+fn clamp_output(configured: Option<u32>, ctx_limit: u64, prompt_tokens: u64) -> Option<u32> {
+    if ctx_limit == 0 {
+        return configured;
+    }
+    let headroom = prompt_tokens + prompt_tokens * 3 / 20;
+    let room = ctx_limit.saturating_sub(headroom).max(OUTPUT_FLOOR);
+    let base = configured.map(|v| v as u64).unwrap_or(4_096);
+    if base <= room {
+        return configured;
+    }
+    Some(room.min(u32::MAX as u64) as u32)
+}
+
 pub async fn run(
     provider: Arc<dyn Provider>,
     mut req: ChatRequest,
@@ -66,6 +85,7 @@ pub async fn run(
     cfg: AgentCfg,
 ) -> Result<()> {
     let ctx_limit = effective_limit(&cfg, &req.model);
+    let configured_max = req.max_tokens;
     let mut msgs = req.messages.clone();
     let mut round = 0;
     let mut empty_retries = 0usize;
@@ -114,6 +134,7 @@ pub async fn run(
         if steered {
             req.messages = msgs.clone();
         }
+        req.max_tokens = clamp_output(configured_max, ctx_limit, used.max(est));
         let (itx, mut irx) = tokio::sync::mpsc::unbounded_channel();
         let counter = Arc::new(AtomicU64::new(0));
         let outer = tx.clone();
@@ -791,16 +812,36 @@ async fn wrap_up(
         Role::User,
         "The tool call limit has been reached. Stop making changes and write a short final summary: what was done, what was changed, what remains.",
     ));
-    req.tools = Vec::new();
+    // keep tool definitions so the cached system+tools prefix stays intact;
+    // tool calls from here on are answered with an error instead of executing
     req.messages = msgs.clone();
-    let text = match provider.chat(req, tx).await {
-        Ok(r) if !r.text.trim().is_empty() => r.text,
-        Ok(_) => "stopped: tool loop limit reached".into(),
-        Err(e) => {
-            let _ = tx.send(ApiEvent::Note(format!("wrap-up failed: {e:#}")));
-            "stopped: tool loop limit reached".into()
+    let mut text = String::new();
+    for _ in 0..3 {
+        match provider.chat(req, tx).await {
+            Ok(r) if !r.text.trim().is_empty() => {
+                text = r.text;
+                break;
+            }
+            Ok(r) if !r.calls.is_empty() => {
+                msgs.push(Message::new(Role::Assistant, r.text.clone()).with_calls(r.calls.clone()));
+                for c in r.calls {
+                    msgs.push(Message::tool(
+                        &c.id,
+                        "error: the tool call limit has been reached; tools are disabled. Reply with a text summary now.",
+                    ));
+                }
+                req.messages = msgs.clone();
+            }
+            Ok(_) => break,
+            Err(e) => {
+                let _ = tx.send(ApiEvent::Note(format!("wrap-up failed: {e:#}")));
+                break;
+            }
         }
-    };
+    }
+    if text.is_empty() {
+        text = "stopped: tool loop limit reached".into();
+    }
     msgs.push(Message::new(Role::Assistant, text.clone()));
     let _ = tx.send(ApiEvent::Done {
         text,
@@ -809,11 +850,33 @@ async fn wrap_up(
     Ok(())
 }
 
-fn compact_split(msgs: &[Message], keep_last: usize) -> Option<usize> {
+fn msg_tokens(m: &Message) -> usize {
+    let chars: usize = m
+        .content
+        .len()
+        + m.tool_calls
+            .iter()
+            .map(|c| c.args.len() + c.name.len())
+            .sum::<usize>();
+    chars / 4 + m.images.len() * IMG_TOKEN_EST
+}
+
+/// token-budgeted split: keep the newest messages within `keep_tokens`,
+/// boundary snapped forward past Tool results so call/result pairs stay together
+fn compact_split(msgs: &[Message], keep_tokens: usize) -> Option<usize> {
     if msgs.len() < COMPACT_MIN_MSGS || msgs.first()?.role != Role::User {
         return None;
     }
-    let mut cut = msgs.len().saturating_sub(keep_last).max(1);
+    let mut cut = msgs.len();
+    let mut acc = 0usize;
+    while cut > 1 {
+        let t = msg_tokens(&msgs[cut - 1]);
+        if acc + t > keep_tokens && cut < msgs.len() {
+            break;
+        }
+        acc += t;
+        cut -= 1;
+    }
     while cut < msgs.len() && msgs[cut].role == Role::Tool {
         cut += 1;
     }
@@ -849,7 +912,7 @@ fn transcript(msgs: &[Message]) -> String {
                     t.push_str(&format!("[assistant called tool] {} {}\n\n", c.name, clip(&c.args, 300)));
                 }
             }
-            Role::Tool => t.push_str(&format!("[tool result]\n{}\n\n", clip(&m.content, 2000))),
+            Role::Tool => t.push_str(&format!("[tool result]\n{}\n\n", clip(&m.content, COMPACT_TOOL_CLIP))),
         }
     }
     t
@@ -871,16 +934,22 @@ async fn compact(
     msgs: &mut Vec<Message>,
     tx: &UnboundedSender<ApiEvent>,
 ) -> bool {
-    let Some(cut) = compact_split(msgs, COMPACT_KEEP) else {
+    let Some(cut) = compact_split(msgs, COMPACT_KEEP_TOKENS) else {
         return false;
     };
     let text = transcript(&msgs[1..cut]);
     let kept = msgs.len() - cut;
-    let sum_req = ChatRequest {
-        system: "You summarize coding agent conversations. Produce a dense factual summary: the user's goal, what was done (files changed, commands run, results), key decisions, current state, next steps. Plain text, no markdown headers, under 500 words.".into(),
+    const SUMMARY_RULES: &str = "Sections: Objective; Requirements; Decisions; Work State (Completed / Active / Blocked); Next Move; Relevant Files (up to 15, one line each); Important Context.\n\
+         Rules: dense facts only, no fluff; keep file paths, commands and error messages exact; do not restate coding conventions from AGENTS.md (they are provided to the next agent separately); at most 600 words.";
+    let mut sum_req = ChatRequest {
+        system: format!(
+            "You summarize coding agent conversations so work can continue seamlessly. Reply following the template exactly.\n\n{SUMMARY_RULES}"
+        ),
         messages: vec![Message::new(
             Role::User,
-            format!("Conversation transcript:\n\n{text}\n\nWrite the summary now."),
+            format!(
+                "Conversation transcript:\n\n{text}\n\nWrite the summary now, following the template sections."
+            ),
         )],
         model: req.model.clone(),
         max_tokens: req.max_tokens,
@@ -890,7 +959,7 @@ async fn compact(
         tools: Vec::new(),
     };
     let (btx, _brx) = tokio::sync::mpsc::unbounded_channel();
-    let summary = match provider.chat(&sum_req, &btx).await {
+    let mut summary = match provider.chat(&sum_req, &btx).await {
         Ok(r) if !r.text.trim().is_empty() => r.text.trim().to_string(),
         Ok(_) => {
             let _ = tx.send(ApiEvent::Note("compaction failed: empty summary".into()));
@@ -901,6 +970,22 @@ async fn compact(
             return false;
         }
     };
+    if !summary.to_lowercase().contains("objective") {
+        let _ = tx.send(ApiEvent::Note(
+            "summary missed the template, retrying once".into(),
+        ));
+        sum_req.messages.push(Message::new(Role::Assistant, summary.clone()));
+        sum_req.messages.push(Message::new(
+            Role::User,
+            "Your reply did not follow the required template. Rewrite it with the exact sections: Objective, Requirements, Decisions, Work State, Next Move, Relevant Files, Important Context.",
+        ));
+        if let Ok(r) = provider.chat(&sum_req, &btx).await {
+            let t = r.text.trim().to_string();
+            if !t.is_empty() {
+                summary = t;
+            }
+        }
+    }
     let mut first = msgs[0].clone();
     first
         .content
@@ -956,6 +1041,7 @@ mod tests {
 
     #[test]
     fn split_and_overflow() {
+        // 6 messages < COMPACT_MIN_MSGS -> never split
         let msgs = vec![
             m(Role::User, "task"),
             m(Role::Assistant, "a1"),
@@ -964,21 +1050,47 @@ mod tests {
             m(Role::User, "u2"),
             m(Role::Assistant, "a3"),
         ];
-        assert_eq!(compact_split(&msgs, 6), None);
+        assert_eq!(compact_split(&msgs, 100), None);
+        // 13 messages of 40 chars (10 tokens each), budget 50 tokens -> keep last 5
         let long: Vec<Message> = std::iter::once(m(Role::User, "task"))
-            .chain((0..12).map(|i| m(Role::Assistant, &format!("a{i}"))))
+            .chain((0..12).map(|_| m(Role::Assistant, &"x".repeat(40))))
             .collect();
-        assert_eq!(compact_split(&long, 6), Some(7));
+        assert_eq!(compact_split(&long, 50), Some(8));
+        // boundary must not orphan a tool result: snap forward past Tool
+        let body = "y".repeat(40);
         let orphan: Vec<Message> = std::iter::once(m(Role::User, "task"))
-            .chain((1..7).map(|i| m(Role::Assistant, &format!("a{i}"))))
-            .chain(std::iter::once(m(Role::Tool, "t")))
-            .chain((7..11).map(|i| m(Role::Assistant, &format!("a{i}"))))
+            .chain((0..6).map(|_| m(Role::Assistant, &body)))
+            .chain(std::iter::once(m(Role::Tool, &body)))
+            .chain((0..4).map(|_| m(Role::Assistant, &body)))
             .collect();
-        let cut = compact_split(&orphan, 6).unwrap();
+        let cut = compact_split(&orphan, 50).unwrap();
+        assert_eq!(cut, 8);
         assert_eq!(orphan[cut].role, Role::Assistant);
+        // a single message larger than the budget still leaves one kept
+        let huge: Vec<Message> = std::iter::once(m(Role::User, "task"))
+            .chain((0..7).map(|_| m(Role::Assistant, "small")))
+            .chain(std::iter::once(m(Role::Assistant, &"z".repeat(40_000))))
+            .collect();
+        assert_eq!(compact_split(&huge, 100), Some(8));
         let e = anyhow::anyhow!("400 Bad Request: prompt is too long: 200000 tokens > 180000 maximum");
         assert!(is_overflow(&e));
         assert!(!is_overflow(&anyhow::anyhow!("401 unauthorized")));
+    }
+
+    #[test]
+    fn output_fitting() {
+        // unknown window -> untouched
+        assert_eq!(clamp_output(None, 0, 90_000), None);
+        assert_eq!(clamp_output(Some(4_096), 0, 90_000), Some(4_096));
+        // plenty of room -> untouched (even the provider default)
+        assert_eq!(clamp_output(None, 200_000, 10_000), None);
+        // configured cap larger than the remaining room -> shrunk to the floor
+        assert_eq!(clamp_output(Some(16_000), 10_000, 9_900), Some(1_024));
+        // user cap smaller than the room -> untouched
+        assert_eq!(clamp_output(Some(2_000), 200_000, 100_000), Some(2_000));
+        // no configured cap, tight room -> shrunk default
+        assert_eq!(clamp_output(None, 8_192, 7_900), Some(1_024));
+        assert_eq!(clamp_output(None, 100_000, 86_000), Some(1_100));
     }
 
     #[test]

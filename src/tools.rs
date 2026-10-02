@@ -496,6 +496,9 @@ pub async fn bash_run(cmd: &str, workdir: Option<&str>, timeout: Option<u64>) ->
     let (prog, flag) = shell();
     let mut command = tokio::process::Command::new(prog);
     command.arg(flag).arg(cmd);
+    command.kill_on_drop(true);
+    command.env("AGENT", "1");
+    command.env("HI_DEROLA", "1");
     if let Some(w) = workdir.map(str::trim).filter(|s| !s.is_empty()) {
         if !std::path::Path::new(w).is_dir() {
             bail!("bash: workdir not found: {w}");
@@ -537,6 +540,8 @@ pub fn spawn_shell(cmd: &str, workdir: Option<&str>) -> Result<tokio::process::C
     let (prog, flag) = shell();
     let mut command = tokio::process::Command::new(prog);
     command.arg(flag).arg(cmd);
+    command.env("AGENT", "1");
+    command.env("HI_DEROLA", "1");
     if let Some(w) = workdir.map(str::trim).filter(|s| !s.is_empty()) {
         if !std::path::Path::new(w).is_dir() {
             bail!("bash: workdir not found: {w}");

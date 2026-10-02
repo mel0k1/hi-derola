@@ -47,6 +47,18 @@ impl PermCfg {
                 _ => return parse(&r.permission),
             }
         }
+        // builtin protections: explicit user rules above can override these
+        if matches!(
+            key.as_str(),
+            "read_file" | "list_files" | "glob" | "grep" | "edit" | "write_file"
+        ) {
+            if key == "read_file" && env_protected(&subject) {
+                return Perm::Ask;
+            }
+            if external_dir(&subject).is_some() {
+                return Perm::Ask;
+            }
+        }
         let field = match key.as_str() {
             "edit" => self.edit.as_deref(),
             "write_file" => self.write_file.as_deref(),
@@ -69,7 +81,7 @@ fn split_tool(tool: &str, args: &str) -> (String, String) {
         return ("mcp".to_string(), rest.to_string());
     }
     match tool {
-        "edit" | "write_file" | "bash" => {
+        "edit" | "write_file" | "read_file" | "list_files" | "glob" | "grep" | "bash" => {
             let v: serde_json::Value =
                 serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
             let subject = v["path"]
@@ -99,6 +111,49 @@ fn default_perm(key: &str) -> Perm {
     match key {
         "write_file" | "edit" | "bash" | "mcp" => Perm::Ask,
         _ => Perm::Allow,
+    }
+}
+
+/// secrets files (.env, .env.local, prod.env, ...); examples stay readable
+fn env_protected(path: &str) -> bool {
+    let name = std::path::Path::new(path.trim())
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if name.ends_with(".env.example")
+        || name.ends_with(".env.sample")
+        || name.ends_with(".env.template")
+    {
+        return false;
+    }
+    name == ".env" || name.starts_with(".env.") || name.ends_with(".env")
+}
+
+/// returns Some(resolved path) when the target lies outside the working directory
+fn external_dir(path: &str) -> Option<String> {
+    let p = path.trim();
+    if p.is_empty() {
+        return None;
+    }
+    let cwd = std::env::current_dir().ok()?;
+    let base = std::path::Path::new(p);
+    let abs = if base.is_absolute() {
+        base.to_path_buf()
+    } else {
+        cwd.join(base)
+    };
+    let mut probe = abs.as_path();
+    loop {
+        match std::fs::canonicalize(probe) {
+            Ok(c) => {
+                return if c.starts_with(&cwd) {
+                    None
+                } else {
+                    Some(c.display().to_string())
+                };
+            }
+            Err(_) => probe = probe.parent()?,
+        }
     }
 }
 
@@ -245,5 +300,45 @@ mod tests {
         assert_eq!(parse("DENY"), Perm::Deny);
         assert_eq!(parse("ask"), Perm::Ask);
         assert_eq!(parse("bogus"), Perm::Ask);
+    }
+
+    #[test]
+    fn env_and_external_protection() {
+        let cfg = PermCfg::default();
+        assert_eq!(cfg.check("read_file", r#"{"path":".env"}"#), Perm::Ask);
+        assert_eq!(cfg.check("read_file", r#"{"path":"config/.env.local"}"#), Perm::Ask);
+        assert_eq!(cfg.check("read_file", r#"{"path":"prod.env"}"#), Perm::Ask);
+        assert_eq!(
+            cfg.check("read_file", r#"{"path":"config/.env.example"}"#),
+            Perm::Allow
+        );
+        assert_eq!(cfg.check("read_file", r#"{"path":"src/main.rs"}"#), Perm::Allow);
+
+        // an explicit user rule overrides the builtin
+        let allow_env = PermCfg {
+            rules: vec![PermRule {
+                tool: "read_file".into(),
+                pattern: Some("*.env*".into()),
+                permission: "allow".into(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(allow_env.check("read_file", r#"{"path":".env"}"#), Perm::Allow);
+
+        // outside the working directory -> ask, even for allowed tools
+        let ext = std::env::temp_dir().join("hi-derola-perm-test.txt");
+        let ext_json = format!(r#"{{"path":"{}"}}"#, ext.display());
+        assert_eq!(cfg.check("read_file", &ext_json), Perm::Ask);
+        let edit_json = format!(r#"{{"path":"{}"}}"#, ext.display());
+        let allowed_edit = PermCfg {
+            write_file: Some("allow".into()),
+            edit: Some("allow".into()),
+            ..Default::default()
+        };
+        assert_eq!(allowed_edit.check("edit", &edit_json), Perm::Ask);
+        // internal paths stay allowed
+        assert_eq!(allowed_edit.check("edit", r#"{"path":"src/lib.rs"}"#), Perm::Allow);
+        // relative reads stay internal
+        assert_eq!(cfg.check("list_files", r#"{"path":"."}"#), Perm::Allow);
     }
 }
