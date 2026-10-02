@@ -43,6 +43,19 @@ fn msg_json(m: &Message) -> Value {
                 .collect();
             json!({"role": "assistant", "content": content, "tool_calls": calls})
         }
+        Role::User if !m.images.is_empty() => {
+            let mut parts = Vec::with_capacity(1 + m.images.len());
+            if !m.content.is_empty() {
+                parts.push(json!({"type": "text", "text": m.content}));
+            }
+            for img in &m.images {
+                parts.push(json!({
+                    "type": "image_url",
+                    "image_url": {"url": format!("data:{};base64,{}", img.mime, img.data)}
+                }));
+            }
+            json!({"role": "user", "content": parts})
+        }
         _ => json!({"role": m.role.as_str(), "content": m.content}),
     }
 }

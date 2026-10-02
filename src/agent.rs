@@ -20,6 +20,8 @@ pub struct AgentCfg {
     pub perm: crate::perm::PermCfg,
     pub nested: bool,
     pub plan: bool,
+    pub read_only: bool,
+    pub parent_sid: Option<String>,
 }
 
 impl Default for AgentCfg {
@@ -31,6 +33,8 @@ impl Default for AgentCfg {
             perm: Default::default(),
             nested: false,
             plan: false,
+            read_only: false,
+            parent_sid: None,
         }
     }
 }
@@ -80,6 +84,14 @@ pub async fn run(
         }
         if let Some(m) = &mcp_now {
             specs.extend(m.specs().await);
+        }
+        if cfg.read_only {
+            specs.retain(|s| {
+                matches!(
+                    s.name.as_str(),
+                    "read_file" | "list_files" | "glob" | "grep" | "task_status" | "todoread" | "skill"
+                )
+            });
         }
         req.tools = specs;
         if round > cfg.max_rounds {
@@ -236,84 +248,90 @@ pub async fn run(
                     .as_str()
                     .unwrap_or("")
                     .to_string();
+                let agent_name = v["agent"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty() && *s != "general")
+                    .map(str::to_string);
                 let background = v["background"].as_bool().unwrap_or(false);
                 if prompt.is_empty() {
                     "error: subagent: prompt required".to_string()
                 } else if cfg.nested {
                     "error: nested subagents are not allowed".to_string()
+                } else if let Some(name) = &agent_name {
+                    if crate::agents::get(name).is_none() {
+                        format!("error: subagent: unknown agent: {name}")
+                    } else if background {
+                        spawn_standalone_subagent(
+                            provider.clone(),
+                            Some(name.clone()),
+                            prompt,
+                            desc,
+                            req.model.clone(),
+                            req.max_tokens,
+                            req.temperature,
+                            req.top_p,
+                            cfg.clone(),
+                            allow_all.clone(),
+                            mcp.clone(),
+                            queue.clone(),
+                            tx.clone(),
+                        )
+                    } else {
+                        let _ = tx.send(ApiEvent::Note(format!("subagent started: {desc}")));
+                        let sub_req = build_sub_req(
+                            crate::agents::get(name).as_ref(),
+                            &prompt,
+                            &req.model,
+                            req.max_tokens,
+                            req.temperature,
+                            req.top_p,
+                        );
+                        match run_subagent(
+                            provider.clone(),
+                            sub_req,
+                            cfg.clone(),
+                            allow_all.clone(),
+                            &tx,
+                            mcp.clone(),
+                            crate::agents::get(name).map(|d| d.read_only).unwrap_or(false),
+                            desc.clone(),
+                        )
+                        .await
+                        {
+                            Ok(t) => {
+                                let _ = tx.send(ApiEvent::Note(format!("subagent done: {desc}")));
+                                t
+                            }
+                            Err(e) => format!("error: subagent failed: {e:#}"),
+                        }
+                    }
                 } else if background {
-                    let sub_req = ChatRequest {
-                        system: subagent_system(),
-                        messages: vec![Message::new(Role::User, prompt)],
-                        model: req.model.clone(),
-                        max_tokens: req.max_tokens,
-                        temperature: req.temperature,
-                        top_p: req.top_p,
-                        stream: false,
-                        tools: Vec::new(),
-                    };
-                    let id = crate::bg::start("subagent", &desc);
-                    let _ = tx.send(ApiEvent::Note(format!(
-                        "background task {id} started: {desc}"
-                    )));
-                    let tx2 = tx.clone();
-                    let provider2 = provider.clone();
-                    let cfg2 = cfg.clone();
-                    let allow2 = allow_all.clone();
-                    let mcp2 = mcp.clone();
-                    let queue2 = queue.clone();
-                    let budget = cfg.output_budget;
-                    let id2 = id.clone();
-                    let desc2 = desc.clone();
-                    let inner = tokio::spawn({
-                        let tx3 = tx2.clone();
-                        async move { run_subagent(provider2, sub_req, cfg2, allow2, &tx3, mcp2).await }
-                    });
-                    crate::bg::attach_abort(&id, inner.abort_handle());
-                    tokio::spawn(async move {
-                        let msg = match inner.await {
-                            Ok(Ok(text)) => {
-                                crate::bg::finish(&id2, Some(text.clone()));
-                                let _ = tx2.send(ApiEvent::Note(format!(
-                                    "background task {id2} finished: {desc2}"
-                                )));
-                                tools::budget(
-                                    format!(
-                                        "Background task {id2} ({desc2}) finished. Result:\n{text}"
-                                    ),
-                                    budget,
-                                )
-                            }
-                            Ok(Err(e)) => {
-                                crate::bg::finish(&id2, None);
-                                let _ = tx2.send(ApiEvent::Note(format!(
-                                    "background task {id2} failed: {e:#}"
-                                )));
-                                format!("Background task {id2} ({desc2}) failed: {e:#}")
-                            }
-                            Err(_) => {
-                                crate::bg::finish(&id2, None);
-                                format!("Background task {id2} ({desc2}) was killed.")
-                            }
-                        };
-                        queue2.lock().unwrap().push(msg);
-                        let _ = tx2.send(ApiEvent::Wake);
-                    });
-                    format!(
-                        "started in background as task {id}; keep working, the result will arrive as a new message when the task finishes (progress: task_status, stop it: task_kill)"
+                    spawn_standalone_subagent(
+                        provider.clone(),
+                        None,
+                        prompt,
+                        desc,
+                        req.model.clone(),
+                        req.max_tokens,
+                        req.temperature,
+                        req.top_p,
+                        cfg.clone(),
+                        allow_all.clone(),
+                        mcp.clone(),
+                        queue.clone(),
+                        tx.clone(),
                     )
                 } else {
-                    let sub_req = ChatRequest {
-                        system: subagent_system(),
-                        messages: vec![Message::new(Role::User, prompt)],
-                        model: req.model.clone(),
-                        max_tokens: req.max_tokens,
-                        temperature: req.temperature,
-                        top_p: req.top_p,
-                        stream: false,
-                        tools: Vec::new(),
-                    };
                     let _ = tx.send(ApiEvent::Note(format!("subagent started: {desc}")));
+                    let sub_req = build_sub_req(
+                        None,
+                        &prompt,
+                        &req.model,
+                        req.max_tokens,
+                        req.temperature,
+                        req.top_p,
+                    );
                     match run_subagent(
                         provider.clone(),
                         sub_req,
@@ -321,6 +339,8 @@ pub async fn run(
                         allow_all.clone(),
                         &tx,
                         mcp.clone(),
+                        false,
+                        desc.clone(),
                     )
                     .await
                     {
@@ -531,6 +551,146 @@ pub fn subagent_system() -> String {
     )
 }
 
+fn build_sub_req(
+    decl: Option<&crate::agents::AgentDecl>,
+    prompt: &str,
+    model: &str,
+    max_tokens: Option<u32>,
+    temperature: Option<f64>,
+    top_p: Option<f64>,
+) -> ChatRequest {
+    let (system, model, temperature) = match decl {
+        Some(d) => {
+            let tail = subagent_system();
+            let system = if d.prompt.trim().is_empty() {
+                tail
+            } else {
+                format!("{}\n\n{tail}", d.prompt.trim())
+            };
+            (
+                system,
+                d.model.clone().unwrap_or_else(|| model.to_string()),
+                d.temperature.or(temperature),
+            )
+        }
+        None => (subagent_system(), model.to_string(), temperature),
+    };
+    ChatRequest {
+        system,
+        messages: vec![Message::new(Role::User, prompt.to_string())],
+        model,
+        max_tokens,
+        temperature,
+        top_p,
+        stream: false,
+        tools: Vec::new(),
+    }
+}
+
+/// Spawn a background subagent outside of the tool loop (subagent tool with background=true
+/// and manual @agent invocations from the UIs). Returns the task id.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_standalone_subagent(
+    provider: Arc<dyn Provider>,
+    agent: Option<String>,
+    prompt: String,
+    desc: String,
+    model: String,
+    max_tokens: Option<u32>,
+    temperature: Option<f64>,
+    top_p: Option<f64>,
+    cfg: AgentCfg,
+    allow_all: Arc<AtomicBool>,
+    mcp: McpSlot,
+    queue: Arc<Mutex<Vec<String>>>,
+    tx: UnboundedSender<ApiEvent>,
+) -> String {
+    let desc = if desc.trim().is_empty() {
+        prompt
+            .lines()
+            .next()
+            .unwrap_or("subagent")
+            .chars()
+            .take(60)
+            .collect()
+    } else {
+        desc
+    };
+    let decl = agent.as_deref().and_then(crate::agents::get);
+    if let Some(name) = &agent {
+        if decl.is_none() {
+            let _ = tx.send(ApiEvent::Note(format!("error: unknown agent: {name}")));
+            return String::new();
+        }
+    }
+    let read_only = decl.as_ref().map(|d| d.read_only).unwrap_or(false);
+    let sub_req = build_sub_req(
+        decl.as_ref(),
+        &prompt,
+        &model,
+        max_tokens,
+        temperature,
+        top_p,
+    );
+    let id = crate::bg::start("subagent", &desc);
+    let _ = tx.send(ApiEvent::Note(format!(
+        "background task {id} started: {desc}"
+    )));
+    let tx2 = tx.clone();
+    let id2 = id.clone();
+    let desc2 = desc.clone();
+    let budget = cfg.output_budget;
+    let inner = tokio::spawn({
+        let tx3 = tx2.clone();
+        let cfg2 = cfg.clone();
+        let allow2 = allow_all.clone();
+        async move {
+            run_subagent(
+                provider,
+                sub_req,
+                cfg2,
+                allow2,
+                &tx3,
+                mcp,
+                read_only,
+                desc.clone(),
+            )
+            .await
+        }
+    });
+    crate::bg::attach_abort(&id, inner.abort_handle());
+    tokio::spawn(async move {
+        let msg = match inner.await {
+            Ok(Ok(text)) => {
+                crate::bg::finish(&id2, Some(text.clone()));
+                let _ = tx2.send(ApiEvent::Note(format!(
+                    "background task {id2} finished: {desc2}"
+                )));
+                tools::budget(
+                    format!("Background task {id2} ({desc2}) finished. Result:\n{text}"),
+                    budget,
+                )
+            }
+            Ok(Err(e)) => {
+                crate::bg::finish(&id2, None);
+                let _ = tx2.send(ApiEvent::Note(format!(
+                    "background task {id2} failed: {e:#}"
+                )));
+                format!("Background task {id2} ({desc2}) failed: {e:#}")
+            }
+            Err(_) => {
+                crate::bg::finish(&id2, None);
+                format!("Background task {id2} ({desc2}) was killed.")
+            }
+        };
+        queue.lock().unwrap().push(msg);
+        let _ = tx2.send(ApiEvent::Wake);
+    });
+    format!(
+        "started in background as task {id}; the result will arrive as a new message when the task finishes (progress: task_status, stop it: task_kill)"
+    )
+}
+
 fn run_subagent<'a>(
     provider: Arc<dyn Provider>,
     req: ChatRequest,
@@ -538,16 +698,24 @@ fn run_subagent<'a>(
     allow_all: Arc<AtomicBool>,
     tx: &'a UnboundedSender<ApiEvent>,
     mcp: McpSlot,
+    read_only: bool,
+    desc: String,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + 'a>> {
     Box::pin(async move {
+        let desc = desc;
         let (stx, mut srx) = tokio::sync::mpsc::unbounded_channel();
         let fwd_tx = tx.clone();
         let result: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let messages: Arc<Mutex<Option<Vec<Message>>>> = Arc::new(Mutex::new(None));
         let r2 = result.clone();
+        let m2 = messages.clone();
         let fwd = tokio::spawn(async move {
             while let Some(ev) = srx.recv().await {
                 match ev {
-                    ApiEvent::Done { text, .. } => *r2.lock().unwrap() = Some(text),
+                    ApiEvent::Done { text, messages } => {
+                        *r2.lock().unwrap() = Some(text);
+                        *m2.lock().unwrap() = Some(messages);
+                    }
                     ApiEvent::Note(_)
                     | ApiEvent::Tool { .. }
                     | ApiEvent::Confirm { .. }
@@ -562,12 +730,14 @@ fn run_subagent<'a>(
         });
         let sub_cfg = AgentCfg {
             nested: true,
-            ..cfg
+            read_only,
+            parent_sid: None,
+            ..cfg.clone()
         };
         let fut: std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>> =
             Box::pin(run(
                 provider,
-                req,
+                req.clone(),
                 stx,
                 allow_all,
                 mcp,
@@ -580,6 +750,27 @@ fn run_subagent<'a>(
             return Err(e);
         }
         let text = result.lock().unwrap().take();
+        // persist the subagent run as a child session when the parent is known
+        if let Some(parent) = &cfg.parent_sid {
+            if let Some(msgs) = messages.lock().unwrap().take() {
+                if !msgs.is_empty() {
+                    let st = crate::sessions::StoredSession {
+                        id: crate::sessions::new_id(),
+                        title: format!("↳ {desc}"),
+                        created: 0,
+                        updated: 0,
+                        system: req.system.clone(),
+                        messages: msgs,
+                        tokens_in: 0,
+                        tokens_out: 0,
+                        cost: 0.0,
+                        todos: Vec::new(),
+                        parent: Some(parent.clone()),
+                    };
+                    let _ = crate::sessions::save(&st);
+                }
+            }
+        }
         Ok(
             text.unwrap_or_else(|| "(subagent finished without a final message)".into()),
         )

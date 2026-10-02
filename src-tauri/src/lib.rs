@@ -144,6 +144,8 @@ fn launch(sh: &Arc<Shared>) -> Result<(), String> {
         perm: cfg.permissions.clone(),
         nested: false,
         plan,
+        read_only: false,
+        parent_sid: Some(sh.sid.lock().unwrap().clone()),
     };
     let sh2 = sh.clone();
     let handle = tauri::async_runtime::spawn(async move {
@@ -607,6 +609,15 @@ fn expand(p: &str) -> std::path::PathBuf {
 }
 
 #[tauri::command]
+async fn list_agents() -> Value {
+    let agents: Vec<Value> = hi_derola::agents::discover()
+        .into_iter()
+        .map(|a| json!({"name": a.name, "description": a.description, "read_only": a.read_only}))
+        .collect();
+    json!({"agents": agents})
+}
+
+#[tauri::command]
 async fn list_dir(path: Option<String>) -> Result<Value, String> {
     let target = match path.as_deref().map(str::trim) {
         None | Some("") => std::env::current_dir().map_err(|e| e.to_string())?,
@@ -656,7 +667,7 @@ const MAX_DIR_ENTRIES: usize = 400;
 #[tauri::command]
 async fn list_project_files() -> Vec<String> {
     let mut out = Vec::new();
-    hi_derola::files::walk_files(".", 0, &mut out);
+    hi_derola::files::walk_files(".", &mut out);
     out.sort();
     out.into_iter()
         .map(|p| {
@@ -717,7 +728,13 @@ async fn attach_path(sh: State<'_, Arc<Shared>>, app: AppHandle, path: String) -
         emit_attachments(&sh, &app);
         return Ok(json!({"ok": true, "kind": "folder", "entries": counter}));
     }
-    let content = hi_derola::files::read_attach(&p.display().to_string()).map_err(|e| format!("{e:#}"))?;
+    let content = if hi_derola::files::is_image(&p.display().to_string()) {
+        let (mime, data) =
+            hi_derola::files::read_image(&p.display().to_string()).map_err(|e| format!("{e:#}"))?;
+        format!("data:{mime};base64,{data}")
+    } else {
+        hi_derola::files::read_attach(&p.display().to_string()).map_err(|e| format!("{e:#}"))?
+    };
     let size = content.len();
     sh.attachments.lock().unwrap().push((p.display().to_string(), content));
     emit_attachments(&sh, &app);
@@ -926,11 +943,54 @@ async fn send(sh: State<'_, Arc<Shared>>, app: AppHandle, text: String) -> Resul
     if text.starts_with('/') {
         return Ok(command(&sh, &app, &text));
     }
+    // manual subagent invocation: "@explore find the parser"
+    if let Some((agent_name, rest)) = hi_derola::agents::split_mention(&text) {
+        let Some(provider) = sh.provider.lock().unwrap().clone() else {
+            return Err("no api key: open settings and add one".into());
+        };
+        let cfg = sh.cfg.lock().unwrap().clone();
+        let (blocks, _ok, _miss) = hi_derola::files::mentions(&rest);
+        let prompt = format!("{blocks}{rest}");
+        let id = agent::spawn_standalone_subagent(
+            provider,
+            Some(agent_name.clone()),
+            prompt,
+            String::new(),
+            cfg.provider.model.clone(),
+            cfg.provider.max_tokens,
+            cfg.provider.temperature,
+            cfg.provider.top_p,
+            hi_derola::agent::AgentCfg {
+                context_limit: cfg.agent.context_limit,
+                max_rounds: cfg.agent.max_rounds,
+                output_budget: cfg.agent.output_budget,
+                perm: cfg.permissions.clone(),
+                nested: false,
+                plan: false,
+                read_only: false,
+                parent_sid: Some(sh.sid.lock().unwrap().clone()),
+            },
+            sh.allow_all.clone(),
+            sh.mcp.clone(),
+            sh.queue.clone(),
+            sh.tx.clone(),
+        );
+        if id.is_empty() {
+            return Err(format!("unknown agent: {agent_name}"));
+        }
+        return Ok(json!({"cmd": false, "subagent": id}));
+    }
     let mut composed = String::new();
+    let mut images: Vec<hi_derola::chat::Image> = Vec::new();
     {
         let mut at = sh.attachments.lock().unwrap();
         for (p, c) in at.iter() {
-            composed.push_str(&format!("[file: {p}]\n{c}\n\n"));
+            if let Some((mime, data)) = hi_derola::files::split_data_url(c) {
+                images.push(hi_derola::chat::Image { mime, data });
+                composed.push_str(&format!("[image: {p}]\n\n"));
+            } else {
+                composed.push_str(&format!("[file: {p}]\n{c}\n\n"));
+            }
         }
         at.clear();
     }
@@ -970,7 +1030,8 @@ async fn send(sh: State<'_, Arc<Shared>>, app: AppHandle, text: String) -> Resul
     }
     {
         let mut ses = sh.session.lock().unwrap();
-        ses.push(Role::User, composed);
+        ses.messages
+            .push(hi_derola::chat::Message::new(Role::User, composed).with_images(images));
     }
     persist(&sh);
     emit_sessions(&app, &sh);
@@ -1050,7 +1111,7 @@ pub fn run() -> Result<()> {
         .invoke_handler(tauri::generate_handler![
             init, save, send, confirm, answer, allow_all, stop, list_models, mcp_reconnect, undo,
             redo, list_sessions, new_session, open_session, delete_session, list_dir, attach_path,
-            detach, set_theme, list_project_files, set_plan, task_kill
+            detach, set_theme, list_project_files, set_plan, task_kill, list_agents
         ])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow!("{e}"))?;

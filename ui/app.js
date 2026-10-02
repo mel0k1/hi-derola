@@ -1177,6 +1177,7 @@ function autosize() {
 /* file mentions */
 
 let MFILES = null;
+let MAGENTS = null;
 let mention = null;
 let mentionSeq = 0;
 
@@ -1201,10 +1202,23 @@ function showMention() {
       MFILES = await invoke("list_project_files").catch(() => []);
       if (MFILES.length > 800) MFILES.length = 800;
     }
+    if (!MAGENTS) {
+      const r = await invoke("list_agents").catch(() => ({ agents: [] }));
+      MAGENTS = (r.agents || []).map((a) => ({
+        v: a.name,
+        label: a.description ? a.name + " — " + a.description : a.name,
+        agent: true,
+      }));
+      MAGENTS.push({ v: "general", label: "general — full tool access", agent: true });
+      MAGENTS.push({ v: "explore", label: "explore — read-only exploration", agent: true });
+    }
     if (seq !== mentionSeq) return;
     const q = t.query.toLowerCase();
-    const pool = q ? MFILES.filter((f) => f.toLowerCase().includes(q)) : MFILES;
-    const items = pool.slice(0, 7);
+    const agentItems = MAGENTS.filter((a) => !q || a.v.toLowerCase().startsWith(q)).slice(0, 4);
+    const fileItems = (q ? MFILES.filter((f) => f.toLowerCase().includes(q)) : MFILES)
+      .slice(0, 7)
+      .map((f) => ({ v: f, label: f, agent: false }));
+    const items = [...agentItems, ...fileItems].slice(0, 7);
     if (!items.length) {
       hideMention();
       return;
@@ -1226,8 +1240,8 @@ function renderMention() {
   box.replaceChildren();
   mention.items.forEach((p, i) => {
     const row = el("div", "mrow" + (i === mention.idx ? " active" : ""));
-    row.innerHTML = `<span class="ic">${icon("file")}</span>`;
-    row.appendChild(el("span", null, p));
+    row.innerHTML = `<span class="ic">${icon(p.agent ? "spark" : "file")}</span>`;
+    row.appendChild(el("span", null, p.label));
     row.onmousedown = (e) => {
       e.preventDefault();
       mention.idx = i;

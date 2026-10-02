@@ -570,12 +570,58 @@ impl App {
             self.status = self.status_line();
             return;
         }
+        // manual subagent invocation: "@explore find the parser"
+        if let Some((agent_name, rest)) = crate::agents::split_mention(&text) {
+            self.input.clear();
+            if !matches!(self.phase, Phase::Idle) {
+                self.info("wait for the current run to finish");
+                return;
+            }
+            let (blocks, _ok, _miss) = files::mentions(&rest);
+            let prompt = format!("{blocks}{rest}");
+            let id = agent::spawn_standalone_subagent(
+                self.provider.clone(),
+                Some(agent_name.clone()),
+                prompt,
+                String::new(),
+                self.model.clone(),
+                self.cfg.provider.max_tokens,
+                self.cfg.provider.temperature,
+                self.cfg.provider.top_p,
+                agent::AgentCfg {
+                    context_limit: self.cfg.agent.context_limit,
+                    max_rounds: self.cfg.agent.max_rounds,
+                    output_budget: self.cfg.agent.output_budget,
+                    perm: self.cfg.permissions.clone(),
+                    nested: false,
+                    plan: false,
+                    read_only: false,
+                    parent_sid: None,
+                },
+                self.allow_all.clone(),
+                self.mcp.clone(),
+                self.queue.clone(),
+                self.tx.clone(),
+            );
+            self.phase = Phase::Waiting;
+            self.status = self.status_line();
+            self.info(format!(
+                "@{agent_name} running as {id} (progress: task_status, stop: task_kill)"
+            ));
+            return;
+        }
         if text.is_empty() && self.attachments.is_empty() {
             return;
         }
         let mut composed = String::new();
+        let mut images: Vec<crate::chat::Image> = Vec::new();
         for (path, content) in &self.attachments {
-            composed.push_str(&format!("[file: {path}]\n{content}\n\n"));
+            if let Some((mime, data)) = files::split_data_url(content) {
+                images.push(crate::chat::Image { mime, data });
+                composed.push_str(&format!("[image: {path}]\n\n"));
+            } else {
+                composed.push_str(&format!("[file: {path}]\n{content}\n\n"));
+            }
         }
         let (mention_blocks, mention_ok, mention_miss) = files::mentions(&text);
         composed.push_str(&mention_blocks);
@@ -604,7 +650,9 @@ impl App {
             self.info("queued: will steer the current run");
             return;
         }
-        self.session.push(Role::User, composed);
+        self.session.messages.push(
+            crate::chat::Message::new(Role::User, composed).with_images(images),
+        );
         self.scroll_up = 0;
         self.start_run(inflight);
     }
@@ -627,6 +675,8 @@ impl App {
             perm: self.cfg.permissions.clone(),
             nested: false,
             plan: self.plan,
+            read_only: false,
+            parent_sid: None,
         };
         let mut req = ChatRequest {
             system: self.session.system.clone(),
@@ -730,6 +780,15 @@ impl App {
             "/file" => {
                 if arg.is_empty() {
                     self.info("usage: /file <path>");
+                } else if files::is_image(arg) {
+                    match files::read_image(arg) {
+                        Ok((mime, data)) => {
+                            self.attachments
+                                .push((arg.to_string(), format!("data:{mime};base64,{data}")));
+                            self.info(format!("attached image {arg} ({mime})"));
+                        }
+                        Err(e) => self.info(format!("error: {e:#}")),
+                    }
                 } else {
                     match files::read_attach(arg) {
                         Ok(content) => {

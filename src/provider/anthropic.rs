@@ -48,6 +48,19 @@ fn conv_msgs(messages: &[Message]) -> Vec<Value> {
                 }
                 out.push((false, json!({"role": "assistant", "content": content})));
             }
+            Role::User if !m.images.is_empty() => {
+                let mut content = Vec::new();
+                if !m.content.is_empty() {
+                    content.push(json!({"type": "text", "text": m.content}));
+                }
+                for img in &m.images {
+                    content.push(json!({
+                        "type": "image",
+                        "source": {"type": "base64", "media_type": img.mime, "data": img.data}
+                    }));
+                }
+                out.push((false, json!({"role": "user", "content": content})));
+            }
             _ => out.push((
                 false,
                 json!({"role": m.role.as_str(), "content": [{"type": "text", "text": m.content}]}),

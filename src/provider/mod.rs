@@ -9,6 +9,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::chat::{Message, ToolCall};
 
+#[derive(Clone)]
 pub struct ToolSpec {
     pub name: String,
     pub description: String,
@@ -41,6 +42,7 @@ pub struct ConfirmReply {
     pub feedback: String,
 }
 
+#[derive(Clone)]
 pub struct ChatRequest {
     pub system: String,
     pub messages: Vec<Message>,

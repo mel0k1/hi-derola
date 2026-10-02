@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod agents;
 pub mod app;
 pub mod bg;
 pub mod chat;

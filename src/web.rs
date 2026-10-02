@@ -81,6 +81,157 @@ pub async fn fetch_markdown(url: &str, format: &str, timeout: u64) -> Result<Str
     }
 }
 
+/// Web search via the DuckDuckGo HTML endpoint (no API key).
+pub async fn websearch(query: &str, timeout: u64) -> Result<String> {
+    let timeout = timeout.clamp(1, MAX_TIMEOUT);
+    let http = reqwest::Client::builder()
+        .user_agent(USER_AGENT)
+        .connect_timeout(Duration::from_secs(15))
+        .build()?;
+    let resp = tokio::time::timeout(
+        Duration::from_secs(timeout),
+        http.post("https://html.duckduckgo.com/html/")
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(format!("q={}", urlencode(query)))
+            .send(),
+    )
+    .await??;
+    let status = resp.status();
+    let html = resp.text().await?;
+    if !status.is_success() {
+        bail!("search failed: {status}");
+    }
+    let results = parse_results(&html, 8);
+    if results.is_empty() {
+        return Ok("no results found".into());
+    }
+    let mut out = format!("Search results for \"{query}\":\n");
+    for (i, r) in results.iter().enumerate() {
+        out.push_str(&format!(
+            "\n{}. {}\n   {}\n   {}\n",
+            i + 1,
+            r.title,
+            r.url,
+            r.snippet
+        ));
+    }
+    Ok(out)
+}
+
+pub struct SearchHit {
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+}
+
+pub fn parse_results(html: &str, max: usize) -> Vec<SearchHit> {
+    let link_re = regex::Regex::new(
+        r#"<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>"#,
+    )
+    .unwrap();
+    let link_re2 = regex::Regex::new(
+        r#"<a[^>]*href="([^"]+)"[^>]*class="result__a"[^>]*>([\s\S]*?)</a>"#,
+    )
+    .unwrap();
+    let snippet_re =
+        regex::Regex::new(r#"<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)</a>"#).unwrap();
+
+    let mut links: Vec<(String, String)> = Vec::new();
+    for re in [&link_re, &link_re2] {
+        for cap in re.captures_iter(html) {
+            links.push((cap[1].to_string(), cap[2].to_string()));
+        }
+        if !links.is_empty() {
+            break;
+        }
+    }
+    let snippets: Vec<String> = snippet_re
+        .captures_iter(html)
+        .map(|c| strip_tags(&c[1]))
+        .collect();
+
+    let mut out = Vec::new();
+    for (i, (href, title)) in links.into_iter().enumerate() {
+        if out.len() >= max {
+            break;
+        }
+        let url = resolve_ddg_href(&href);
+        if url.starts_with("http") && !url.contains("duckduckgo.com") {
+            out.push(SearchHit {
+                title: strip_tags(&title),
+                url,
+                snippet: snippets.get(i).cloned().unwrap_or_default(),
+            });
+        }
+    }
+    out
+}
+
+fn resolve_ddg_href(href: &str) -> String {
+    if let Some(pos) = href.find("uddg=") {
+        let raw = &href[pos + 5..];
+        let raw = raw.split('&').next().unwrap_or(raw);
+        urldecode(raw)
+    } else {
+        href.to_string()
+    }
+}
+
+fn urldecode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                if let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                    out.push(b);
+                    i += 3;
+                    continue;
+                }
+                out.push(b'%');
+                i += 1;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+fn urlencode(s: &str) -> String {
+    let mut out = String::new();
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
+fn strip_tags(html: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0usize;
+    for ch in html.chars() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            c if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    let out = entities(&out);
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn entities(s: &str) -> String {
     if !s.contains('&') {
         return s.to_string();
@@ -367,6 +518,31 @@ pub fn html_to_md(html: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_parse() {
+        let html = r##"<div class="result">
+<a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fdocs&amp;rut=abc">Rust <b>Book</b> &amp; Guide</a>
+<a class="result__snippet" href="#">The <b>best</b> guide to rust</a>
+<a rel="nofollow" class="result__a" href="https://direct.example.org">Direct link</a>
+<a class="result__snippet">second snippet</a>
+</div>"##;
+        let hits = parse_results(html, 8);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].url, "https://example.com/docs");
+        assert_eq!(hits[0].title, "Rust Book & Guide");
+        assert_eq!(hits[0].snippet, "The best guide to rust");
+        assert_eq!(hits[1].url, "https://direct.example.org");
+        assert_eq!(hits[1].snippet, "second snippet");
+        assert!(parse_results("<p>nothing</p>", 8).is_empty());
+    }
+
+    #[test]
+    fn url_tools() {
+        assert_eq!(urlencode("a b&c"), "a%20b%26c");
+        assert_eq!(urldecode("a%20b+c%26d"), "a b c&d");
+        assert_eq!(resolve_ddg_href("//x/l/?uddg=https%3A//a.io&rut=1"), "https://a.io");
+    }
 
     #[test]
     fn html_basics() {

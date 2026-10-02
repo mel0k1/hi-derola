@@ -7,6 +7,58 @@ pub struct WriteBlock {
 }
 
 const MAX_ATTACH_BYTES: u64 = 128 * 1024;
+const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+
+pub fn is_image(path: &str) -> bool {
+    matches!(
+        std::path::Path::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+    )
+}
+
+fn image_mime(ext: &str) -> &'static str {
+    match ext {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Read an image file and return (mime, base64) for vision messages.
+pub fn read_image(path: &str) -> Result<(String, String)> {
+    let meta = std::fs::metadata(path).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
+    if meta.len() > MAX_IMAGE_BYTES {
+        bail!("{path}: too large for an image ({} bytes)", meta.len());
+    }
+    let bytes = std::fs::read(path).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    let mime = image_mime(&ext).to_string();
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok((mime, b64))
+}
+
+/// Split a "data:<mime>;base64,<payload>" attachment back into (mime, base64).
+pub fn split_data_url(s: &str) -> Option<(String, String)> {
+    let rest = s.strip_prefix("data:")?;
+    let (mime, payload) = rest.split_once(";base64,")?;
+    if mime.is_empty() || payload.is_empty() {
+        return None;
+    }
+    Some((mime.to_string(), payload.to_string()))
+}
 
 pub fn read_attach(path: &str) -> Result<String> {
     let meta = std::fs::metadata(path).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;

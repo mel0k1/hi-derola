@@ -13,6 +13,8 @@ pub struct SessionMeta {
     pub count: usize,
     #[serde(default)]
     pub cost: f64,
+    #[serde(default)]
+    pub parent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +33,8 @@ pub struct StoredSession {
     pub cost: f64,
     #[serde(default)]
     pub todos: Vec<crate::todo::Todo>,
+    #[serde(default)]
+    pub parent: Option<String>,
 }
 
 pub fn store_dir() -> PathBuf {
@@ -152,6 +156,7 @@ pub fn list() -> Vec<SessionMeta> {
             updated: v.updated,
             count: v.messages.len(),
             cost: v.cost,
+            parent: v.parent,
         });
     }
     out.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| b.created.cmp(&a.created)));
@@ -224,6 +229,7 @@ mod tests {
             tokens_out: 0,
             cost: 0.0,
             todos: vec![],
+            parent: None,
         };
         save(&st).unwrap();
         let got = load(&st.id).unwrap();
@@ -268,6 +274,7 @@ mod tests {
             tokens_out: 0,
             cost: 0.0,
             todos: vec![],
+            parent: None,
         };
         save(&a).unwrap();
         a.id = "s-2-test".into();

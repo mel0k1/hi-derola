@@ -129,6 +129,18 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "websearch".into(),
+            description: "Search the web for current information: docs, news, releases, error messages. Returns a ranked list of titles, URLs and snippets; use webfetch to read a specific page.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "timeout": {"type": "integer", "description": "Timeout in seconds, default 15, max 60"}
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolSpec {
             name: "question".into(),
             description: "Ask the user questions during execution: gather preferences, clarify ambiguous instructions, get decisions on implementation choices. A free-form answer is always available. If you recommend an option, put it first and add \"(Recommended)\" at the end of the label.".into(),
             parameters: json!({
@@ -165,12 +177,16 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "subagent".into(),
-            description: "Spawns a subagent in a fresh context to work on the task and returns its final response. Include all relevant context and instructions in the prompt: the subagent starts with no history. Use for isolated research, exploration or bulk changes. For long tasks set background=true: the tool returns a task id immediately and the result arrives as a new message when done. Cannot ask the user questions.".into(),
+            description: format!(
+                "Spawns a subagent in a fresh context to work on the task and returns its final response. Include all relevant context and instructions in the prompt: the subagent starts with no history. Use for isolated research, exploration or bulk changes. For long tasks set background=true: the tool returns a task id immediately and the result arrives as a new message when done. Cannot ask the user questions.\nAvailable agents:\n{}",
+                crate::agents::list_for_spec()
+            ),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "description": {"type": "string", "description": "A short 3-5 word label for the task, displayed to the user"},
                     "prompt": {"type": "string", "description": "The task for the subagent to perform"},
+                    "agent": {"type": "string", "description": "Agent profile to use, see the list in the description; omit for the default general agent"},
                     "background": {"type": "boolean", "description": "Run in the background: return a task id now, deliver the result later; check progress with task_status"}
                 },
                 "required": ["description", "prompt"]
@@ -268,6 +284,7 @@ pub fn detail(name: &str, args: &str) -> String {
             d
         }
         "webfetch" => v["url"].as_str().unwrap_or("").to_string(),
+        "websearch" => v["query"].as_str().unwrap_or("").to_string(),
         "question" => v["questions"][0]["question"]
             .as_str()
             .unwrap_or("")
@@ -439,6 +456,13 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
             let format = v["format"].as_str().unwrap_or("markdown");
             let timeout = v["timeout"].as_u64().unwrap_or(30);
             crate::web::fetch_markdown(url, format, timeout).await
+        }
+        "websearch" => {
+            let Some(query) = v["query"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                bail!("websearch: query required");
+            };
+            let timeout = v["timeout"].as_u64().unwrap_or(15).clamp(5, 60);
+            crate::web::websearch(query, timeout).await
         }
         "task_status" => {
             let id = v["id"].as_str().filter(|s| !s.trim().is_empty());

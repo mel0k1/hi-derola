@@ -28,6 +28,8 @@ pub struct PermCfg {
     #[serde(default)]
     pub webfetch: Option<String>,
     #[serde(default)]
+    pub websearch: Option<String>,
+    #[serde(default)]
     pub subagent: Option<String>,
     #[serde(default)]
     pub rules: Vec<PermRule>,
@@ -51,6 +53,7 @@ impl PermCfg {
             "bash" => self.bash.as_deref(),
             "mcp" => self.mcp.as_deref(),
             "webfetch" => self.webfetch.as_deref(),
+            "websearch" => self.websearch.as_deref(),
             "subagent" => self.subagent.as_deref(),
             _ => None,
         };
@@ -80,6 +83,12 @@ fn split_tool(tool: &str, args: &str) -> (String, String) {
             let v: serde_json::Value =
                 serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
             let subject = v["url"].as_str().unwrap_or("").to_string();
+            (tool.to_string(), subject)
+        }
+        "websearch" => {
+            let v: serde_json::Value =
+                serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
+            let subject = v["query"].as_str().unwrap_or("").to_string();
             (tool.to_string(), subject)
         }
         other => (other.to_string(), String::new()),

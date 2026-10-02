@@ -26,11 +26,19 @@ pub struct ToolCall {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Image {
+    pub mime: String,
+    pub data: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: String,
     pub tool_calls: Vec<ToolCall>,
     pub tool_call_id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<Image>,
 }
 
 impl Message {
@@ -40,11 +48,17 @@ impl Message {
             content: content.into(),
             tool_calls: Vec::new(),
             tool_call_id: String::new(),
+            images: Vec::new(),
         }
     }
 
     pub fn with_calls(mut self, calls: Vec<ToolCall>) -> Self {
         self.tool_calls = calls;
+        self
+    }
+
+    pub fn with_images(mut self, images: Vec<Image>) -> Self {
+        self.images = images;
         self
     }
 
@@ -54,6 +68,7 @@ impl Message {
             content: content.into(),
             tool_calls: Vec::new(),
             tool_call_id: id.to_string(),
+            images: Vec::new(),
         }
     }
 }
