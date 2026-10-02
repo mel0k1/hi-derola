@@ -25,6 +25,56 @@ pub mod web;
 
 const MAX_AGENTS_MD: usize = 16 * 1024;
 
+/// AGENTS.md/CLAUDE.md discovered in the directory chain of a read file
+/// (up to the working directory), injected once per file per session
+pub fn instructions_for_file(path: &str) -> Option<(String, String)> {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<std::path::PathBuf>>> = OnceLock::new();
+    const MAX_INLINE: usize = 4 * 1024;
+    let cwd = std::env::current_dir().ok()?;
+    let p = std::path::Path::new(path);
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        cwd.join(p)
+    };
+    let mut dir = abs.parent()?.to_path_buf();
+    for _ in 0..6 {
+        // strictly below the working directory: cwd-level AGENTS.md is already in the system prompt
+        if !dir.starts_with(&cwd) || dir == cwd {
+            break;
+        }
+        for name in ["AGENTS.md", "CLAUDE.md"] {
+            let ip = dir.join(name);
+            if !ip.is_file() {
+                continue;
+            }
+            let seen = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
+            if !seen.lock().unwrap().insert(ip.clone()) {
+                return None;
+            }
+            let body = std::fs::read_to_string(&ip).ok()?;
+            let mut text = body.trim().to_string();
+            if text.is_empty() {
+                continue;
+            }
+            if text.len() > MAX_INLINE {
+                let mut end = MAX_INLINE;
+                while end < text.len() && !text.is_char_boundary(end) {
+                    end += 1;
+                }
+                text.truncate(end);
+                text.push_str("\n... (truncated)");
+            }
+            return Some((ip.display().to_string(), text));
+        }
+        let parent = dir.parent()?.to_path_buf();
+        dir = parent;
+    }
+    None
+}
+
 pub fn agents_md() -> String {
     let cwd = std::env::current_dir().unwrap_or_default();
     agents_md_in(&cwd)

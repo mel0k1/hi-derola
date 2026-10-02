@@ -24,6 +24,27 @@ pub async fn format_file(path: &str) -> Option<&'static str> {
     let (name, prog, args): (&'static str, String, Vec<&str>) = match ext {
         "rs" => ("rustfmt", "rustfmt".into(), vec!["--edition", "2021"]),
         "go" => ("gofmt", "gofmt".into(), vec!["-w"]),
+        "py" | "pyi" => {
+            if let Some(bin) = find_on_path("ruff") {
+                ("ruff", bin, vec!["format"])
+            } else if let Some(bin) = find_on_path("black") {
+                ("black", bin, vec!["-q"])
+            } else {
+                return None;
+            }
+        }
+        "c" | "h" | "cpp" | "hpp" | "cc" | "cxx" => match find_on_path("clang-format") {
+            Some(bin) => ("clang-format", bin, vec!["-i"]),
+            None => return None,
+        },
+        "sh" | "bash" => match find_on_path("shfmt") {
+            Some(bin) => ("shfmt", bin, vec!["-w"]),
+            None => return None,
+        },
+        "kt" | "kts" => match find_on_path("ktlint") {
+            Some(bin) => ("ktlint", bin, vec!["-F"]),
+            None => return None,
+        },
         "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" | "html" | "css" | "scss" | "less" | "md"
         | "json" | "jsonc" | "yaml" | "yml" | "vue" | "svelte" | "astro" => match prettier_bin() {
             Some(bin) => ("prettier", bin, vec!["--write", "--log-level", "warn"]),

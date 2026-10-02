@@ -191,6 +191,7 @@ pub async fn run(
         empty_retries = 0;
         msgs.push(Message::new(Role::Assistant, reply.text.clone()).with_calls(reply.calls.clone()));
         req.messages = msgs.clone();
+        let mut pending_images: Vec<(String, crate::chat::Image)> = Vec::new();
         for call in reply.calls {
             tx.send(ApiEvent::Tool {
                 name: call.name.clone(),
@@ -372,6 +373,30 @@ pub async fn run(
                         Err(e) => format!("error: subagent failed: {e:#}"),
                     }
                 }
+            } else if call.name == "read_file" {
+                let v: Value = serde_json::from_str(&call.args).unwrap_or(Value::Null);
+                let p = v["path"].as_str().unwrap_or("").to_string();
+                if !p.is_empty() && crate::files::is_image(&p) {
+                    match crate::files::read_image(&p) {
+                        Ok((mime, data)) => {
+                            let msg =
+                                format!("Image loaded: {p} ({mime}); the image is attached in the next message.");
+                            pending_images.push((p.clone(), crate::chat::Image { mime, data }));
+                            msg
+                        }
+                        Err(e) => format!("error: {e:#}"),
+                    }
+                } else {
+                    match tools::execute("read_file", &call.args, mcp_now.as_deref()).await {
+                        Ok(mut o) => {
+                            if let Some((ip, ib)) = crate::instructions_for_file(&p) {
+                                o.push_str(&format!("\n\n---\nProject instructions from {ip}:\n{ib}"));
+                            }
+                            o
+                        }
+                        Err(e) => format!("error: {e:#}"),
+                    }
+                }
             } else {
                 match tools::execute(&call.name, &call.args, mcp_now.as_deref()).await {
                     Ok(o) => o,
@@ -388,6 +413,19 @@ pub async fn run(
                 .collect();
             let _ = tx.send(ApiEvent::Note(summary));
             msgs.push(Message::tool(&call.id, out));
+            req.messages = msgs.clone();
+        }
+        if !pending_images.is_empty() {
+            let names: Vec<String> = pending_images.iter().map(|(p, _)| p.clone()).collect();
+            let imgs: Vec<crate::chat::Image> =
+                pending_images.into_iter().map(|(_, i)| i).collect();
+            msgs.push(
+                Message::new(
+                    Role::User,
+                    format!("image(s) read via read_file: {}", names.join(", ")),
+                )
+                .with_images(imgs),
+            );
             req.messages = msgs.clone();
         }
     }

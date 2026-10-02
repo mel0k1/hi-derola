@@ -29,7 +29,7 @@ pub fn specs() -> Vec<ToolSpec> {
     let mut specs = vec![
         ToolSpec {
             name: "read_file".into(),
-            description: "Read a UTF-8 text file with line numbers (1-based, cat -n style). Returns up to limit lines starting at offset. Binary files are detected and not dumped.".into(),
+            description: "Read a UTF-8 text file with line numbers (1-based, cat -n style). Returns up to limit lines starting at offset. Binary files are detected and not dumped. Image files (png/jpg/gif/webp/bmp) are returned as attached images the model can see directly.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -575,6 +575,56 @@ fn normalize_eol(s: &str) -> String {
     s.replace("\r\n", "\n")
 }
 
+fn norm_char(c: char) -> char {
+    match c {
+        '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}' => '\'',
+        '\u{201C}' | '\u{201D}' | '\u{201E}' | '\u{201F}' => '"',
+        '\u{2010}'..='\u{2015}' | '\u{2212}' => '-',
+        '\u{00A0}' | '\u{2007}' | '\u{202F}' => ' ',
+        _ => c,
+    }
+}
+
+/// match old/new with lookalike unicode (smart quotes, dashes, nbsp) normalized
+/// to ascii, splice the replacement into the original text 1:1
+fn unicode_edit(
+    content: &str,
+    old: &str,
+    new: &str,
+    replace_all: bool,
+) -> anyhow::Result<Option<(String, usize)>> {
+    let cc: Vec<char> = content.chars().collect();
+    let nc: Vec<char> = cc.iter().copied().map(norm_char).collect();
+    let on: Vec<char> = old.chars().map(norm_char).collect();
+    if on.is_empty() || on.len() > nc.len() {
+        return Ok(None);
+    }
+    let mut hits = Vec::new();
+    for i in 0..=nc.len() - on.len() {
+        if nc[i..i + on.len()] == on[..] {
+            hits.push(i);
+        }
+    }
+    if hits.is_empty() {
+        return Ok(None);
+    }
+    if hits.len() > 1 && !replace_all {
+        anyhow::bail!("old_str matches multiple times, add context or set replace_all");
+    }
+    let newc: Vec<char> = new.chars().collect();
+    let mut out = cc;
+    let targets: Vec<usize> = if replace_all {
+        hits.clone()
+    } else {
+        vec![hits[0]]
+    };
+    for lo in targets.into_iter().rev() {
+        out.splice(lo..lo + on.len(), newc.iter().copied());
+    }
+    let n = if replace_all { hits.len() } else { 1 };
+    Ok(Some((out.into_iter().collect(), n)))
+}
+
 fn try_edit(content: &str, old: &str, new: &str, replace_all: bool) -> Option<(String, usize)> {
     let n = content.matches(old).count();
     if n == 0 || (n > 1 && !replace_all) {
@@ -640,6 +690,11 @@ pub fn apply_edit(content: &str, old: &str, new: &str, replace_all: bool) -> Res
         return Ok((with_bom(&restore_eol(&out, crlf), bom), n));
     }
     match trim_edit(&norm, &old_n, &new_n, replace_all) {
+        Ok(Some((out, n))) => return Ok((with_bom(&restore_eol(&out, crlf), bom), n)),
+        Ok(None) => {}
+        Err(_) => multi = true,
+    }
+    match unicode_edit(&norm, &old_n, &new_n, replace_all) {
         Ok(Some((out, n))) => return Ok((with_bom(&restore_eol(&out, crlf), bom), n)),
         Ok(None) => {}
         Err(_) => multi = true,
@@ -740,6 +795,24 @@ fn list_tree(dir: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unicode_fallback_edit() {
+        // content with smart quotes, old_str typed with ascii quotes
+        let content = "const s = \u{201c}hello\u{201d};\nlet d = \u{2013} 1;";
+        let (out, n) = apply_edit(content, "const s = \"hello\";", "const s = \"bye\";", false).unwrap();
+        assert_eq!(n, 1);
+        assert!(out.contains("const s = \"bye\";"));
+        assert!(out.contains('\u{2013}'), "untouched chars must stay original");
+        // nbsp tolerance
+        let (out, _) = apply_edit("a\u{00a0}b", "a b", "ab", false).unwrap();
+        assert_eq!(out, "ab");
+        // multi without replace_all still errors
+        assert!(apply_edit("x\u{2019}y x\u{2019}y", "x'y", "z", false).is_err());
+        let (out, n) = apply_edit("x\u{2019}y x\u{2019}y", "x'y", "z", true).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(out, "z z");
+    }
 
     #[test]
     fn budget_keeps_tail() {
