@@ -746,8 +746,9 @@ fn command(sh: &Shared, app: &AppHandle, line: &str) -> Value {
         .unwrap_or((line, ""));
     match cmd {
         "/help" | "/h" => note(
-            "commands: /file <path> · /model <name> · /models · /plan · /undo · /redo · /clear · /help\n\
-             mutations (write/edit/bash/mcp) ask for confirmation, allow all skips further asks",
+            "commands: /file <path> · /model <name> · /models · /plan · /undo · /redo · /init · /compact · /export [path] · /clear · /help\n\
+             mutations (write/edit/bash/mcp) ask for confirmation, allow all skips further asks\n\
+             custom commands: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)",
         ),
         "/clear" | "/new" => {
             start_new(sh, app);
@@ -815,7 +816,104 @@ fn command(sh: &Shared, app: &AppHandle, line: &str) -> Value {
                 "plan mode off"
             })
         }
-        _ => note(format!("unknown command: {cmd}, try /help")),
+        "/init" => {
+            if sh.inflight.lock().unwrap().is_some() {
+                return note("wait for the current run to finish");
+            }
+            let cwd = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            dispatch_prompt(sh, app, hi_derola::commands::init_prompt(&cwd))
+        }
+        "/compact" => {
+            if sh.inflight.lock().unwrap().is_some() {
+                return note("wait for the current run to finish");
+            }
+            let msgs_now = sh.session.lock().unwrap().messages.clone();
+            if msgs_now.len() < 6 {
+                return note("nothing to compact yet");
+            }
+            let cfg = sh.cfg.lock().unwrap().clone();
+            let Some(provider) = sh.provider.lock().unwrap().clone() else {
+                return note("no provider configured");
+            };
+            let (system, _) = {
+                let ses = sh.session.lock().unwrap();
+                (ses.system.clone(), ses.messages.clone())
+            };
+            let req = ChatRequest {
+                system,
+                messages: msgs_now,
+                model: cfg.provider.model.clone(),
+                max_tokens: cfg.provider.max_tokens,
+                temperature: cfg.provider.temperature,
+                top_p: cfg.provider.top_p,
+                stream: false,
+                tools: Vec::new(),
+            };
+            let tx = sh.tx.clone();
+            tauri::async_runtime::spawn(async move {
+                let mut msgs = req.messages.clone();
+                if agent::compact_session(provider, &req, &mut msgs, &tx).await {
+                    let _ = tx.send(ApiEvent::Done {
+                        text: "context compacted".into(),
+                        messages: msgs,
+                    });
+                } else {
+                    let _ = tx.send(ApiEvent::Note("compaction failed".into()));
+                }
+            });
+            note("compacting context...")
+        }
+        "/export" => {
+            let path = if arg.is_empty() {
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                format!("hiderola-session-{ts}.md")
+            } else {
+                arg.to_string()
+            };
+            let (title, msgs) = {
+                let title = sh.title.lock().unwrap().clone();
+                let msgs = sh.session.lock().unwrap().messages.clone();
+                (title, msgs)
+            };
+            let md = hi_derola::commands::export_markdown(&title, &msgs);
+            match std::fs::write(&path, md) {
+                Ok(_) => note(format!("exported to {path}")),
+                Err(e) => note(format!("error: {e:#}")),
+            }
+        }
+        _ => match hi_derola::commands::get(cmd) {
+            Some(c) => {
+                if sh.inflight.lock().unwrap().is_some() {
+                    return note("wait for the current run to finish");
+                }
+                let text = hi_derola::commands::render(&c.template, arg);
+                dispatch_prompt(sh, app, text)
+            }
+            None => note(format!("unknown command: {cmd}, try /help")),
+        },
+    }
+}
+
+fn dispatch_prompt(sh: &Arc<Shared>, app: &AppHandle, text: String) -> Value {
+    if sh.inflight.lock().unwrap().is_some() {
+        sh.queue.lock().unwrap().push(text);
+        let _ = sh.tx.send(ApiEvent::Note("queued: will run after the current task".into()));
+        return json!({"cmd": false, "queued": true});
+    }
+    {
+        let mut ses = sh.session.lock().unwrap();
+        ses.push(Role::User, text);
+    }
+    persist(sh);
+    emit_sessions(app, sh);
+    match launch(sh) {
+        Ok(_) => json!({"cmd": false}),
+        Err(e) => note(format!("error: {e}")),
     }
 }
 
