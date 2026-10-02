@@ -664,6 +664,16 @@ fn transcript(msgs: &[Message]) -> String {
     t
 }
 
+/// Manual compaction entry point for /compact in the UIs.
+pub async fn compact_session(
+    provider: Arc<dyn Provider>,
+    req: &ChatRequest,
+    msgs: &mut Vec<Message>,
+    tx: &UnboundedSender<ApiEvent>,
+) -> bool {
+    compact(&provider, req, msgs, tx).await
+}
+
 async fn compact(
     provider: &Arc<dyn Provider>,
     req: &ChatRequest,

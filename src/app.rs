@@ -78,7 +78,7 @@ pub struct App {
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
-const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /clear         start new session\n  /quit          exit\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/list/glob/grep/bash (background: true)/webfetch + question, subagent (background), task_status, task_kill, todowrite/todoread, mcp servers\nconfirm:\n  y run  n skip  a allow all  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
+const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/list/glob/grep/bash (background: true)/webfetch + question, subagent (background), task_status, task_kill, todowrite/todoread, skill, mcp servers\nconfirm:\n  y run  n skip  a allow all  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
 
 pub fn help_text() -> &'static str {
     HELP
@@ -566,7 +566,7 @@ impl App {
         self.draft.clear();
         if text.starts_with('/') {
             self.input.clear();
-            self.command(&text);
+            self.command(&text, inflight);
             self.status = self.status_line();
             return;
         }
@@ -671,7 +671,7 @@ impl App {
         }
     }
 
-    fn command(&mut self, line: &str) {
+    fn command(&mut self, line: &str, inflight: &mut Option<tokio::task::JoinHandle<()>>) {
         let (cmd, arg) = line
             .split_once(' ')
             .map(|(c, a)| (c, a.trim()))
@@ -757,7 +757,81 @@ impl App {
                     "plan mode off"
                 });
             }
-            _ => self.info(format!("unknown command: {cmd}, try /help")),
+            "/init" => {
+                if !matches!(self.phase, Phase::Idle) {
+                    self.info("wait for the current run to finish");
+                    return;
+                }
+                let cwd = std::env::current_dir()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                self.session
+                    .push(Role::User, crate::commands::init_prompt(&cwd));
+                self.info("initializing AGENTS.md...");
+                self.start_run(inflight);
+            }
+            "/compact" => {
+                if !matches!(self.phase, Phase::Idle) || self.confirm.is_some() || self.ask.is_some() {
+                    self.info("wait for the current run to finish");
+                    return;
+                }
+                if self.session.messages.len() < 6 {
+                    self.info("nothing to compact yet");
+                    return;
+                }
+                let req = ChatRequest {
+                    system: self.session.system.clone(),
+                    messages: self.session.messages.clone(),
+                    model: self.model.clone(),
+                    max_tokens: self.cfg.provider.max_tokens,
+                    temperature: self.cfg.provider.temperature,
+                    top_p: self.cfg.provider.top_p,
+                    stream: false,
+                    tools: Vec::new(),
+                };
+                let provider = self.provider.clone();
+                let tx = self.tx.clone();
+                self.info("compacting context...");
+                tokio::spawn(async move {
+                    let mut msgs = req.messages.clone();
+                    if agent::compact_session(provider, &req, &mut msgs, &tx).await {
+                        let _ = tx.send(ApiEvent::Done {
+                            text: "context compacted".into(),
+                            messages: msgs,
+                        });
+                    } else {
+                        let _ = tx.send(ApiEvent::Note("compaction failed".into()));
+                    }
+                });
+            }
+            "/export" => {
+                let path = if arg.is_empty() {
+                    let ts = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    format!("hiderola-session-{ts}.md")
+                } else {
+                    arg.to_string()
+                };
+                let md = crate::commands::export_markdown("", &self.session.messages);
+                match std::fs::write(&path, md) {
+                    Ok(_) => self.info(format!("exported to {path}")),
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            _ => match crate::commands::get(cmd) {
+                Some(c) => {
+                    if !matches!(self.phase, Phase::Idle) {
+                        self.info("wait for the current run to finish");
+                        return;
+                    }
+                    let text = crate::commands::render(&c.template, arg);
+                    self.session.push(Role::User, text);
+                    self.start_run(inflight);
+                }
+                None => self.info(format!("unknown command: {cmd}, try /help")),
+            },
         }
     }
 }

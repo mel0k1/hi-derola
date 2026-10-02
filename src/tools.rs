@@ -26,7 +26,7 @@ fn tail(s: &str, max: usize) -> String {
 }
 
 pub fn specs() -> Vec<ToolSpec> {
-    vec![
+    let mut specs = vec![
         ToolSpec {
             name: "read_file".into(),
             description: "Read a UTF-8 text file with line numbers (1-based, cat -n style). Returns up to limit lines starting at offset. Binary files are detected and not dumped.".into(),
@@ -225,7 +225,16 @@ pub fn specs() -> Vec<ToolSpec> {
             description: "Read the current todo list for the session. Use to re-check the plan after a context compaction or before continuing multi-step work.".into(),
             parameters: json!({ "type": "object", "properties": {} }),
         },
-    ]
+    ];
+    let skill_desc = crate::skills::spec_description();
+    if !skill_desc.is_empty() {
+        specs.push(ToolSpec {
+            name: "skill".into(),
+            description: skill_desc,
+            parameters: crate::skills::spec(),
+        });
+    }
+    specs
 }
 
 pub fn specs_core() -> Vec<ToolSpec> {
@@ -271,6 +280,7 @@ pub fn detail(name: &str, args: &str) -> String {
             format!("{n} todos")
         }
         "todoread" => "todo list".to_string(),
+        "skill" => crate::skills::detail(args),
         _ => {
             let d = args.lines().next().unwrap_or("").to_string();
             if d.chars().count() > 60 {
@@ -441,6 +451,12 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
             Ok(crate::bg::kill(id))
         }
         "todoread" => Ok(crate::todo::read_render()),
+        "skill" => {
+            let Some(name) = v["name"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                bail!("skill: name required");
+            };
+            crate::skills::load(name)
+        }
         "bash" => {
             let Some(cmd) = v["command"].as_str() else {
                 bail!("bash: command required");
