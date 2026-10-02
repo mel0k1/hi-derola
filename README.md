@@ -89,7 +89,7 @@ bash = "ask"
 # webfetch = "allow"
 # subagent = "ask"
 
-[permissions.rules]
+[[permissions.rules]]
 tool = "bash"
 pattern = "git *"                                # command for bash, path for edit/write_file, url for webfetch
 permission = "allow"
