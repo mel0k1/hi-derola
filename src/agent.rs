@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Result};
 use serde_json::Value;
+use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
@@ -18,6 +19,7 @@ pub struct AgentCfg {
     pub output_budget: usize,
     pub perm: crate::perm::PermCfg,
     pub nested: bool,
+    pub plan: bool,
 }
 
 impl Default for AgentCfg {
@@ -28,6 +30,7 @@ impl Default for AgentCfg {
             output_budget: 32 * 1024,
             perm: Default::default(),
             nested: false,
+            plan: false,
         }
     }
 }
@@ -72,6 +75,9 @@ pub async fn run(
         } else {
             tools::specs()
         };
+        if cfg.plan {
+            specs.retain(|s| s.name != "write_file" && s.name != "edit");
+        }
         if let Some(m) = &mcp_now {
             specs.extend(m.specs().await);
         }
@@ -159,13 +165,25 @@ pub async fn run(
                 diff: tools::preview(&call.name, &call.args),
             })
             .map_err(|_| anyhow!("closed"))?;
-            match cfg.perm.check(&call.name, &call.args) {
+            let plan_block = cfg.plan && matches!(call.name.as_str(), "write_file" | "edit");
+            let perm = if plan_block {
+                crate::perm::Perm::Deny
+            } else {
+                cfg.perm.check(&call.name, &call.args)
+            };
+            match perm {
                 crate::perm::Perm::Deny => {
-                    let _ = tx.send(ApiEvent::Note(format!(
-                        "{} denied by permissions config",
-                        call.name
-                    )));
-                    msgs.push(Message::tool(&call.id, "denied by permissions config"));
+                    let why = if plan_block {
+                        "plan mode is active: file modifications are disabled. Research the codebase and present a plan instead."
+                    } else {
+                        "denied by permissions config"
+                    };
+                    let _ = tx.send(ApiEvent::Note(if plan_block {
+                        format!("{} denied: plan mode", call.name)
+                    } else {
+                        format!("{} denied by permissions config", call.name)
+                    }));
+                    msgs.push(Message::tool(&call.id, why));
                     req.messages = msgs.clone();
                     continue;
                 }
@@ -247,35 +265,42 @@ pub async fn run(
                     let budget = cfg.output_budget;
                     let id2 = id.clone();
                     let desc2 = desc.clone();
+                    let inner = tokio::spawn({
+                        let tx3 = tx2.clone();
+                        async move { run_subagent(provider2, sub_req, cfg2, allow2, &tx3, mcp2).await }
+                    });
+                    crate::bg::attach_abort(&id, inner.abort_handle());
                     tokio::spawn(async move {
-                        let msg =
-                            match run_subagent(provider2, sub_req, cfg2, allow2, &tx2, mcp2).await
-                            {
-                                Ok(text) => {
-                                    crate::bg::finish(&id2, Some(text.clone()));
-                                    let _ = tx2.send(ApiEvent::Note(format!(
-                                        "background task {id2} finished: {desc2}"
-                                    )));
-                                    tools::budget(
-                                        format!(
-                                            "Background task {id2} ({desc2}) finished. Result:\n{text}"
-                                        ),
-                                        budget,
-                                    )
-                                }
-                                Err(e) => {
-                                    crate::bg::finish(&id2, None);
-                                    let _ = tx2.send(ApiEvent::Note(format!(
-                                        "background task {id2} failed: {e:#}"
-                                    )));
-                                    format!("Background task {id2} ({desc2}) failed: {e:#}")
-                                }
-                            };
+                        let msg = match inner.await {
+                            Ok(Ok(text)) => {
+                                crate::bg::finish(&id2, Some(text.clone()));
+                                let _ = tx2.send(ApiEvent::Note(format!(
+                                    "background task {id2} finished: {desc2}"
+                                )));
+                                tools::budget(
+                                    format!(
+                                        "Background task {id2} ({desc2}) finished. Result:\n{text}"
+                                    ),
+                                    budget,
+                                )
+                            }
+                            Ok(Err(e)) => {
+                                crate::bg::finish(&id2, None);
+                                let _ = tx2.send(ApiEvent::Note(format!(
+                                    "background task {id2} failed: {e:#}"
+                                )));
+                                format!("Background task {id2} ({desc2}) failed: {e:#}")
+                            }
+                            Err(_) => {
+                                crate::bg::finish(&id2, None);
+                                format!("Background task {id2} ({desc2}) was killed.")
+                            }
+                        };
                         queue2.lock().unwrap().push(msg);
                         let _ = tx2.send(ApiEvent::Wake);
                     });
                     format!(
-                        "started in background as task {id}; keep working, the result will arrive as a new message when the task finishes (progress: task_status)"
+                        "started in background as task {id}; keep working, the result will arrive as a new message when the task finishes (progress: task_status, stop it: task_kill)"
                     )
                 } else {
                     let sub_req = ChatRequest {
@@ -351,40 +376,123 @@ fn run_bash_background(
     let workdir = v["workdir"].as_str().map(|s| s.to_string());
     let timeout = v["timeout"].as_u64();
     let desc: String = cmd.lines().next().unwrap_or("").chars().take(60).collect();
+    let mut child = match tools::spawn_shell(cmd, workdir.as_deref()) {
+        Ok(c) => c,
+        Err(e) => return format!("error: bash: {e:#}"),
+    };
     let id = crate::bg::start("bash", &desc);
+    if let Some(p) = child.id() {
+        crate::bg::attach_pid(&id, p);
+    }
+    let buf = Arc::new(Mutex::new(String::new()));
+    crate::bg::attach_out(&id, buf.clone());
     let _ = tx.send(ApiEvent::Note(format!(
         "background task {id} started: {desc}"
     )));
+    let out: Box<dyn tokio::io::AsyncRead + Unpin + Send> = match child.stdout.take() {
+        Some(s) => Box::new(s),
+        None => Box::new(tokio::io::empty()),
+    };
+    let err: Box<dyn tokio::io::AsyncRead + Unpin + Send> = match child.stderr.take() {
+        Some(s) => Box::new(s),
+        None => Box::new(tokio::io::empty()),
+    };
+    let r1 = tokio::spawn(pump_bg(out, id.clone(), buf.clone(), tx.clone()));
+    let r2 = tokio::spawn(pump_bg(err, id.clone(), buf.clone(), tx.clone()));
     let tx2 = tx.clone();
     let id2 = id.clone();
     let desc2 = desc.clone();
-    let cmd = cmd.to_string();
     tokio::spawn(async move {
-        let msg = match tools::bash_run(&cmd, workdir.as_deref(), timeout).await {
-            Ok(out) => {
-                crate::bg::finish(&id2, Some(out.clone()));
+        let wait = async {
+            let _ = r1.await;
+            let _ = r2.await;
+            child.wait().await
+        };
+        let st = match timeout {
+            Some(t) => match tokio::time::timeout(std::time::Duration::from_secs(t.max(1)), wait).await {
+                Err(_) => None,
+                Ok(s) => s.ok(),
+            },
+            None => wait.await.ok(),
+        };
+        let out = buf.lock().unwrap().clone();
+        let killed = crate::bg::killed(&id2);
+        let code = st.and_then(|s| s.code());
+        let msg = if killed {
+            crate::bg::finish(&id2, Some(out.clone()));
+            format!("Background task {id2} ({desc2}) was killed. Output before kill:\n{out}")
+        } else if st.is_none() {
+            let _ = crate::bg::kill(&id2);
+            crate::bg::finish(&id2, None);
+            format!("Background task {id2} ({desc2}) timed out and was stopped. Output:\n{out}")
+        } else {
+            let tail = if code == Some(0) {
+                String::new()
+            } else {
+                format!("\nexit code: {}", code.unwrap_or(-1))
+            };
+            let body = if out.trim().is_empty() {
+                "(no output)".to_string()
+            } else {
+                out.clone()
+            };
+            let text = format!("{body}{tail}");
+            if code == Some(0) {
+                crate::bg::finish(&id2, Some(text.clone()));
                 let _ = tx2.send(ApiEvent::Note(format!(
                     "background task {id2} finished: {desc2}"
                 )));
                 tools::budget(
-                    format!("Background task {id2} ({desc2}) finished. Output:\n{out}"),
+                    format!("Background task {id2} ({desc2}) finished. Output:\n{text}"),
+                    budget,
+                )
+            } else {
+                crate::bg::finish(&id2, Some(text.clone()));
+                let _ = tx2.send(ApiEvent::Note(format!(
+                    "background task {id2} failed (exit {code:?}): {desc2}"
+                )));
+                tools::budget(
+                    format!("Background task {id2} ({desc2}) failed. Output:\n{text}"),
                     budget,
                 )
             }
-            Err(e) => {
-                crate::bg::finish(&id2, None);
-                let _ = tx2.send(ApiEvent::Note(format!(
-                    "background task {id2} failed: {e:#}"
-                )));
-                format!("Background task {id2} ({desc2}) failed: {e:#}")
-            }
         };
-        queue.lock().unwrap().push(msg);
+        queue.lock().unwrap().push(tools::budget(msg, budget));
         let _ = tx2.send(ApiEvent::Wake);
     });
     format!(
-        "Command moved to the background (task {id}). You will be notified automatically when it finishes; the notification will include the output. Do not poll task_status for completion; keep working on anything that does not depend on the result."
+        "Command moved to the background (task {id}). You will be notified automatically when it finishes; the notification will include the output. Do not poll task_status for completion; keep working on anything that does not depend on the result. Use task_kill to stop it."
     )
+}
+
+async fn pump_bg<R: tokio::io::AsyncRead + Unpin>(
+    mut r: R,
+    id: String,
+    buf: Arc<Mutex<String>>,
+    tx: UnboundedSender<ApiEvent>,
+) {
+    let mut b = [0u8; 4096];
+    loop {
+        match r.read(&mut b).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let s = String::from_utf8_lossy(&b[..n]).to_string();
+                {
+                    let mut g = buf.lock().unwrap();
+                    g.push_str(&s);
+                    if g.len() > 256 * 1024 {
+                        let mut cut = g.len() - 256 * 1024;
+                        while cut < g.len() && !g.is_char_boundary(cut) {
+                            cut += 1;
+                        }
+                        g.drain(..cut);
+                    }
+                }
+                crate::bg::append(&id, &s);
+                let _ = tx.send(ApiEvent::BgOut { id: id.clone(), chunk: s });
+            }
+        }
+    }
 }
 
 async fn ask_user(args: &str, tx: &UnboundedSender<ApiEvent>) -> Result<String> {
@@ -444,6 +552,7 @@ fn run_subagent<'a>(
                     | ApiEvent::Tool { .. }
                     | ApiEvent::Confirm { .. }
                     | ApiEvent::Usage { .. }
+                    | ApiEvent::BgOut { .. }
                     | ApiEvent::Failed(_) => {
                         let _ = fwd_tx.send(ev);
                     }

@@ -36,7 +36,10 @@ SCENARIO = {"edit_done": False, "steer_started": False, "steer_done": False,
             "bg_started": False, "bg_done": False, "bg_result_seen": False,
             "todo_write_seen": False, "todo_read_seen": False,
             "bgbash_started": False, "bgbash_result_seen": False,
-            "feedback_seen": False}
+            "feedback_seen": False,
+            "kill_started": False, "kill_status_seen": False, "kill_requested": False,
+            "kill_id": "", "killed_seen": False,
+            "plan_started": False, "plan_deny_seen": False}
 
 
 def sse_response(handler, chunks):
@@ -240,7 +243,58 @@ class Mock(BaseHTTPRequestHandler):
                 }))
             respond(chunks)
             return
-        respond([{"role": "assistant", "content": "SUBAGENT_OK"}])
+        last_tool = tool_msgs[-1]["content"] if tool_msgs else ""
+        if not SCENARIO["kill_requested"]:
+            if not SCENARIO["kill_started"]:
+                if last_tool.startswith("Command moved to the background"):
+                    SCENARIO["kill_started"] = True
+                    SCENARIO["kill_id"] = re.search(r"\(task (bg-\d+)\)", last_tool).group(1)
+                    time.sleep(1.2)
+                    chunks = tool_call_chunks("task_status", json.dumps({"id": SCENARIO["kill_id"]}))
+                    respond(chunks)
+                else:
+                    chunks = tool_call_chunks("bash", json.dumps({
+                        "command": "sleep 0.7; echo LIVE_OUT_LINE; sleep 30",
+                        "background": True,
+                    }))
+                    respond(chunks)
+                return
+            if not SCENARIO["kill_status_seen"]:
+                live = "output so far" in last_tool and "LIVE_OUT_LINE" in last_tool
+                check("live output visible via task_status", live)
+                SCENARIO["kill_status_seen"] = True
+                chunks = tool_call_chunks("task_kill", json.dumps({"id": SCENARIO["kill_id"]}))
+                respond(chunks)
+                return
+            killed_msg = f"task {SCENARIO['kill_id']} killed" in last_tool
+            check("task_kill reported killed", killed_msg)
+            SCENARIO["kill_requested"] = True
+            if "was killed" in last_user:
+                SCENARIO["killed_seen"] = True
+                respond([{"role": "assistant", "content": "KILL_OK"}])
+            else:
+                respond([{"role": "assistant", "content": "KILL_REQUESTED"}])
+            return
+        if SCENARIO["kill_requested"] and not SCENARIO["killed_seen"]:
+            if last_user.startswith("Background task bg-") and "was killed" in last_user:
+                SCENARIO["killed_seen"] = True
+                respond([{"role": "assistant", "content": "KILL_OK"}])
+                return
+        if "make a plan" in last_user and not SCENARIO["plan_started"]:
+            SCENARIO["plan_started"] = True
+            chunks = tool_call_chunks("write_file", json.dumps({
+                "path": "plan_probe.txt",
+                "content": "should be denied",
+            }))
+            respond(chunks)
+            return
+        if SCENARIO["plan_started"] and not SCENARIO["plan_deny_seen"]:
+            denied = any("plan mode is active" in m["content"] for m in tool_msgs)
+            check("plan mode denied the write", denied)
+            SCENARIO["plan_deny_seen"] = True
+            respond([{"role": "assistant", "content": "PLAN_OK: step 1 read code, step 2 fix bug"}])
+            return
+        respond([{"role": "assistant", "content": "ALL_DONE"}])
 
 
 def strip(s):
@@ -385,6 +439,28 @@ def run_pty():
             os.write(fd, b"\r")
             sent = 14
         elif sent == 14 and "FEEDBACK_OK" in plain:
+            time.sleep(0.3)
+            type_str("kill bg task")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            sent = 15
+        elif sent == 15 and "run bash?" in plain:
+            time.sleep(0.4)
+            os.write(fd, b"y")
+            sent = 16
+        elif sent == 16 and "KILL_OK" in plain:
+            time.sleep(0.4)
+            type_str("/plan")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            sent = 17
+        elif sent == 17 and "plan mode on" in plain:
+            time.sleep(0.4)
+            type_str("make a plan")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            sent = 18
+        elif sent == 18 and "PLAN_OK" in plain:
             break
     try:
         os.kill(pid, signal.SIGKILL)
@@ -431,6 +507,13 @@ check("background bash result reached the model", SCENARIO["bgbash_result_seen"]
 check("background bash answer rendered", "BG_BASH_OK" in plain)
 check("rejection feedback reached the model", SCENARIO["feedback_seen"])
 check("feedback answer rendered", "FEEDBACK_OK" in plain)
+check("live output reached the model", SCENARIO["kill_status_seen"])
+check("kill note shown", "killed" in plain)
+check("killed notification reached the model", SCENARIO["killed_seen"])
+check("plan mode note shown", "plan mode on" in plain)
+check("plan mode denial reached the model", SCENARIO["plan_deny_seen"])
+check("plan mode blocked the write", not os.path.exists(os.path.join(WORKDIR, "plan_probe.txt")))
+check("plan answer rendered", "PLAN_OK" in plain)
 
 shutil.rmtree(WORKDIR, ignore_errors=True)
 with open("/tmp/hiderola-e2e-log.txt", "w") as f:

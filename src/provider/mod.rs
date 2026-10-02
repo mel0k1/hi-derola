@@ -29,6 +29,7 @@ pub enum ApiEvent {
     Confirm { name: String, args: String, rx: tokio::sync::oneshot::Sender<ConfirmReply> },
     Ask { name: String, args: String, rx: tokio::sync::oneshot::Sender<String> },
     Todo(String),
+    BgOut { id: String, chunk: String },
     Done { text: String, messages: Vec<Message> },
     Failed(String),
     Wake,

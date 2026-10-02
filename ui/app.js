@@ -19,6 +19,7 @@ let SESSIONS = [];
 let CWD = "";
 let filesPath = "";
 let filesParent = null;
+let PLAN = false;
 
 let streamRaw = null;
 let streamBody = null;
@@ -65,6 +66,7 @@ const KEY_ACTIONS = [
   ["open_settings", "open settings"],
   ["toggle_sidebar", "toggle sidebar"],
   ["toggle_theme", "toggle theme"],
+  ["toggle_plan", "toggle plan mode"],
   ["undo", "undo file changes"],
   ["redo", "redo file changes"],
   ["toggle_thinking", "toggle thinking"],
@@ -79,6 +81,7 @@ Object.assign(DEFAULT_KEYS, {
   open_settings: "ctrl+comma",
   toggle_sidebar: "ctrl+b",
   toggle_theme: "ctrl+shift+t",
+  toggle_plan: "ctrl+shift+p",
   undo: "ctrl+z",
   redo: "ctrl+shift+z",
   toggle_thinking: "ctrl+t",
@@ -95,6 +98,14 @@ function setTheme(name, persist) {
 
 function toggleTheme() {
   setTheme(document.body.dataset.theme === "light" ? "dark" : "light", true);
+}
+
+function togglePlan() {
+  PLAN = !PLAN;
+  applyPlan();
+  applyStatus();
+  invoke("set_plan", { on: PLAN }).catch(() => {});
+  note(PLAN ? "plan mode on: read-only research" : "plan mode off");
 }
 
 /* sidebar */
@@ -230,7 +241,7 @@ function fmtCost(c) {
 }
 
 function applyStatus() {
-  $("status-left").textContent = `${KIND} · ${MODEL}`;
+  $("status-left").textContent = `${KIND} · ${MODEL}${PLAN ? " · plan" : ""}`;
   const right = $("status-right");
   if (waiting) {
     right.textContent = "thinking...";
@@ -549,9 +560,14 @@ async function handleEvent(ev) {
       t.body.scrollTop = t.body.scrollHeight;
       break;
     }
-    case "note":
-      if (ev.s) note(ev.s);
+    case "note": {
+      if (ev.s) {
+        note(ev.s);
+        const m = ev.s.match(/task (bg-\d+) (finished|failed|was killed|killed)/);
+        if (m) endBg(m[1]);
+      }
       break;
+    }
     case "tool": {
       closeThink();
       const m = addMsg("tool");
@@ -581,6 +597,14 @@ async function handleEvent(ev) {
       renderTodoCard(ev.s || "");
       break;
     }
+    case "bgout":
+      bgAppend(ev.id, ev.s);
+      break;
+    case "plan":
+      PLAN = !!ev.on;
+      applyPlan();
+      applyStatus();
+      break;
     case "usage":
       tokens.in += ev.input;
       tokens.out += ev.output;
@@ -756,6 +780,46 @@ function renderTodoCard(text) {
   m.appendChild(el("pre", "todo-body", text));
   $("chat-col").appendChild(m);
   autoscroll();
+}
+
+/* background task live output */
+
+function bgAppend(id, chunk) {
+  let card = document.querySelector(`#chat-col .bg-live[data-id="${id}"]`);
+  if (!card) {
+    closeThink();
+    clearWelcome();
+    card = el("div", "msg bg-live");
+    card.dataset.id = id;
+    const head = el("div", "thead");
+    head.appendChild(el("span", null, id + " output"));
+    const kill = el("button", "bg-kill", "kill");
+    kill.title = "stop this background task";
+    kill.onclick = () => invoke("task_kill", { id });
+    head.appendChild(kill);
+    card.appendChild(head);
+    card.appendChild(el("pre", "bg-out", ""));
+    $("chat-col").appendChild(card);
+  }
+  const pre = card.querySelector(".bg-out");
+  pre.textContent += chunk;
+  if (pre.textContent.length > 24000) pre.textContent = pre.textContent.slice(-18000);
+  pre.scrollTop = pre.scrollHeight;
+  autoscroll();
+}
+
+function endBg(id) {
+  const card = document.querySelector(`#chat-col .bg-live[data-id="${id}"]`);
+  if (!card) return;
+  card.classList.add("ended");
+  const k = card.querySelector(".bg-kill");
+  if (k) k.remove();
+}
+
+/* plan mode */
+
+function applyPlan() {
+  $("btn-plan").classList.toggle("on", PLAN);
 }
 
 /* ask */
@@ -1087,6 +1151,7 @@ $("settings-close").onclick = closeSettings;
 /* buttons */
 
 $("btn-settings").onclick = openSettings;
+$("btn-plan").onclick = togglePlan;
 $("btn-new").onclick = newChat;
 $("btn-undo").onclick = () => runCmd("/undo");
 $("btn-redo").onclick = () => runCmd("/redo");
@@ -1286,6 +1351,9 @@ window.addEventListener("keydown", (e) => {
   } else if (hit("toggle_theme")) {
     e.preventDefault();
     toggleTheme();
+  } else if (hit("toggle_plan")) {
+    e.preventDefault();
+    togglePlan();
   } else if (hit("undo")) {
     e.preventDefault();
     runCmd("/undo");
@@ -1324,6 +1392,8 @@ window.addEventListener("keydown", (e) => {
     fillModelSelect();
     renderSessions();
     renderTodoCard(st.todos || "");
+    PLAN = !!st.plan;
+    applyPlan();
     if (!st.has_provider) note("no api key yet — press ctrl+comma or click the sliders icon to add one");
     applyStatus();
   } catch (e) {

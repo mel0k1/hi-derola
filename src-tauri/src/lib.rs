@@ -29,6 +29,7 @@ pub struct Shared {
     attachments: Mutex<Vec<(String, String)>>,
     mcp: McpSlot,
     allow_all: Arc<AtomicBool>,
+    plan: AtomicBool,
     queue: Arc<Mutex<Vec<String>>>,
     titled: AtomicBool,
     tx: mpsc::UnboundedSender<ApiEvent>,
@@ -108,6 +109,8 @@ fn clip_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
+const PLAN_PROMPT: &str = "PLAN MODE is active: research the codebase (read_file, glob, grep, read-only bash commands) and design an approach. File modifications are disabled (write_file and edit are removed) and mutating commands must be avoided. When you have enough context, present a concrete step-by-step plan and stop.";
+
 fn launch(sh: &Arc<Shared>) -> Result<(), String> {
     let Some(provider) = sh.provider.lock().unwrap().clone() else {
         return Err("no api key: open settings and add one".into());
@@ -128,12 +131,19 @@ fn launch(sh: &Arc<Shared>) -> Result<(), String> {
         tools: Vec::new(),
     };
     let mcp = sh.mcp.clone();
+    let plan = sh.plan.load(Ordering::Relaxed);
+    let mut req = req;
+    if plan {
+        req.system.push_str("\n\n");
+        req.system.push_str(PLAN_PROMPT);
+    }
     let agent_cfg = hi_derola::agent::AgentCfg {
         context_limit: cfg.agent.context_limit,
         max_rounds: cfg.agent.max_rounds,
         output_budget: cfg.agent.output_budget,
         perm: cfg.permissions.clone(),
         nested: false,
+        plan,
     };
     let sh2 = sh.clone();
     let handle = tauri::async_runtime::spawn(async move {
@@ -267,6 +277,7 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     persist(&sh);
                     json!({"t": "todo", "s": s})
                 }
+                ApiEvent::BgOut { id, chunk } => json!({"t": "bgout", "id": id, "s": chunk}),
                 ApiEvent::Usage { input, output } => {
                     let model = sh.cfg.lock().unwrap().provider.model.clone();
                     let delta = models::cost(&model, input, output);
@@ -341,6 +352,7 @@ async fn init(sh: State<'_, Arc<Shared>>) -> Result<Value, String> {
         "cwd": std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default(),
         "config_path": hi_derola::config::config_path().display().to_string(),
         "has_provider": sh.provider.lock().unwrap().is_some(),
+        "plan": sh.plan.load(Ordering::Relaxed),
         "sessions": sessions::list(),
         "sid": sh.sid.lock().unwrap().clone(),
         "title": sh.title.lock().unwrap().clone(),
@@ -423,6 +435,20 @@ async fn allow_all(sh: State<'_, Arc<Shared>>) -> Result<(), String> {
     if let Some(c) = sh.confirm.lock().unwrap().take() {
         let _ = c.send(ConfirmReply { approved: true, feedback: String::new() });
     }
+    Ok(())
+}
+
+#[tauri::command]
+async fn set_plan(sh: State<'_, Arc<Shared>>, app: AppHandle, on: bool) -> Result<(), String> {
+    sh.plan.store(on, Ordering::Relaxed);
+    let _ = app.emit("ev", json!({"t": "plan", "on": on}));
+    Ok(())
+}
+
+#[tauri::command]
+async fn task_kill(app: AppHandle, id: String) -> Result<(), String> {
+    let msg = hi_derola::bg::kill(id.trim());
+    let _ = app.emit("ev", json!({"t": "note", "s": msg}));
     Ok(())
 }
 
@@ -718,7 +744,7 @@ fn command(sh: &Shared, app: &AppHandle, line: &str) -> Value {
         .unwrap_or((line, ""));
     match cmd {
         "/help" | "/h" => note(
-            "commands: /file <path> · /model <name> · /models · /undo · /redo · /clear · /help\n\
+            "commands: /file <path> · /model <name> · /models · /plan · /undo · /redo · /clear · /help\n\
              mutations (write/edit/bash/mcp) ask for confirmation, allow all skips further asks",
         ),
         "/clear" | "/new" => {
@@ -777,6 +803,16 @@ fn command(sh: &Shared, app: &AppHandle, line: &str) -> Value {
         }
         "/undo" | "/u" => note(snapshot::undo().unwrap_or_else(|| "nothing to undo".into())),
         "/redo" => note(snapshot::redo().unwrap_or_else(|| "nothing to redo".into())),
+        "/plan" => {
+            let on = !sh.plan.load(Ordering::Relaxed);
+            sh.plan.store(on, Ordering::Relaxed);
+            let _ = app.emit("ev", json!({"t": "plan", "on": on}));
+            note(if on {
+                "plan mode on: read-only research, the agent will propose a plan instead of making changes"
+            } else {
+                "plan mode off"
+            })
+        }
         _ => note(format!("unknown command: {cmd}, try /help")),
     }
 }
@@ -886,6 +922,7 @@ pub fn run() -> Result<()> {
                 attachments: Mutex::new(Vec::new()),
                 mcp: Arc::new(Mutex::new(None)),
                 allow_all: Arc::new(AtomicBool::new(false)),
+                plan: AtomicBool::new(false),
                 queue: Arc::new(Mutex::new(Vec::new())),
                 titled: AtomicBool::new(restore.is_some()),
                 tx: tx.clone(),
@@ -911,7 +948,7 @@ pub fn run() -> Result<()> {
         .invoke_handler(tauri::generate_handler![
             init, save, send, confirm, answer, allow_all, stop, list_models, mcp_reconnect, undo,
             redo, list_sessions, new_session, open_session, delete_session, list_dir, attach_path,
-            detach, set_theme, list_project_files
+            detach, set_theme, list_project_files, set_plan, task_kill
         ])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow!("{e}"))?;

@@ -15,11 +15,12 @@ A high-performance, lightweight chat and autonomous coding assistant written in 
 - api key, endpoint and model are editable right in the GUI settings; the model dropdown is filled from the provider's `/models` endpoint
 - configurable hotkeys (`[keys]` in config or capture fields in GUI settings)
 - tool calling: read_file (line numbers, offset/limit), write_file, edit (tolerant to CRLF/LF, BOM and trailing whitespace), list_files, glob, grep, bash (workdir, timeout, tail output), webfetch (http/https, html converted to markdown/text) + MCP servers
-- background bash: `background: true` runs a command as a task (`bg-2`) — useful for dev servers and long builds; the tool returns immediately and the output arrives as a new message when the command finishes, `task_status` lists tasks and returns finished results
+- background bash: `background: true` runs a command as a task (`bg-2`) — useful for dev servers and long builds; the tool returns immediately, the output streams live (GUI card with a kill button) and the full result arrives as a new message when the command finishes, `task_status` lists tasks and shows the running output, `task_kill` stops a task
 - todo tools: `todowrite` / `todoread` keep a structured task list (content, status, priority) for multi-step work; the live list renders as a card in the GUI and info lines in the TUI, and is stored with the session
 - question tool pauses the run and asks the user multiple-choice questions right in the UI (free-form answer, esc skips)
-- subagent tool delegates a task to a fresh-context agent with a trimmed toolset; `background: true` runs it async — the tool returns a task id (`bg-1`) immediately, the result arrives as a new message when done, `task_status` lists tasks and returns finished results
+- subagent tool delegates a task to a fresh-context agent with a trimmed toolset; `background: true` runs it async — the tool returns a task id (`bg-1`) immediately, the result arrives as a new message when done, `task_status` lists tasks and returns finished results, `task_kill` aborts a running one
 - reject with feedback: deny a confirmation and type what to change instead — the feedback reaches the model as the tool result and the run continues with the adjusted plan (TUI: `f` at the confirm prompt, GUI: the feedback field in the dialog)
+- plan mode: read-only research — write_file/edit are removed from the toolset and denied, the system prompt asks for a step-by-step plan instead of changes (GUI: the `plan` toggle or ctrl+shift+p, TUI and GUI: `/plan`)
 - diff preview before edit/write approval, colored in GUI and TUI, mutations require confirmation
 - snapshots: every turn is snapshotted, `/undo` / `/redo` reverts file changes
 - AGENTS.md / CLAUDE.md project instructions are picked up from the working directory into the system prompt

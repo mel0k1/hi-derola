@@ -178,12 +178,23 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "task_status".into(),
-            description: "Check background tasks (subagents and bash commands). Without arguments lists all tasks with their statuses. Pass id to get the full result of a finished task.".into(),
+            description: "Check background tasks (subagents and bash commands). Without arguments lists all tasks with their statuses. Pass id to get the full result of a finished task, or the live output of a running one.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "description": "Task id, e.g. bg-1; omit to list all tasks"}
                 }
+            }),
+        },
+        ToolSpec {
+            name: "task_kill".into(),
+            description: "Kill a running background task (bash command or subagent) by id. Use to stop a dev server or a job that is no longer needed. Get ids from task_status.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string", "description": "Task id, e.g. bg-1"}
+                },
+                "required": ["id"]
             }),
         },
         ToolSpec {
@@ -254,6 +265,7 @@ pub fn detail(name: &str, args: &str) -> String {
             .to_string(),
         "subagent" => v["description"].as_str().unwrap_or("").to_string(),
         "task_status" => v["id"].as_str().unwrap_or("background tasks").to_string(),
+        "task_kill" => v["id"].as_str().unwrap_or("background tasks").to_string(),
         "todowrite" => {
             let n = v["todos"].as_array().map(|a| a.len()).unwrap_or(0);
             format!("{n} todos")
@@ -424,6 +436,12 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
             let id = v["id"].as_str().filter(|s| !s.trim().is_empty());
             Ok(crate::bg::status(id))
         }
+        "task_kill" => {
+            let Some(id) = v["id"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                bail!("task_kill: id required");
+            };
+            Ok(crate::bg::kill(id))
+        }
         "todoread" => Ok(crate::todo::read_render()),
         "bash" => {
             let Some(cmd) = v["command"].as_str() else {
@@ -475,6 +493,23 @@ pub async fn bash_run(cmd: &str, workdir: Option<&str>, timeout: Option<u64>) ->
         ));
     }
     Ok(text)
+}
+
+pub fn spawn_shell(cmd: &str, workdir: Option<&str>) -> Result<tokio::process::Child> {
+    let (prog, flag) = shell();
+    let mut command = tokio::process::Command::new(prog);
+    command.arg(flag).arg(cmd);
+    if let Some(w) = workdir.map(str::trim).filter(|s| !s.is_empty()) {
+        if !std::path::Path::new(w).is_dir() {
+            bail!("bash: workdir not found: {w}");
+        }
+        command.current_dir(w);
+    }
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+    Ok(command.spawn()?)
 }
 
 #[cfg(windows)]

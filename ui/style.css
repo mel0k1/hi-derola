@@ -181,6 +181,30 @@ kbd {
 }
 .toolout.open { max-height: none; }
 
+/* background task live output */
+.bg-live { border-left: 2px solid var(--accent-dim); padding-left: 10px; }
+.bg-live .thead {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  font: 600 11.5px var(--mono); color: var(--accent); letter-spacing: 0.5px;
+}
+.bg-out {
+  font: 11.5px/1.5 var(--mono); color: var(--dim); white-space: pre-wrap; word-break: break-word;
+  margin: 4px 0 8px; max-height: 180px; overflow-y: auto;
+}
+.bg-live.ended { border-left-color: var(--border); }
+.bg-live.ended .thead { color: var(--dim); }
+.bg-live.ended .bg-out { max-height: 120px; opacity: 0.85; }
+.bg-kill {
+  font: 600 10.5px var(--mono); padding: 1px 8px; cursor: pointer;
+  color: var(--del); background: none; border: 1px solid var(--del);
+  border-radius: 6px; opacity: 0.8;
+}
+.bg-kill:hover { opacity: 1; background: var(--del); color: var(--panel); }
+
+/* plan mode */
+.plan-btn { font-size: 12px; padding: 3px 10px; border-radius: 999px; }
+.plan-btn.on { color: var(--accent-fg); background: var(--accent); border-color: var(--accent); }
+
 /* reasoning block */
 .think {
   margin: 12px 0; border: 1px solid var(--border); border-left: 2px solid var(--accent-dim);

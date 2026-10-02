@@ -69,6 +69,7 @@ pub struct App {
     pub should_quit: bool,
     pub status: String,
     allow_all: Arc<AtomicBool>,
+    plan: bool,
     queue: Arc<Mutex<Vec<String>>>,
     history: Vec<String>,
     hist_idx: usize,
@@ -77,7 +78,7 @@ pub struct App {
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
-const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /clear         start new session\n  /quit          exit\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/list/glob/grep/bash (background: true)/webfetch + question, subagent (background), task_status, todowrite/todoread, mcp servers\nconfirm:\n  y run  n skip  a allow all  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
+const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /clear         start new session\n  /quit          exit\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/list/glob/grep/bash (background: true)/webfetch + question, subagent (background), task_status, task_kill, todowrite/todoread, mcp servers\nconfirm:\n  y run  n skip  a allow all  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
 
 pub fn help_text() -> &'static str {
     HELP
@@ -147,6 +148,7 @@ impl App {
             should_quit: false,
             status,
             allow_all: Arc::new(AtomicBool::new(false)),
+            plan: false,
             queue: Arc::new(Mutex::new(Vec::new())),
             history: Vec::new(),
             hist_idx: 0,
@@ -271,6 +273,7 @@ impl App {
                 self.flush_stream();
                 self.info(format!("todo list updated:\n{s}"));
             }
+            ApiEvent::BgOut { .. } => {}
             ApiEvent::Usage { input, output } => {
                 self.tokens_in += input;
                 self.tokens_out += output;
@@ -623,8 +626,9 @@ impl App {
             output_budget: self.cfg.agent.output_budget,
             perm: self.cfg.permissions.clone(),
             nested: false,
+            plan: self.plan,
         };
-        let req = ChatRequest {
+        let mut req = ChatRequest {
             system: self.session.system.clone(),
             messages: self.session.messages.clone(),
             model: self.model.clone(),
@@ -634,6 +638,12 @@ impl App {
             stream: self.cfg.provider.stream,
             tools: Vec::new(),
         };
+        if self.plan {
+            req.system.push_str("\n\n");
+            req.system.push_str(
+                "PLAN MODE is active: research the codebase (read_file, glob, grep, read-only bash commands) and design an approach. File modifications are disabled (write_file and edit are removed) and mutating commands must be avoided. When you have enough context, present a concrete step-by-step plan and stop.",
+            );
+        }
         let handle = tokio::spawn(async move {
             if let Err(e) = agent::run(provider, req, tx.clone(), allow_all, mcp, queue, agent_cfg).await {
                 let _ = tx.send(ApiEvent::Failed(format!("{e:#}")));
@@ -738,6 +748,14 @@ impl App {
             "/redo" => match crate::snapshot::redo() {
                 Some(s) => self.info(s),
                 None => self.info("nothing to redo"),
+            },
+            "/plan" => {
+                self.plan = !self.plan;
+                self.info(if self.plan {
+                    "plan mode on: read-only research, the agent will propose a plan instead of making changes"
+                } else {
+                    "plan mode off"
+                });
             }
             _ => self.info(format!("unknown command: {cmd}, try /help")),
         }
