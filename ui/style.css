@@ -300,6 +300,20 @@ pre.diff .ctx { color: var(--dim); }
   margin-bottom: 4px;
 }
 .confirm-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.confirm-feedback {
+  width: 100%; box-sizing: border-box; margin-top: 10px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--fg); padding: 8px 10px; font: inherit;
+}
+.confirm-feedback:focus { outline: none; border-color: var(--accent); }
+
+/* todo card */
+.todo-card { border-left: 2px solid var(--accent-dim); padding-left: 12px; }
+.todo-card .who { color: var(--accent); }
+.todo-body {
+  font: 12.5px/1.7 var(--mono); color: var(--fg); white-space: pre-wrap; word-break: break-word;
+}
+.todo-body .t-done { color: var(--dim); }
 
 /* ask */
 .ask-panel { width: min(680px, 92vw); padding: 18px 20px; max-height: 80vh; overflow: auto; }

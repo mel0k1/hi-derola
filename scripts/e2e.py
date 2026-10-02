@@ -33,7 +33,10 @@ def make_crlf_file():
 
 SCENARIO = {"edit_done": False, "steer_started": False, "steer_done": False,
             "ask_done": False, "fetch_done": False, "sub_done": False,
-            "bg_started": False, "bg_done": False, "bg_result_seen": False}
+            "bg_started": False, "bg_done": False, "bg_result_seen": False,
+            "todo_write_seen": False, "todo_read_seen": False,
+            "bgbash_started": False, "bgbash_result_seen": False,
+            "feedback_seen": False}
 
 
 def sse_response(handler, chunks):
@@ -189,6 +192,54 @@ class Mock(BaseHTTPRequestHandler):
                 }))
             respond(chunks)
             return
+        if not SCENARIO["todo_read_seen"]:
+            rendered = any("[~] step one" in m["content"] and "[ ] step two" in m["content"]
+                           for m in tool_msgs)
+            if not SCENARIO["todo_write_seen"]:
+                if rendered:
+                    check("todowrite rendered list reached the model", rendered)
+                    SCENARIO["todo_write_seen"] = True
+                    chunks = tool_call_chunks("todoread", json.dumps({}))
+                else:
+                    chunks = tool_call_chunks("todowrite", json.dumps({"todos": [
+                        {"content": "step one", "status": "in_progress", "priority": "high"},
+                        {"content": "step two", "status": "pending", "priority": "medium"},
+                    ]}))
+            else:
+                read = any("[~] step one" in m["content"] for m in tool_msgs)
+                check("todoread returned the list", read)
+                SCENARIO["todo_read_seen"] = True
+                chunks = [{"role": "assistant", "content": "TODO_OK"}]
+            respond(chunks)
+            return
+        if not SCENARIO["bgbash_started"]:
+            started = any("moved to the background" in m["content"] for m in tool_msgs)
+            if started:
+                SCENARIO["bgbash_started"] = True
+                chunks = [{"role": "assistant", "content": "BG_BASH_SPAWNED"}]
+            else:
+                chunks = tool_call_chunks("bash", json.dumps({
+                    "command": "echo BG_BASH_OUT",
+                    "background": True,
+                }))
+            respond(chunks)
+            return
+        if last_user.startswith("Background task bg-") and "BG_BASH_OUT" in last_user:
+            SCENARIO["bgbash_result_seen"] = True
+            respond([{"role": "assistant", "content": "BG_BASH_OK"}])
+            return
+        if not SCENARIO["feedback_seen"]:
+            fb = any("rejected the bash tool call" in m["content"]
+                     and "do it differently" in m["content"] for m in tool_msgs)
+            if fb:
+                SCENARIO["feedback_seen"] = True
+                chunks = [{"role": "assistant", "content": "FEEDBACK_OK"}]
+            else:
+                chunks = tool_call_chunks("bash", json.dumps({
+                    "command": "touch feedback_probe.txt",
+                }))
+            respond(chunks)
+            return
         respond([{"role": "assistant", "content": "SUBAGENT_OK"}])
 
 
@@ -304,6 +355,36 @@ def run_pty():
             os.write(fd, b"\r")
             sent = 9
         elif sent == 9 and "BG_DONE_OK" in plain:
+            time.sleep(0.3)
+            type_str("write todos")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            sent = 10
+        elif sent == 10 and "TODO_OK" in plain:
+            time.sleep(0.3)
+            type_str("run bg bash")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            sent = 11
+        elif sent == 11 and "run bash?" in plain:
+            time.sleep(0.4)
+            os.write(fd, b"y")
+            sent = 12
+        elif sent == 12 and "BG_BASH_OK" in plain:
+            time.sleep(0.3)
+            type_str("test feedback")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            sent = 13
+        elif sent == 13 and "feedback_probe" in plain:
+            time.sleep(0.4)
+            os.write(fd, b"f")
+            time.sleep(0.3)
+            type_str("do it differently")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            sent = 14
+        elif sent == 14 and "FEEDBACK_OK" in plain:
             break
     try:
         os.kill(pid, signal.SIGKILL)
@@ -343,6 +424,13 @@ check("background task started note", "background task bg-1 started: bg explore"
 check("background task finished note", "background task bg-1 finished: bg explore" in plain)
 check("background result reached the model", SCENARIO["bg_result_seen"])
 check("background answer rendered", "BG_DONE_OK" in plain)
+check("todo list rendered in ui", "[~] step one" in plain)
+check("todo answer rendered", "TODO_OK" in plain)
+check("background bash started note", "background task bg-2 started: echo BG_BASH_OUT" in plain)
+check("background bash result reached the model", SCENARIO["bgbash_result_seen"])
+check("background bash answer rendered", "BG_BASH_OK" in plain)
+check("rejection feedback reached the model", SCENARIO["feedback_seen"])
+check("feedback answer rendered", "FEEDBACK_OK" in plain)
 
 shutil.rmtree(WORKDIR, ignore_errors=True)
 with open("/tmp/hiderola-e2e-log.txt", "w") as f:

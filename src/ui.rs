@@ -98,6 +98,10 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
             let inner = block.inner(area);
             f.render_widget(block, area);
             let text = match &app.confirm {
+                Some(c) if app.confirm_feedback => format!(
+                    "rejecting {} - type feedback for the model\n{}\n[enter] send  [esc] deny silently",
+                    c.name, app.input
+                ),
                 Some(c) => {
                     let args = match serde_json::from_str::<serde_json::Value>(&c.args) {
                         Ok(v) => v["command"]
@@ -114,7 +118,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                     } else {
                         args.to_string()
                     };
-                    format!("{} {}\n[y] run  [n] skip  [a] allow all", c.name, args)
+                    format!("{} {}\n[y] run  [n] skip  [a] allow all  [f] reject with feedback", c.name, args)
                 }
                 None => "...".into(),
             };

@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 #[derive(Clone)]
 pub struct Job {
     pub id: String,
+    pub kind: &'static str,
     pub description: String,
     pub status: &'static str,
     pub result: Option<String>,
@@ -14,11 +15,16 @@ fn jobs() -> &'static Arc<Mutex<Vec<Job>>> {
     JOBS.get_or_init(|| Arc::new(Mutex::new(Vec::new())))
 }
 
-pub fn start(description: &str) -> String {
+pub fn start(kind: &str, description: &str) -> String {
+    let kind = match kind {
+        "bash" => "bash",
+        _ => "subagent",
+    };
     let mut j = jobs().lock().unwrap();
     let id = format!("bg-{}", j.len() + 1);
     j.push(Job {
         id: id.clone(),
+        kind,
         description: description.to_string(),
         status: "running",
         result: None,
@@ -62,7 +68,7 @@ mod tests {
 
     #[test]
     fn lifecycle() {
-        let id = start("probe task");
+        let id = start("subagent", "probe task");
         assert!(id.starts_with("bg-"));
         assert!(status(None).contains("running"));
         assert!(status(None).contains("probe task"));
@@ -72,7 +78,7 @@ mod tests {
         assert!(status(Some(&id)).contains("[done]"));
         assert!(status(Some(&id)).contains("all good"));
         assert!(status(None).contains("[done]"));
-        let id2 = start("failing task");
+        let id2 = start("bash", "failing task");
         finish(&id2, None);
         assert!(status(Some(&id2)).contains("[failed]"));
         assert!(status(None).contains("no background tasks") == false);

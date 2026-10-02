@@ -179,8 +179,9 @@ pub async fn run(
                             rx: otx,
                         })
                         .map_err(|_| anyhow!("closed"))?;
-                        if !orx.await.unwrap_or(false) {
-                            msgs.push(Message::tool(&call.id, "user denied this action"));
+                        let reply = orx.await.unwrap_or_default();
+                        if !reply.approved {
+                            msgs.push(Message::tool(&call.id, deny_message(&call.name, &reply.feedback)));
                             req.messages = msgs.clone();
                             continue;
                         }
@@ -191,6 +192,24 @@ pub async fn run(
                 match ask_user(&call.args, &tx).await {
                     Ok(a) => a,
                     Err(e) => format!("error: {e:#}"),
+                }
+            } else if call.name == "todowrite" {
+                match crate::todo::write_from_args(&call.args) {
+                    Ok(rendered) => {
+                        let _ = tx.send(ApiEvent::Todo(rendered.clone()));
+                        format!("Todo list updated:\n{rendered}")
+                    }
+                    Err(e) => format!("error: {e:#}"),
+                }
+            } else if call.name == "bash" {
+                let v: Value = serde_json::from_str(&call.args).unwrap_or(Value::Null);
+                if v["background"].as_bool().unwrap_or(false) {
+                    run_bash_background(&v, &tx, queue.clone(), cfg.output_budget)
+                } else {
+                    match tools::execute("bash", &call.args, mcp_now.as_deref()).await {
+                        Ok(o) => o,
+                        Err(e) => format!("error: {e:#}"),
+                    }
                 }
             } else if call.name == "subagent" {
                 let v: Value = serde_json::from_str(&call.args).unwrap_or(Value::Null);
@@ -215,7 +234,7 @@ pub async fn run(
                         stream: false,
                         tools: Vec::new(),
                     };
-                    let id = crate::bg::start(&desc);
+                    let id = crate::bg::start("subagent", &desc);
                     let _ = tx.send(ApiEvent::Note(format!(
                         "background task {id} started: {desc}"
                     )));
@@ -306,6 +325,66 @@ pub async fn run(
             req.messages = msgs.clone();
         }
     }
+}
+
+fn deny_message(name: &str, feedback: &str) -> String {
+    let f = feedback.trim();
+    if f.is_empty() {
+        "user denied this action".to_string()
+    } else {
+        format!(
+            "The user rejected the {name} tool call and provided feedback: {f}\n\
+             Adjust your approach according to this feedback and continue with a different plan."
+        )
+    }
+}
+
+fn run_bash_background(
+    v: &Value,
+    tx: &UnboundedSender<ApiEvent>,
+    queue: Arc<Mutex<Vec<String>>>,
+    budget: usize,
+) -> String {
+    let Some(cmd) = v["command"].as_str().filter(|s| !s.trim().is_empty()) else {
+        return "error: bash: command required".to_string();
+    };
+    let workdir = v["workdir"].as_str().map(|s| s.to_string());
+    let timeout = v["timeout"].as_u64();
+    let desc: String = cmd.lines().next().unwrap_or("").chars().take(60).collect();
+    let id = crate::bg::start("bash", &desc);
+    let _ = tx.send(ApiEvent::Note(format!(
+        "background task {id} started: {desc}"
+    )));
+    let tx2 = tx.clone();
+    let id2 = id.clone();
+    let desc2 = desc.clone();
+    let cmd = cmd.to_string();
+    tokio::spawn(async move {
+        let msg = match tools::bash_run(&cmd, workdir.as_deref(), timeout).await {
+            Ok(out) => {
+                crate::bg::finish(&id2, Some(out.clone()));
+                let _ = tx2.send(ApiEvent::Note(format!(
+                    "background task {id2} finished: {desc2}"
+                )));
+                tools::budget(
+                    format!("Background task {id2} ({desc2}) finished. Output:\n{out}"),
+                    budget,
+                )
+            }
+            Err(e) => {
+                crate::bg::finish(&id2, None);
+                let _ = tx2.send(ApiEvent::Note(format!(
+                    "background task {id2} failed: {e:#}"
+                )));
+                format!("Background task {id2} ({desc2}) failed: {e:#}")
+            }
+        };
+        queue.lock().unwrap().push(msg);
+        let _ = tx2.send(ApiEvent::Wake);
+    });
+    format!(
+        "Command moved to the background (task {id}). You will be notified automatically when it finishes; the notification will include the output. Do not poll task_status for completion; keep working on anything that does not depend on the result."
+    )
 }
 
 async fn ask_user(args: &str, tx: &UnboundedSender<ApiEvent>) -> Result<String> {

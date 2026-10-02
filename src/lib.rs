@@ -13,6 +13,7 @@ pub mod provider;
 pub mod search;
 pub mod sessions;
 pub mod snapshot;
+pub mod todo;
 pub mod tools;
 pub mod ui;
 pub mod web;

@@ -567,6 +567,7 @@ async function handleEvent(ev) {
       $("confirm-detail").textContent = ev.detail;
       $("confirm-diff").replaceChildren();
       addDiff($("confirm-diff"), ev.diff);
+      $("c-feedback").value = "";
       $("confirm-overlay").classList.remove("hidden");
       $("input").blur();
       break;
@@ -575,6 +576,11 @@ async function handleEvent(ev) {
       closeThink();
       openAsk(ev.args);
       break;
+    case "todo": {
+      closeThink();
+      renderTodoCard(ev.s || "");
+      break;
+    }
     case "usage":
       tokens.in += ev.input;
       tokens.out += ev.output;
@@ -711,10 +717,11 @@ $("model-select").onchange = async (e) => {
 function resolveConfirm(ok) {
   confirmOpen = false;
   $("confirm-overlay").classList.add("hidden");
-  invoke("confirm", { ok });
+  const feedback = ok ? "" : $("c-feedback").value.trim();
+  invoke("confirm", { ok, feedback });
   waiting = true;
   applyStatus();
-  if (!ok) note("denied");
+  if (!ok) note(feedback ? "rejected with feedback" : "denied");
   $("input").focus();
 }
 
@@ -730,6 +737,26 @@ function allowAll() {
 $("c-run").onclick = () => resolveConfirm(true);
 $("c-deny").onclick = () => resolveConfirm(false);
 $("c-allow").onclick = () => allowAll();
+$("c-feedback").onkeydown = (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    resolveConfirm(false);
+  }
+};
+
+/* todo card */
+
+function renderTodoCard(text) {
+  const old = document.querySelector("#chat-col .todo-card");
+  if (old) old.remove();
+  if (!text || text === "(todo list is empty)") return;
+  clearWelcome();
+  const m = el("div", "msg todo-card");
+  m.appendChild(el("div", "who", "todos"));
+  m.appendChild(el("pre", "todo-body", text));
+  $("chat-col").appendChild(m);
+  autoscroll();
+}
 
 /* ask */
 
@@ -1296,6 +1323,7 @@ window.addEventListener("keydown", (e) => {
     }
     fillModelSelect();
     renderSessions();
+    renderTodoCard(st.todos || "");
     if (!st.has_provider) note("no api key yet — press ctrl+comma or click the sliders icon to add one");
     applyStatus();
   } catch (e) {

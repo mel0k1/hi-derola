@@ -14,7 +14,7 @@ use crate::chat::{Role, Session};
 use crate::config::Config;
 use crate::files;
 use crate::mcp::{self, McpSlot};
-use crate::provider::{ApiEvent, ChatRequest, Provider};
+use crate::provider::{ApiEvent, ChatRequest, ConfirmReply, Provider};
 use crate::ui;
 
 pub enum Kind {
@@ -40,7 +40,7 @@ pub enum Phase {
 pub struct ConfirmCtx {
     pub name: String,
     pub args: String,
-    pub rx: oneshot::Sender<bool>,
+    pub rx: oneshot::Sender<ConfirmReply>,
 }
 
 pub struct AskCtx {
@@ -59,6 +59,7 @@ pub struct App {
     pub phase: Phase,
     pub confirm: Option<ConfirmCtx>,
     pub ask: Option<AskCtx>,
+    pub confirm_feedback: bool,
     pub attachments: Vec<(String, String)>,
     pub streaming: Option<usize>,
     pub reasoning: Option<usize>,
@@ -76,7 +77,7 @@ pub struct App {
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
-const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /clear         start new session\n  /quit          exit\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/list/glob/grep/bash/webfetch + question, subagent (background: true), task_status, mcp servers\nqueue:\n  messages sent while busy are queued, they steer the current run";
+const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /clear         start new session\n  /quit          exit\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/list/glob/grep/bash (background: true)/webfetch + question, subagent (background), task_status, todowrite/todoread, mcp servers\nconfirm:\n  y run  n skip  a allow all  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
 
 pub fn help_text() -> &'static str {
     HELP
@@ -136,6 +137,7 @@ impl App {
             phase: Phase::Idle,
             confirm: None,
             ask: None,
+            confirm_feedback: false,
             attachments: Vec::new(),
             streaming: None,
             reasoning: None,
@@ -265,6 +267,10 @@ impl App {
                 self.phase = Phase::Ask;
                 self.scroll_up = 0;
             }
+            ApiEvent::Todo(s) => {
+                self.flush_stream();
+                self.info(format!("todo list updated:\n{s}"));
+            }
             ApiEvent::Usage { input, output } => {
                 self.tokens_in += input;
                 self.tokens_out += output;
@@ -303,6 +309,7 @@ impl App {
         self.phase = Phase::Idle;
         self.confirm = None;
         self.ask = None;
+        self.confirm_feedback = false;
         self.streaming = None;
         self.reasoning = None;
         self.info("cancelled");
@@ -314,7 +321,8 @@ impl App {
         match self.phase {
             Phase::Waiting => "thinking...".into(),
             Phase::Confirm => match &self.confirm {
-                Some(c) => format!("run {}?  y/n/a", c.name),
+                Some(c) if self.confirm_feedback => "reject feedback: type, enter sends, esc denies".into(),
+                Some(c) => format!("run {}?  y/n/a/f", c.name),
                 None => "confirm...".into(),
             },
             Phase::Ask => "answer the question".into(),
@@ -335,21 +343,66 @@ impl App {
         }
     }
 
-    fn confirm_key(&mut self, code: KeyCode) {
+    fn confirm_key(&mut self, key: KeyEvent) {
+        let code = key.code;
         let Some(c) = self.confirm.take() else {
             self.phase = Phase::Idle;
             return;
         };
+        if self.confirm_feedback {
+            match code {
+                KeyCode::Enter => {
+                    let feedback = self.input.trim().to_string();
+                    self.input.clear();
+                    self.confirm_feedback = false;
+                    let _ = c.rx.send(ConfirmReply { approved: false, feedback });
+                    self.info("rejected with feedback");
+                }
+                KeyCode::Esc => {
+                    self.input.clear();
+                    self.confirm_feedback = false;
+                    let _ = c.rx.send(ConfirmReply::default());
+                    self.info("denied");
+                }
+                KeyCode::Backspace => {
+                    self.input.pop();
+                    self.confirm = Some(c);
+                    return;
+                }
+                KeyCode::Char(ch)
+                    if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+                {
+                    self.input.push(ch);
+                    self.confirm = Some(c);
+                    return;
+                }
+                _ => {
+                    self.confirm = Some(c);
+                    return;
+                }
+            }
+            self.phase = Phase::Waiting;
+            self.scroll_up = 0;
+            self.status = self.status_line();
+            return;
+        }
         match code {
             KeyCode::Char('y') => {
-                let _ = c.rx.send(true);
+                let _ = c.rx.send(ConfirmReply { approved: true, feedback: String::new() });
             }
             KeyCode::Char('a') => {
                 self.allow_all.store(true, Ordering::Relaxed);
-                let _ = c.rx.send(true);
+                let _ = c.rx.send(ConfirmReply { approved: true, feedback: String::new() });
+            }
+            KeyCode::Char('f') => {
+                self.input.clear();
+                self.confirm_feedback = true;
+                self.confirm = Some(c);
+                self.status = self.status_line();
+                return;
             }
             KeyCode::Char('n') | KeyCode::Char('s') => {
-                let _ = c.rx.send(false);
+                let _ = c.rx.send(ConfirmReply::default());
                 self.info("denied");
             }
             _ => {
@@ -421,7 +474,7 @@ impl App {
         }
         match self.phase {
             Phase::Confirm => {
-                self.confirm_key(key.code);
+                self.confirm_key(key);
                 return;
             }
             Phase::Ask => {
@@ -621,6 +674,7 @@ impl App {
                 self.entries.clear();
                 self.attachments.clear();
                 self.allow_all.store(false, Ordering::Relaxed);
+                crate::todo::clear();
                 self.info("new session");
             }
             "/model" => {
@@ -718,7 +772,7 @@ pub async fn run(
                     {
                         if app.phase == Phase::Confirm {
                             if let Some(c) = app.confirm.take() {
-                                let _ = c.rx.send(false);
+                                let _ = c.rx.send(ConfirmReply::default());
                             }
                         }
                         if let Some(h) = inflight.take() {

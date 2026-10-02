@@ -103,13 +103,14 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "bash".into(),
-            description: "Run a shell command (sh on unix, cmd on Windows) and return stdout/stderr combined. Long output keeps only the tail. Exit code is added on failure.".into(),
+            description: "Run a shell command (sh on unix, cmd on Windows) and return stdout/stderr combined. Long output keeps only the tail. Exit code is added on failure. Set background=true for dev servers and long-running builds: the tool returns a task id immediately and the output arrives as a new message when the command finishes; do not poll task_status for completion.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "Shell command to execute"},
                     "workdir": {"type": "string", "description": "Optional working directory for the command"},
-                    "timeout": {"type": "integer", "description": "Timeout in seconds, default 120, max 600"}
+                    "timeout": {"type": "integer", "description": "Timeout in seconds, default 120, max 600 (foreground)"},
+                    "background": {"type": "boolean", "description": "Run in the background and return immediately; you will be notified when it completes. No '&' needed. Do not poll for completion."}
                 },
                 "required": ["command"]
             }),
@@ -177,13 +178,41 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "task_status".into(),
-            description: "Check background subagent tasks. Without arguments lists all tasks with their statuses. Pass id to get the full result of a finished task.".into(),
+            description: "Check background tasks (subagents and bash commands). Without arguments lists all tasks with their statuses. Pass id to get the full result of a finished task.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "description": "Task id, e.g. bg-1; omit to list all tasks"}
                 }
             }),
+        },
+        ToolSpec {
+            name: "todowrite".into(),
+            description: "Create and maintain a structured task list for the current session. Use proactively for multi-step work (3+ steps or multiple tasks): capture new instructions as todos, keep exactly ONE in_progress while working, update statuses in real time and mark completed only after the work is actually done (including verification). Skip for single straightforward tasks or informational requests.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "todos": {
+                        "type": "array",
+                        "description": "The full updated todo list; replaces the previous one",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "content": {"type": "string", "description": "Brief, actionable task description"},
+                                "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "cancelled"], "description": "Current status of the task"},
+                                "priority": {"type": "string", "enum": ["high", "medium", "low"], "description": "Priority level of the task"}
+                            },
+                            "required": ["content"]
+                        }
+                    }
+                },
+                "required": ["todos"]
+            }),
+        },
+        ToolSpec {
+            name: "todoread".into(),
+            description: "Read the current todo list for the session. Use to re-check the plan after a context compaction or before continuing multi-step work.".into(),
+            parameters: json!({ "type": "object", "properties": {} }),
         },
     ]
 }
@@ -193,7 +222,10 @@ pub fn specs_core() -> Vec<ToolSpec> {
 }
 
 pub fn specs_nested() -> Vec<ToolSpec> {
-    specs_core().into_iter().filter(|s| s.name != "question").collect()
+    specs_core()
+        .into_iter()
+        .filter(|s| s.name != "question" && s.name != "todowrite" && s.name != "todoread")
+        .collect()
 }
 
 pub fn detail(name: &str, args: &str) -> String {
@@ -208,7 +240,13 @@ pub fn detail(name: &str, args: &str) -> String {
                 None => p,
             }
         }
-        "bash" => v["command"].as_str().unwrap_or("").to_string(),
+        "bash" => {
+            let mut d = v["command"].as_str().unwrap_or("").to_string();
+            if v["background"].as_bool().unwrap_or(false) {
+                d.push_str(" (background)");
+            }
+            d
+        }
         "webfetch" => v["url"].as_str().unwrap_or("").to_string(),
         "question" => v["questions"][0]["question"]
             .as_str()
@@ -216,6 +254,11 @@ pub fn detail(name: &str, args: &str) -> String {
             .to_string(),
         "subagent" => v["description"].as_str().unwrap_or("").to_string(),
         "task_status" => v["id"].as_str().unwrap_or("background tasks").to_string(),
+        "todowrite" => {
+            let n = v["todos"].as_array().map(|a| a.len()).unwrap_or(0);
+            format!("{n} todos")
+        }
+        "todoread" => "todo list".to_string(),
         _ => {
             let d = args.lines().next().unwrap_or("").to_string();
             if d.chars().count() > 60 {
@@ -381,55 +424,57 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
             let id = v["id"].as_str().filter(|s| !s.trim().is_empty());
             Ok(crate::bg::status(id))
         }
+        "todoread" => Ok(crate::todo::read_render()),
         "bash" => {
             let Some(cmd) = v["command"].as_str() else {
                 bail!("bash: command required");
             };
             let timeout = v["timeout"].as_u64().unwrap_or(120).clamp(1, 600);
-            let (prog, flag) = shell();
-            let mut command = tokio::process::Command::new(prog);
-            command.arg(flag).arg(cmd);
-            if let Some(w) = v["workdir"].as_str().filter(|s| !s.trim().is_empty()) {
-                if !std::path::Path::new(w).is_dir() {
-                    bail!("bash: workdir not found: {w}");
-                }
-                command.current_dir(w);
-            }
-            let out = tokio::time::timeout(
-                std::time::Duration::from_secs(timeout),
-                command.output(),
-            )
-            .await;
-            match out {
-                Err(_) => Ok(format!("command timed out ({timeout}s)")),
-                Ok(res) => {
-                    let res = res?;
-                    let mut text = String::from_utf8_lossy(&res.stdout).to_string();
-                    let err = String::from_utf8_lossy(&res.stderr);
-                    if !err.trim().is_empty() {
-                        if !text.is_empty() && !text.ends_with('\n') {
-                            text.push('\n');
-                        }
-                        text.push_str(&err);
-                    }
-                    if text.len() > MAX_CAPTURE {
-                        text = tail(&text, MAX_CAPTURE);
-                    }
-                    if text.trim().is_empty() {
-                        text.push_str("(no output)");
-                    }
-                    if !res.status.success() {
-                        text.push_str(&format!(
-                            "\nexit code: {}",
-                            res.status.code().unwrap_or(-1)
-                        ));
-                    }
-                    Ok(text)
-                }
-            }
+            bash_run(cmd, v["workdir"].as_str(), Some(timeout)).await
         }
         _ => bail!("unknown tool: {name}"),
     }
+}
+
+pub async fn bash_run(cmd: &str, workdir: Option<&str>, timeout: Option<u64>) -> Result<String> {
+    let (prog, flag) = shell();
+    let mut command = tokio::process::Command::new(prog);
+    command.arg(flag).arg(cmd);
+    if let Some(w) = workdir.map(str::trim).filter(|s| !s.is_empty()) {
+        if !std::path::Path::new(w).is_dir() {
+            bail!("bash: workdir not found: {w}");
+        }
+        command.current_dir(w);
+    }
+    let wait = command.output();
+    let res = match timeout {
+        Some(t) => match tokio::time::timeout(std::time::Duration::from_secs(t.max(1)), wait).await {
+            Err(_) => return Ok(format!("command timed out ({t}s)")),
+            Ok(res) => res?,
+        },
+        None => wait.await?,
+    };
+    let mut text = String::from_utf8_lossy(&res.stdout).to_string();
+    let err = String::from_utf8_lossy(&res.stderr);
+    if !err.trim().is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&err);
+    }
+    if text.len() > MAX_CAPTURE {
+        text = tail(&text, MAX_CAPTURE);
+    }
+    if text.trim().is_empty() {
+        text.push_str("(no output)");
+    }
+    if !res.status.success() {
+        text.push_str(&format!(
+            "\nexit code: {}",
+            res.status.code().unwrap_or(-1)
+        ));
+    }
+    Ok(text)
 }
 
 #[cfg(windows)]

@@ -26,11 +26,18 @@ pub enum ApiEvent {
     Usage { input: u64, output: u64 },
     Note(String),
     Tool { name: String, detail: String, diff: Vec<crate::diff::Row> },
-    Confirm { name: String, args: String, rx: tokio::sync::oneshot::Sender<bool> },
+    Confirm { name: String, args: String, rx: tokio::sync::oneshot::Sender<ConfirmReply> },
     Ask { name: String, args: String, rx: tokio::sync::oneshot::Sender<String> },
+    Todo(String),
     Done { text: String, messages: Vec<Message> },
     Failed(String),
     Wake,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ConfirmReply {
+    pub approved: bool,
+    pub feedback: String,
 }
 
 pub struct ChatRequest {

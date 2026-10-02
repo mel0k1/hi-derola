@@ -3,8 +3,9 @@ use hi_derola::agent;
 use hi_derola::chat::{Role, Session};
 use hi_derola::config::Config;
 use hi_derola::mcp::{self, McpSlot};
-use hi_derola::provider::{self, ApiEvent, ChatRequest, Provider};
+use hi_derola::provider::{self, ApiEvent, ChatRequest, ConfirmReply, Provider};
 use hi_derola::sessions::{self, SessionMeta, StoredSession};
+use hi_derola::todo::Todo;
 use hi_derola::{models, snapshot, tools};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,11 +20,12 @@ pub struct Shared {
     sid: Mutex<String>,
     title: Mutex<String>,
     created: Mutex<u64>,
-    confirm: Mutex<Option<oneshot::Sender<bool>>>,
+    confirm: Mutex<Option<oneshot::Sender<ConfirmReply>>>,
     ask: Mutex<Option<oneshot::Sender<String>>>,
     inflight: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     tokens: Mutex<(u64, u64)>,
     cost: Mutex<f64>,
+    todos: Mutex<Vec<Todo>>,
     attachments: Mutex<Vec<(String, String)>>,
     mcp: McpSlot,
     allow_all: Arc<AtomicBool>,
@@ -86,6 +88,7 @@ fn persist(sh: &Shared) {
         tokens_in: sh.tokens.lock().unwrap().0,
         tokens_out: sh.tokens.lock().unwrap().1,
         cost: *sh.cost.lock().unwrap(),
+        todos: sh.todos.lock().unwrap().clone(),
     };
     drop(ses);
     let _ = sessions::save(&st);
@@ -259,6 +262,11 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     *sh.ask.lock().unwrap() = Some(rx);
                     json!({"t": "ask", "name": name, "args": args})
                 }
+                ApiEvent::Todo(s) => {
+                    *sh.todos.lock().unwrap() = hi_derola::todo::get();
+                    persist(&sh);
+                    json!({"t": "todo", "s": s})
+                }
                 ApiEvent::Usage { input, output } => {
                     let model = sh.cfg.lock().unwrap().provider.model.clone();
                     let delta = models::cost(&model, input, output);
@@ -317,6 +325,8 @@ fn start_new(sh: &Shared, app: &AppHandle) {
     *sh.created.lock().unwrap() = 0;
     *sh.tokens.lock().unwrap() = (0, 0);
     *sh.cost.lock().unwrap() = 0.0;
+    *sh.todos.lock().unwrap() = Vec::new();
+    hi_derola::todo::clear();
     let _ = app.emit("ev", json!({"t": "cleared"}));
     emit_sessions(app, sh);
     emit_attachments(sh, app);
@@ -335,6 +345,7 @@ async fn init(sh: State<'_, Arc<Shared>>) -> Result<Value, String> {
         "sid": sh.sid.lock().unwrap().clone(),
         "title": sh.title.lock().unwrap().clone(),
         "theme": cfg.ui.theme.clone(),
+        "todos": hi_derola::todo::render(&sh.todos.lock().unwrap().clone()),
     }))
 }
 
@@ -388,9 +399,12 @@ async fn list_models(
 }
 
 #[tauri::command]
-async fn confirm(sh: State<'_, Arc<Shared>>, ok: bool) -> Result<(), String> {
+async fn confirm(sh: State<'_, Arc<Shared>>, ok: bool, feedback: Option<String>) -> Result<(), String> {
     if let Some(c) = sh.confirm.lock().unwrap().take() {
-        let _ = c.send(ok);
+        let _ = c.send(ConfirmReply {
+            approved: ok,
+            feedback: feedback.unwrap_or_default(),
+        });
     }
     Ok(())
 }
@@ -407,7 +421,7 @@ async fn answer(sh: State<'_, Arc<Shared>>, text: String) -> Result<(), String> 
 async fn allow_all(sh: State<'_, Arc<Shared>>) -> Result<(), String> {
     sh.allow_all.store(true, Ordering::Relaxed);
     if let Some(c) = sh.confirm.lock().unwrap().take() {
-        let _ = c.send(true);
+        let _ = c.send(ConfirmReply { approved: true, feedback: String::new() });
     }
     Ok(())
 }
@@ -418,7 +432,7 @@ async fn stop(sh: State<'_, Arc<Shared>>, app: AppHandle) -> Result<(), String> 
         h.abort();
     }
     if let Some(c) = sh.confirm.lock().unwrap().take() {
-        let _ = c.send(false);
+        let _ = c.send(ConfirmReply::default());
     }
     if let Some(a) = sh.ask.lock().unwrap().take() {
         let _ = a.send(String::new());
@@ -508,6 +522,12 @@ async fn open_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) ->
     *sh.created.lock().unwrap() = st.created;
     *sh.tokens.lock().unwrap() = (st.tokens_in, st.tokens_out);
     *sh.cost.lock().unwrap() = st.cost;
+    *sh.todos.lock().unwrap() = st.todos.clone();
+    hi_derola::todo::set_list(st.todos.clone());
+    let _ = app.emit(
+        "ev",
+        json!({"t": "todo", "s": hi_derola::todo::render(&st.todos)}),
+    );
     sh.titled.store(true, Ordering::Relaxed);
     sh.attachments.lock().unwrap().clear();
     sh.confirm.lock().unwrap().take();
@@ -538,6 +558,8 @@ async fn delete_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) 
         *sh.created.lock().unwrap() = 0;
         *sh.tokens.lock().unwrap() = (0, 0);
         *sh.cost.lock().unwrap() = 0.0;
+        *sh.todos.lock().unwrap() = Vec::new();
+        hi_derola::todo::clear();
         let _ = app.emit("ev", json!({"t": "cleared"}));
     }
     emit_sessions(&app, &sh);
@@ -860,6 +882,7 @@ pub fn run() -> Result<()> {
                 inflight: Mutex::new(None),
                 tokens: Mutex::new(restore.as_ref().map(|s| (s.tokens_in, s.tokens_out)).unwrap_or((0, 0))),
                 cost: Mutex::new(restore.as_ref().map(|s| s.cost).unwrap_or(0.0)),
+                todos: Mutex::new(restore.as_ref().map(|s| s.todos.clone()).unwrap_or_default()),
                 attachments: Mutex::new(Vec::new()),
                 mcp: Arc::new(Mutex::new(None)),
                 allow_all: Arc::new(AtomicBool::new(false)),
@@ -868,6 +891,10 @@ pub fn run() -> Result<()> {
                 tx: tx.clone(),
             });
             let tx2 = tx.clone();
+            let restored_todos = restore.as_ref().map(|s| s.todos.clone()).unwrap_or_default();
+            if !restored_todos.is_empty() {
+                hi_derola::todo::set_list(restored_todos);
+            }
             let mcp_slot = sh.mcp.clone();
             let mcp_cfgs = sh.cfg.lock().unwrap().mcp.clone();
             tauri::async_runtime::spawn(async move {

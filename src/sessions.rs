@@ -29,6 +29,8 @@ pub struct StoredSession {
     pub tokens_out: u64,
     #[serde(default)]
     pub cost: f64,
+    #[serde(default)]
+    pub todos: Vec<crate::todo::Todo>,
 }
 
 pub fn store_dir() -> PathBuf {
@@ -221,6 +223,7 @@ mod tests {
             tokens_in: 0,
             tokens_out: 0,
             cost: 0.0,
+            todos: vec![],
         };
         save(&st).unwrap();
         let got = load(&st.id).unwrap();
@@ -264,11 +267,18 @@ mod tests {
             tokens_in: 0,
             tokens_out: 0,
             cost: 0.0,
+            todos: vec![],
         };
         save(&a).unwrap();
         a.id = "s-2-test".into();
         a.updated = 2;
+        a.todos = vec![crate::todo::Todo {
+            content: "probe".into(),
+            status: "pending".into(),
+            priority: "low".into(),
+        }];
         save(&a).unwrap();
         assert_eq!(latest().unwrap().id, "s-2-test");
+        assert_eq!(latest().unwrap().todos.len(), 1);
     }
 }
