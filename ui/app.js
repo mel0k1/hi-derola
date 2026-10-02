@@ -1278,24 +1278,29 @@ window.addEventListener("keydown", (e) => {
 /* init */
 
 (async function init() {
-  const st = await invoke("init");
-  CFG = st.cfg;
-  KEYS = effectiveKeys(st.keys);
-  MODEL = CFG.provider.model || "";
-  KIND = CFG.provider.type || "openai";
-  CWD = st.cwd;
-  SID = st.sid || "";
-  SESSIONS = st.sessions || [];
-  setTheme(st.theme || "dark", false);
-  $("sb-cwd").textContent = st.cwd;
-  $("sb-cwd").title = st.cwd;
-  if (localStorage.getItem("hiderola.sidebar") === "0" || window.innerWidth < 900) {
-    $("sidebar").classList.add("hidden");
-  }
-  fillModelSelect();
-  renderSessions();
-  if (!st.has_provider) note("no api key yet — press ctrl+comma or click the sliders icon to add one");
-  applyStatus();
   await listen("ev", (e) => handleEvent(e.payload));
+  try {
+    const st = await invoke("init");
+    CFG = st.cfg;
+    KEYS = effectiveKeys(st.keys);
+    MODEL = CFG.provider.model || "";
+    KIND = CFG.provider.type || "openai";
+    CWD = st.cwd;
+    SID = st.sid || "";
+    SESSIONS = st.sessions || [];
+    setTheme(st.theme || "dark", false);
+    $("sb-cwd").textContent = st.cwd;
+    $("sb-cwd").title = st.cwd;
+    if (localStorage.getItem("hiderola.sidebar") === "0" || window.innerWidth < 900) {
+      $("sidebar").classList.add("hidden");
+    }
+    fillModelSelect();
+    renderSessions();
+    if (!st.has_provider) note("no api key yet — press ctrl+comma or click the sliders icon to add one");
+    applyStatus();
+  } catch (e) {
+    note("init failed: " + e);
+    applyStatus();
+  }
   $("input").focus();
 })();
