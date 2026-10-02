@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use hi_derola::{app, config, provider};
+use hi_derola::{app, config, fmt, lsp, provider};
 
 fn main() -> Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -7,6 +7,8 @@ fn main() -> Result<()> {
         .build()?;
     let tui = std::env::args().any(|a| a == "--tui");
     let cfg = config::Config::load()?;
+    lsp::set_enabled(cfg.lsp.enabled);
+    fmt::set_enabled(cfg.formatters.enabled);
     let key = cfg
         .api_key()
         .context("no api key: set api_key in config or HI_DEROLA_API_KEY")?;

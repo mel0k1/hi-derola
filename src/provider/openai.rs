@@ -92,6 +92,9 @@ impl Provider for OpenAi {
             body["tools"] = tools.into();
             body["tool_choice"] = json!("auto");
         }
+        if self.base_url.contains("openai.com") {
+            body["prompt_cache_key"] = json!("hi-derola");
+        }
         if req.stream {
             body["stream_options"] = json!({"include_usage": true});
         }

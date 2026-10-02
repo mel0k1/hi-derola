@@ -36,8 +36,30 @@ pub fn norm(p: &str) -> String {
     }
 }
 
-const MAX_WALK: usize = 4000;
-const MAX_DEPTH: usize = 8;
+const MAX_WALK: usize = 8000;
+const MAX_DEPTH: usize = 24;
+
+/// Walk files under `dir`, respecting .gitignore/.ignore and skipping hidden entries.
+pub fn walk_files(dir: &str, out: &mut Vec<String>) {
+    let walker = ignore::WalkBuilder::new(dir)
+        .max_depth(Some(MAX_DEPTH))
+        .require_git(false)
+        .build();
+    for e in walker.flatten() {
+        if out.len() >= MAX_WALK {
+            break;
+        }
+        if !e.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        if e.depth() == 0 {
+            continue;
+        }
+        out.push(norm(&e.path().display().to_string()));
+    }
+    out.sort();
+}
+
 const MAX_MENTIONS: usize = 8;
 
 fn token_path(token: &str) -> Option<String> {
@@ -105,35 +127,33 @@ pub fn mentions(text: &str) -> (String, Vec<String>, Vec<String>) {
     mentions_in(&cwd, text)
 }
 
-pub fn walk_files(dir: &str, depth: usize, out: &mut Vec<String>) {
-    if depth > MAX_DEPTH || out.len() >= MAX_WALK {
-        return;
-    }
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).collect();
-    entries.sort_by_key(|e| e.file_name());
-    for e in entries {
-        if out.len() >= MAX_WALK {
-            return;
-        }
-        let name = e.file_name().to_string_lossy().to_string();
-        if matches!(name.as_str(), ".git" | "target" | "node_modules") {
-            continue;
-        }
-        let path = e.path();
-        if path.is_dir() {
-            walk_files(&path.display().to_string(), depth + 1, out);
-        } else if path.is_file() {
-            out.push(norm(&path.display().to_string()));
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn walk_respects_gitignore() {
+        let dir = std::env::temp_dir().join(format!("hiderola-walk-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join("target/debug")).unwrap();
+        std::fs::write(dir.join(".gitignore"), "/target\n*.log\n").unwrap();
+        std::fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\n").unwrap();
+        std::fs::write(dir.join("target/debug/x.bin"), "x").unwrap();
+        std::fs::write(dir.join("debug.log"), "x").unwrap();
+
+        let mut out = Vec::new();
+        walk_files(&dir.display().to_string(), &mut out);
+        let rel: Vec<String> = out
+            .iter()
+            .map(|p| p.strip_prefix(&format!("{}/", dir.display())).unwrap_or(p).to_string())
+            .collect();
+        assert!(rel.contains(&"src/main.rs".to_string()));
+        assert!(rel.contains(&"Cargo.toml".to_string()));
+        assert!(!rel.iter().any(|p| p.starts_with("target/")), "{rel:?}");
+        assert!(!rel.iter().any(|p| p.ends_with(".log")), "{rel:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn mention_expansion() {

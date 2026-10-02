@@ -22,28 +22,19 @@ impl Anthropic {
     }
 }
 
-fn is_tool_result_user(v: &Value) -> bool {
-    v["role"].as_str() == Some("user")
-        && v["content"]
-            .as_array()
-            .and_then(|a| a.first())
-            .and_then(|b| b["type"].as_str())
-            == Some("tool_result")
-}
-
 fn conv_msgs(messages: &[Message]) -> Vec<Value> {
-    let mut out = Vec::new();
+    let mut out: Vec<(bool, Value)> = Vec::new();
     for m in messages {
         match m.role {
             Role::Tool => {
                 let block = json!({"type": "tool_result", "tool_use_id": m.tool_call_id, "content": m.content});
                 match out.last_mut() {
-                    Some(last) if is_tool_result_user(last) => {
+                    Some((true, last)) => {
                         if let Some(a) = last["content"].as_array_mut() {
                             a.push(block);
                         }
                     }
-                    _ => out.push(json!({"role": "user", "content": [block]})),
+                    _ => out.push((true, json!({"role": "user", "content": [block]}))),
                 }
             }
             Role::Assistant if !m.tool_calls.is_empty() => {
@@ -55,12 +46,23 @@ fn conv_msgs(messages: &[Message]) -> Vec<Value> {
                     let input: Value = serde_json::from_str(&c.args).unwrap_or(json!({}));
                     content.push(json!({"type": "tool_use", "id": c.id, "name": c.name, "input": input}));
                 }
-                out.push(json!({"role": "assistant", "content": content}));
+                out.push((false, json!({"role": "assistant", "content": content})));
             }
-            _ => out.push(json!({"role": m.role.as_str(), "content": m.content})),
+            _ => out.push((
+                false,
+                json!({"role": m.role.as_str(), "content": [{"type": "text", "text": m.content}]}),
+            )),
         }
     }
-    out
+    if let Some((_, last)) = out.last_mut() {
+        // mark the tail of the conversation for prompt caching
+        if let Some(a) = last["content"].as_array_mut() {
+            if let Some(b) = a.last_mut() {
+                b["cache_control"] = json!({"type": "ephemeral"});
+            }
+        }
+    }
+    out.into_iter().map(|(_, v)| v).collect()
 }
 
 #[async_trait]
@@ -73,7 +75,7 @@ impl Provider for Anthropic {
         let mut body = json!({
             "model": req.model,
             "max_tokens": req.max_tokens.unwrap_or(4096),
-            "system": req.system,
+            "system": [{"type": "text", "text": req.system, "cache_control": {"type": "ephemeral"}}],
             "messages": conv_msgs(&req.messages),
             "stream": req.stream,
         });
@@ -83,11 +85,14 @@ impl Provider for Anthropic {
             body["top_p"] = json!(v);
         }
         if !req.tools.is_empty() {
-            let tools: Vec<Value> = req
+            let mut tools: Vec<Value> = req
                 .tools
                 .iter()
                 .map(|t| json!({"name": t.name, "description": t.description, "input_schema": t.parameters}))
                 .collect();
+            if let Some(last) = tools.last_mut() {
+                last["cache_control"] = json!({"type": "ephemeral"});
+            }
             body["tools"] = tools.into();
         }
         let url = format!("{}/v1/messages", self.base_url.trim_end_matches('/'));
@@ -217,5 +222,37 @@ impl Provider for Anthropic {
             .map_err(|_| anyhow::anyhow!("closed"))?;
         }
         Ok(Reply { text: full, calls })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_control_placement() {
+        let msgs = vec![
+            Message::new(Role::User, "hi"),
+            Message::new(Role::Assistant, "").with_calls(vec![ToolCall {
+                id: "t1".into(),
+                name: "bash".into(),
+                args: "{}".into(),
+            }]),
+            Message::tool("t1", "out"),
+        ];
+        let conv = conv_msgs(&msgs);
+        assert_eq!(conv.len(), 3);
+        let last = conv.last().unwrap();
+        assert_eq!(last["role"], "user");
+        let blocks = last["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["type"], "tool_result");
+        assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
+
+        let plain = conv_msgs(&[Message::new(Role::User, "hello")]);
+        assert_eq!(
+            plain[0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+        assert_eq!(plain[0]["content"][0]["text"], "hello");
     }
 }

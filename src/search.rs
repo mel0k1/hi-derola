@@ -135,7 +135,7 @@ pub fn glob(root: &str, pattern: &str) -> Result<Vec<String>> {
     let root = &crate::files::norm(root);
     let pats = expand_braces(pattern);
     let mut files = Vec::new();
-    crate::files::walk_files(root, 0, &mut files);
+    crate::files::walk_files(root, &mut files);
     files.sort();
     let mut out = Vec::new();
     for f in &files {
@@ -155,7 +155,7 @@ pub fn grep(root: &str, pattern: &str, include: Option<&str>) -> Result<Vec<Grep
     let root = &crate::files::norm(root);
     let re = regex::Regex::new(pattern).map_err(|e| anyhow::anyhow!("grep: {e}"))?;
     let mut files = Vec::new();
-    crate::files::walk_files(root, 0, &mut files);
+    crate::files::walk_files(root, &mut files);
     files.sort();
     let include = include.map(expand_braces);
     let mut hits = Vec::new();

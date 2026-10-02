@@ -5,6 +5,8 @@ pub mod chat;
 pub mod config;
 pub mod diff;
 pub mod files;
+pub mod fmt;
+pub mod lsp;
 pub mod md;
 pub mod models;
 pub mod mcp;

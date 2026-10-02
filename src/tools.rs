@@ -349,7 +349,7 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
                 path: path.to_string(),
                 content: content.to_string(),
             })?;
-            Ok(format!("wrote {path} ({n} lines)"))
+            Ok(format!("wrote {path} ({n} lines){}", post_edit(path).await))
         }
         "edit" => {
             let Some(path) = v["path"].as_str() else {
@@ -369,21 +369,19 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
             let (updated, count) = apply_edit(&content, old, new, replace_all)
                 .map_err(|e| anyhow::anyhow!("edit: {e:#} in {path}"))?;
             std::fs::write(path, updated).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
-            Ok(format!("edited {path} ({count} replacement{})", if count == 1 { "" } else { "s" }))
+            Ok(format!(
+                "edited {path} ({count} replacement{}){}",
+                if count == 1 { "" } else { "s" },
+                post_edit(path).await
+            ))
         }
         "list_files" => {
             let dir = v["path"].as_str().unwrap_or(".");
-            let mut out = Vec::new();
-            walk(dir, 0, &mut out);
+            let out = list_tree(dir);
             if out.is_empty() {
                 return Ok(format!("{dir}: empty"));
             }
-            out.sort();
-            let mut s = out.join("\n");
-            if out.len() >= MAX_LIST {
-                s.push_str(&format!("\n... truncated at {MAX_LIST} entries"));
-            }
-            Ok(s)
+            Ok(out.join("\n"))
         }
         "glob" => {
             let Some(pattern) = v["pattern"].as_str() else {
@@ -654,32 +652,44 @@ fn read_numbered(path: &str, offset: usize, limit: usize) -> Result<String> {
     Ok(out)
 }
 
-fn walk(dir: &str, depth: usize, out: &mut Vec<String>) {
-    if depth > 3 || out.len() >= MAX_LIST {
-        return;
+/// After write_file/edit: run the formatter, then collect LSP diagnostics.
+async fn post_edit(path: &str) -> String {
+    let mut out = String::new();
+    if let Some(name) = crate::fmt::format_file(path).await {
+        out.push_str(&format!("\nformatted with {name}"));
     }
-    let Ok(rd) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).collect();
-    entries.sort_by_key(|e| e.file_name());
-    for e in entries {
+    if let Some(diags) = crate::lsp::diagnose(path).await {
+        out.push_str(&format!("\n{diags}"));
+    }
+    out
+}
+
+fn list_tree(dir: &str) -> Vec<String> {
+    let walker = ignore::WalkBuilder::new(dir)
+        .max_depth(Some(3))
+        .require_git(false)
+        .build();
+    let mut out = Vec::new();
+    for e in walker.flatten() {
         if out.len() >= MAX_LIST {
-            return;
+            break;
         }
-        let name = e.file_name().to_string_lossy().to_string();
-        if matches!(name.as_str(), ".git" | "target" | "node_modules") {
+        if e.depth() == 0 {
             continue;
         }
-        let path = e.path();
-        let display = norm(&path.display().to_string());
-        if path.is_dir() {
+        let display = norm(&e.path().display().to_string());
+        if e.file_type().is_some_and(|t| t.is_dir()) {
             out.push(format!("{display}/"));
-            walk(&display, depth + 1, out);
         } else {
             out.push(display);
         }
     }
+    out.sort();
+    if out.len() >= MAX_LIST {
+        out.truncate(MAX_LIST);
+        out.push(format!("... truncated at {MAX_LIST} entries"));
+    }
+    out
 }
 
 #[cfg(test)]

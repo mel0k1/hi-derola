@@ -17,7 +17,23 @@ pub struct Config {
     #[serde(default)]
     pub agent: AgentConfig,
     #[serde(default)]
+    pub lsp: Toggle,
+    #[serde(default)]
+    pub formatters: Toggle,
+    #[serde(default)]
     pub permissions: crate::perm::PermCfg,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Toggle {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for Toggle {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

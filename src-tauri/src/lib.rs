@@ -6,7 +6,7 @@ use hi_derola::mcp::{self, McpSlot};
 use hi_derola::provider::{self, ApiEvent, ChatRequest, ConfirmReply, Provider};
 use hi_derola::sessions::{self, SessionMeta, StoredSession};
 use hi_derola::todo::Todo;
-use hi_derola::{models, snapshot, tools};
+use hi_derola::{fmt, lsp, models, snapshot, tools};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -371,6 +371,8 @@ async fn save(sh: State<'_, Arc<Shared>>, app: AppHandle, cfg: Config) -> Result
         None => None,
     };
     cfg.save().map_err(|e| format!("{e:#}"))?;
+    lsp::set_enabled(cfg.lsp.enabled);
+    fmt::set_enabled(cfg.formatters.enabled);
     let model = cfg.provider.model.clone();
     let kind = cfg.provider.kind.clone();
     let theme = cfg.ui.theme.clone();
@@ -881,6 +883,8 @@ async fn send(sh: State<'_, Arc<Shared>>, app: AppHandle, text: String) -> Resul
 
 pub fn run() -> Result<()> {
     let (cfg, _) = Config::load_or_default()?;
+    lsp::set_enabled(cfg.lsp.enabled);
+    fmt::set_enabled(cfg.formatters.enabled);
     let cfg = Arc::new(cfg);
     tauri::Builder::default()
         .setup(move |app| {
