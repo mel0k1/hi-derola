@@ -84,8 +84,11 @@ subagent_depth = 1
 # tokens of the most recent messages kept verbatim when compacting
 # keep = 15000
 
-# language server diagnostics fed back after write_file/edit
-# auto-detected on PATH: rust-analyzer, pyright/basedpyright/pylsp, typescript-language-server, gopls, clangd
+# language server integration: diagnostics fed back after write_file/edit,
+# plus the lsp tool for code navigation (hover, definition, references,
+# implementation, document/workspace symbols)
+# servers auto-detected on PATH: rust-analyzer, pyright/basedpyright/pylsp,
+# typescript-language-server, gopls, clangd
 [lsp]
 enabled = true
 

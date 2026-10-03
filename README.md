@@ -39,6 +39,8 @@ A high-performance, lightweight chat and autonomous coding assistant written in 
 - model catalog: context windows and prices for known models, `context_limit = 0` auto-fits the window, session cost is counted from usage and shown in the status bar and sidebar
 - steer/queue: messages sent while the agent is busy are queued — they steer the current run between tool rounds, or start the next run right after it finishes (esc stops the current run, a queued message keeps going); the queue is durable — it is persisted in the session file on every change, so queued messages survive a crash or app restart and steer the next run when the session is reopened
 - permission rules: `allow | ask | deny` per tool plus wildcard patterns (e.g. allow `git *`, deny `rm *`) in `[permissions]`, shown in GUI settings; built-in protections ask before reading secret files (`.env`, `prod.env`, ...), before touching paths outside the working directory, and before running bash in a `workdir` outside it (explicit rules override); "always allow" (`w` in TUI, button in GUI) saves a wildcard rule to the config (`git push *`, `*.rs`, `https://host/*`, `mcp__srv__*`); for external paths the saved rule is scoped to the granted directory (`/tmp/**`) instead of a global extension wildcard
+- lsp navigation: the `lsp` tool drives the auto-detected language server (same set as diagnostics) for hover, definition, references, implementation and document/workspace symbols — coordinates are 1-based, results come back as compact `path:line:col` lists or a symbol tree instead of raw JSON; positions are converted to/from UTF-16 so unicode lines stay accurate; in read-only mode `lsp` stays available
+- code mode: the `code` tool (registered when at least one MCP server is connected) runs a confined JavaScript program — the model writes a small script and calls MCP tools as `mcp.<server>.<tool>({...})` with `await`, loops, branching and try/catch inside a boa_engine sandbox that has no filesystem, network or process access; each child call passes through the same permission checks and confirm UI as a direct `mcp__` call (a denied call throws, "always allow" persists the rule mid-run); the script returns a value, `console.log` output comes back as Logs, and MCP text results that parse as JSON are handed over as real objects — so a batch of MCP calls, their filtering and aggregation happens in one turn instead of one round trip per call
 - mcp servers over stdio and streamable http: tools exposed as `mcp__<name>__<tool>`
 - agent loop: token-budgeted context compaction (template summary, keeps the last ~15k tokens verbatim, tunable via `[agent.compaction]`, on overflow too), output `max_tokens` shrinks to the remaining window, per-tool output budget, cached-tokens-aware cost, graceful wrap-up at the round limit that keeps the cache prefix; a reply cut off by the output limit continues automatically ("continue from where you left off", up to 3 times — truncated tool calls are dropped instead of corrupting the transcript)
 - repeated compaction merges instead of starting over: a fresh `/compact` (or an auto one) passes the previous summary as `<prior-summary>` and folds it into the new one — older decisions and constraints survive every compaction cycle, and the old summary is replaced rather than accumulating
@@ -64,6 +66,7 @@ src/
   provider/        openai (SSE) + anthropic (messages) clients, ApiEvent stream,
                    list_models, retry with jitter
   tools.rs         tool specs, dispatch, detail/preview/paths, bash, bg tasks
+  codemode.rs      code tool: boa_engine JS sandbox orchestrating MCP tools
   bg.rs            background task registry (bash + subagents), live output
   perm.rs          permission resolution (allow/ask/deny + wildcard rules)
   sessions.rs      persisted sessions (json per session) + ChangeRec for review
@@ -71,7 +74,7 @@ src/
   diff.rs          LCS line diff used everywhere
   patch.rs         V4A patch parser + applier for apply_patch
   files.rs         read/write, images, @mention scanning, file trees
-  lsp.rs           language-server pool, diagnostics after edits
+  lsp.rs           language-server pool, diagnostics, hover/definition/references/symbols
   fmt.rs           auto-formatters per file type
   mcp.rs           stdio + streamable http MCP clients
   models.rs        model catalog: context windows, prices, cost with cached discount

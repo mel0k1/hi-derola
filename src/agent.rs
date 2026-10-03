@@ -148,13 +148,17 @@ pub async fn run(
             specs.extend(tools::plan_specs());
         }
         if let Some(m) = &mcp_now {
-            specs.extend(m.specs().await);
+            let mspecs = m.specs().await;
+            specs.push(crate::codemode::code_spec(&crate::codemode::catalog_from_mcp_specs(
+                &mspecs,
+            )));
+            specs.extend(mspecs);
         }
         if cfg.read_only {
             specs.retain(|s| {
                 matches!(
                     s.name.as_str(),
-                    "read_file" | "list_files" | "glob" | "grep" | "task_status" | "todoread" | "skill"
+                    "read_file" | "list_files" | "glob" | "grep" | "lsp" | "task_status" | "todoread" | "skill"
                 )
             });
         }
@@ -344,6 +348,45 @@ pub async fn run(
                         Ok(o) => o,
                         Err(e) => format!("error: {e:#}"),
                     }
+                }
+            } else if call.name == "code" {
+                let v: Value = serde_json::from_str(&call.args).unwrap_or(Value::Null);
+                let script = v["code"].as_str().unwrap_or("").to_string();
+                if script.trim().is_empty() {
+                    "error: code: script required".to_string()
+                } else if let Some(m) = mcp_now.clone() {
+                    let specs = m.specs().await;
+                    let confirm_tx = tx.clone();
+                    let confirm_handle = tokio::runtime::Handle::current();
+                    let confirm: crate::codemode::ConfirmFn = Arc::new(move |key: &str, args: &str| {
+                        let (otx, orx) = oneshot::channel();
+                        let _ = confirm_tx.send(ApiEvent::Confirm {
+                            name: key.to_string(),
+                            args: args.to_string(),
+                            rx: otx,
+                        });
+                        confirm_handle.block_on(orx).unwrap_or_default()
+                    });
+                    let note_tx = tx.clone();
+                    let note = Arc::new(move |s: String| {
+                        let _ = note_tx.send(ApiEvent::Note(s));
+                    });
+                    let run_cfg = crate::codemode::RunCfg {
+                        targets: crate::codemode::mcp_targets(m, &specs),
+                        perm: cfg.perm.clone(),
+                        allow_all: allow_all.clone(),
+                        timeout: crate::codemode::default_timeout(),
+                        confirm,
+                        note,
+                    };
+                    let out = crate::codemode::run(script, run_cfg).await;
+                    cfg.perm.rules.extend(out.new_rules);
+                    match out.output {
+                        Ok(s) => s,
+                        Err(e) => format!("error: {e}"),
+                    }
+                } else {
+                    "error: code: no MCP servers connected".to_string()
                 }
             } else if call.name == "subagent" {
                 let v: Value = serde_json::from_str(&call.args).unwrap_or(Value::Null);

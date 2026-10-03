@@ -253,6 +253,22 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "lsp".into(),
+            description: "Navigate code with the language server (LSP) when one is installed: hover, definition, references, implementation, document_symbols, workspace_symbols. Line and column are 1-based as shown in editors. document_symbols needs path only; workspace_symbols needs query only; the position operations need path + line + column. Returns nothing useful when no server supports the file type.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "operation": {"type": "string", "enum": ["hover", "definition", "references", "implementation", "document_symbols", "workspace_symbols"], "description": "The LSP operation to perform"},
+                    "path": {"type": "string", "description": "File path (required for everything except workspace_symbols)"},
+                    "line": {"type": "integer", "description": "Line number, 1-based"},
+                    "column": {"type": "integer", "description": "Character offset on the line, 1-based, default 1"},
+                    "query": {"type": "string", "description": "Search query for workspace_symbols"},
+                    "include_declaration": {"type": "boolean", "description": "references: include the declaration itself, default true"}
+                },
+                "required": ["operation"]
+            }),
+        },
+        ToolSpec {
             name: "todoread".into(),
             description: "Read the current todo list for the session. Use to re-check the plan after a context compaction or before continuing multi-step work.".into(),
             parameters: json!({ "type": "object", "properties": {} }),
@@ -347,6 +363,35 @@ pub fn detail(name: &str, args: &str) -> String {
         }
         "todoread" => "todo list".to_string(),
         "skill" => crate::skills::detail(args),
+        "lsp" => {
+            let op = v["operation"].as_str().unwrap_or("lsp");
+            let pos = match v["operation"].as_str() {
+                Some("workspace_symbols") => v["query"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
+                Some("document_symbols") => v["path"].as_str().unwrap_or("").to_string(),
+                _ => {
+                    let p = v["path"].as_str().unwrap_or("");
+                    let l = v["line"].as_u64().unwrap_or(1);
+                    let c = v["column"].as_u64().unwrap_or(1);
+                    format!("{p}:{l}:{c}")
+                }
+            };
+            format!("{op} {pos}")
+        }
+        "code" => {
+            let c = v["code"].as_str().unwrap_or("").trim();
+            let first = c.lines().next().unwrap_or("").trim();
+            if first.chars().count() > 60 {
+                let t: String = first.chars().take(57).collect();
+                format!("{t}...")
+            } else if first.is_empty() {
+                "script".to_string()
+            } else {
+                first.to_string()
+            }
+        }
         _ => {
             let d = args.lines().next().unwrap_or("").to_string();
             if d.chars().count() > 60 {
@@ -600,6 +645,31 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
                 bail!("skill: name required");
             };
             crate::skills::load(name)
+        }
+        "lsp" => {
+            let Some(op) = v["operation"].as_str() else {
+                bail!("lsp: operation required");
+            };
+            let path = v["path"].as_str().unwrap_or("");
+            let line = v["line"].as_u64().unwrap_or(1).max(1) as u32;
+            let col = v["column"].as_u64().unwrap_or(1).max(1) as u32;
+            match op {
+                "hover" => crate::lsp::hover(path, line, col).await,
+                "definition" => crate::lsp::definition(path, line, col).await,
+                "implementation" => crate::lsp::implementation(path, line, col).await,
+                "references" => crate::lsp::references(
+                    path,
+                    line,
+                    col,
+                    v["include_declaration"].as_bool().unwrap_or(true),
+                )
+                .await,
+                "document_symbols" => crate::lsp::document_symbols(path).await,
+                "workspace_symbols" => {
+                    crate::lsp::workspace_symbols(v["query"].as_str().unwrap_or("")).await
+                }
+                _ => bail!("lsp: unknown operation: {op}"),
+            }
         }
         "bash" => {
             let Some(cmd) = v["command"].as_str() else {

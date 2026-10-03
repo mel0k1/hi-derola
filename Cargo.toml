@@ -13,6 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 anyhow = "1"
+boa_engine = "0.20"
 async-trait = "0.1"
 base64 = "0.22"
 crossterm = "0.28"
