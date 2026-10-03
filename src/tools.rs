@@ -29,9 +29,11 @@ fn tail(s: &str, max: usize) -> String {
     format!("... ({} chars truncated from the head)\n{}", dropped, &s[start..])
 }
 
-/// tool outputs at or above this many bytes are also saved to a file so the
-/// model can read back whatever the inline budget cut away
+/// tool outputs are also saved to a file (so the model can read back whatever
+/// the inline budget cut away) once they reach this many bytes or lines —
+/// same two triggers as opencode's Truncate
 pub const SPILL_MIN: usize = 50_000;
+pub const SPILL_LINES: usize = 2000;
 /// spilled files older than this are deleted opportunistically on every spill
 const SPILL_RETENTION_SECS: u64 = 7 * 24 * 3600;
 
@@ -61,7 +63,8 @@ pub fn spill(out: String, tool: &str, max: usize) -> String {
 }
 
 pub fn spill_into(dir: &std::path::Path, out: String, tool: &str, max: usize) -> String {
-    if out.len() < SPILL_MIN || max == 0 {
+    let big = out.len() >= SPILL_MIN || out.lines().count() > SPILL_LINES;
+    if !big || max == 0 {
         return budget(out, max);
     }
     let saved = save_spill(dir, tool, &out);
@@ -1393,6 +1396,30 @@ mod tests {
         let res = spill_into(&tmp, out.clone(), "bash", 4096);
         assert_eq!(res, budget(out, 4096));
         assert!(!tmp.exists() || std::fs::read_dir(&tmp).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn spill_triggers_on_line_count_too() {
+        let tmp = std::env::temp_dir().join("hi-derola-spill-lines");
+        let _ = std::fs::remove_dir_all(&tmp);
+        // ~10KB of many short lines: under SPILL_MIN, over SPILL_LINES
+        let out = "line\n".repeat(SPILL_LINES + 1);
+        assert!(out.len() < SPILL_MIN);
+        let res = spill_into(&tmp, out.clone(), "grep", 4096);
+        assert!(res.contains("full output saved to "), "{res}");
+        let mut entries: Vec<_> = std::fs::read_dir(&tmp)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(std::fs::read_to_string(entries.pop().unwrap()).unwrap(), out);
+        // exactly at the line threshold (2000 lines) nothing spills
+        let tmp2 = std::env::temp_dir().join("hi-derola-spill-lines-edge");
+        let _ = std::fs::remove_dir_all(&tmp2);
+        let res2 = spill_into(&tmp2, "l\n".repeat(SPILL_LINES), "grep", 4096);
+        assert_eq!(res2, budget("l\n".repeat(SPILL_LINES), 4096));
+        assert!(!tmp2.exists() || std::fs::read_dir(&tmp2).unwrap().next().is_none());
     }
 
     #[test]
