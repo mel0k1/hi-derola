@@ -36,8 +36,8 @@ pub struct Shared {
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
-fn system_prompt() -> String {
-    hi_derola::base_prompt("on the user's machine")
+fn system_prompt(model: &str) -> String {
+    hi_derola::base_prompt("on the user's machine", model)
 }
 
 fn diff_json(rows: Vec<hi_derola::diff::Row>) -> Value {
@@ -594,9 +594,10 @@ async fn open_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) ->
         persist(&sh);
     }
     let st = sessions::load(&id).map_err(|e| format!("{e:#}"))?;
+    let model = sh.cfg.lock().unwrap().provider.model.clone();
     *sh.session.lock().unwrap() = Session {
         system: if st.system.trim().is_empty() {
-            system_prompt()
+            system_prompt(&model)
         } else {
             st.system.clone()
         },
@@ -1144,14 +1145,19 @@ pub fn run() -> Result<()> {
                     st.created,
                     Session {
                         system: if st.system.trim().is_empty() {
-                            system_prompt()
+                            system_prompt(&cfg.provider.model)
                         } else {
                             st.system.clone()
                         },
                         messages: st.messages.clone(),
                     },
                 ),
-                None => (sessions::new_id(), String::new(), 0, Session::new(system_prompt())),
+                None => (
+                    sessions::new_id(),
+                    String::new(),
+                    0,
+                    Session::new(system_prompt(&cfg.provider.model)),
+                ),
             };
             let sh = Arc::new(Shared {
                 cfg: Mutex::new(cfg),

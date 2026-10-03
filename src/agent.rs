@@ -863,6 +863,12 @@ fn build_sub_req(
         }
         None => (subagent_system(), model.to_string(), temperature),
     };
+    let add = crate::family_addendum(&model);
+    let system = if add.is_empty() {
+        system
+    } else {
+        format!("{system}\n\n{add}")
+    };
     ChatRequest {
         system,
         messages: vec![Message::new(Role::User, prompt.to_string())],

@@ -124,7 +124,7 @@ pub fn is_git_repo_in(base: &std::path::Path) -> bool {
 
 /// the shared system prompt for both frontends; venue is
 /// "in the user's terminal" (TUI) or "on the user's machine" (GUI)
-pub fn base_prompt_in(base: &std::path::Path, venue: &str) -> String {
+pub fn base_prompt_in(base: &std::path::Path, venue: &str, model: &str) -> String {
     let repo = if is_git_repo_in(base) { "yes" } else { "no" };
     let mut system = format!(
         "You are hi-derola, a coding assistant running {venue}.\n\
@@ -144,6 +144,11 @@ pub fn base_prompt_in(base: &std::path::Path, venue: &str) -> String {
         std::env::consts::ARCH,
         today_iso(),
     );
+    let add = family_addendum(model);
+    if !add.is_empty() {
+        system.push_str("\n\n");
+        system.push_str(add);
+    }
     let agents = agents_md_in(base);
     if !agents.is_empty() {
         system.push_str("\n\n");
@@ -152,9 +157,69 @@ pub fn base_prompt_in(base: &std::path::Path, venue: &str) -> String {
     system
 }
 
-pub fn base_prompt(venue: &str) -> String {
+pub fn base_prompt(venue: &str, model: &str) -> String {
     let cwd = std::env::current_dir().unwrap_or_default();
-    base_prompt_in(&cwd, venue)
+    base_prompt_in(&cwd, venue, model)
+}
+
+/// which tuned prompt variant applies to this model id (same families as
+/// opencode: beast/gpt/codex/gemini/anthropic/kimi, else default)
+pub fn prompt_family(model: &str) -> &'static str {
+    let m = model.to_lowercase();
+    if m.contains("gpt-4") || m.contains("o1") || m.contains("o3") {
+        "beast"
+    } else if m.contains("codex") {
+        "codex"
+    } else if m.contains("gpt") {
+        "gpt"
+    } else if m.contains("gemini") {
+        "gemini"
+    } else if m.contains("claude") {
+        "anthropic"
+    } else if m.contains("kimi") {
+        "kimi"
+    } else {
+        "default"
+    }
+}
+
+/// per-family behavior addendum appended to the system prompt; the exact
+/// emphases follow what each model family tends to get wrong
+pub fn family_addendum(model: &str) -> &'static str {
+    match prompt_family(model) {
+        "beast" => {
+            "Work style: keep going until the user's request is fully resolved before ending \
+             the turn; do not stop midway to ask whether to continue with work the user already \
+             asked for. Think hard problems through thoroughly, but keep what you show concise."
+        }
+        "gpt" => {
+            "Work style: examine the project before changing it — verify assumptions against \
+             real files (imports, manifests, configs) instead of guessing. Report progress as \
+             short factual statements."
+        }
+        "codex" => {
+            "Work style: write complete code with no placeholder omissions and keep comments \
+             minimal. When a build or test run is possible with the available tools, run it \
+             before declaring the task done."
+        }
+        "gemini" => {
+            "Work style: follow the project's existing conventions and code style. Never assume \
+             a library or framework is available — verify it in imports or manifests first. \
+             If asked how to do something, explain before doing it, and confirm before \
+             expanding scope beyond the request."
+        }
+        "anthropic" => {
+            "Work style: prefer editing existing files over creating new ones, and never create \
+             files unless truly necessary. Skip praise and preambles: lead with the result and \
+             keep answers short."
+        }
+        "kimi" => {
+            "Work style: bias to action — use the tools to make the actual change instead of \
+             describing what could be done. When the user only asks a question, answer briefly \
+             and change nothing."
+        }
+        _ => "",
+    }
 }
 
 pub fn agents_md_in(base: &std::path::Path) -> String {
@@ -239,7 +304,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hiderola-env-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let p = base_prompt_in(&dir, "in the user's terminal");
+        let p = base_prompt_in(&dir, "in the user's terminal", "deepseek-chat");
         assert!(p.contains("running in the user's terminal"));
         assert!(p.contains("Is directory a git repo: no"));
         assert!(p.contains(&format!(
@@ -253,9 +318,36 @@ mod tests {
         // a worktree-style .git file counts as a repo too
         std::fs::write(dir.join(".git"), "gitdir: /elsewhere\n").unwrap();
         assert!(is_git_repo_in(&dir));
-        let p = base_prompt_in(&dir, "on the user's machine");
+        let p = base_prompt_in(&dir, "on the user's machine", "deepseek-chat");
         assert!(p.contains("Is directory a git repo: yes"));
         assert!(p.contains("running on the user's machine"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prompt_family_mapping() {
+        assert_eq!(prompt_family("gpt-4.1"), "beast");
+        assert_eq!(prompt_family("o3-mini"), "beast");
+        assert_eq!(prompt_family("gpt-5-codex"), "codex");
+        assert_eq!(prompt_family("gpt-5-mini"), "gpt");
+        assert_eq!(prompt_family("gemini-2.5-pro"), "gemini");
+        assert_eq!(prompt_family("claude-sonnet-4-5"), "anthropic");
+        assert_eq!(prompt_family("kimi-k2"), "kimi");
+        assert_eq!(prompt_family("deepseek-chat"), "default");
+        assert_eq!(prompt_family("GLM-4.6"), "default");
+    }
+
+    #[test]
+    fn family_addendum_in_prompt() {
+        let dir = std::env::temp_dir().join(format!("hiderola-fam-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let claude = base_prompt_in(&dir, "x", "claude-sonnet-4-5");
+        assert!(claude.contains("prefer editing existing files"), "{claude}");
+        let gpt = base_prompt_in(&dir, "x", "gpt-4.1");
+        assert!(gpt.contains("fully resolved"), "{gpt}");
+        let plain = base_prompt_in(&dir, "x", "deepseek-chat");
+        assert!(!plain.contains("Work style"), "{plain}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

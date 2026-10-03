@@ -122,7 +122,7 @@ fn key_seq(c: char) -> usize {
 impl App {
     pub fn new(cfg: Config, provider: Arc<dyn Provider>, tx: mpsc::UnboundedSender<ApiEvent>) -> Self {
         let model = cfg.provider.model.clone();
-        let system = crate::base_prompt("in the user's terminal");
+        let system = crate::base_prompt("in the user's terminal", &model);
         let status = format!("{} · {}", provider.name(), model);
         Self {
             cfg,
@@ -943,6 +943,7 @@ impl App {
                 } else {
                     self.model = arg.to_string();
                     self.cfg.provider.model = arg.to_string();
+                    self.session.system = crate::base_prompt("in the user's terminal", &self.model);
                     match self.cfg.save() {
                         Ok(_) => self.info(format!("model: {}", self.model)),
                         Err(e) => self.info(format!("model: {} (not saved: {e:#})", self.model)),
