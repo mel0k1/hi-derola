@@ -14,22 +14,23 @@ A high-performance, lightweight chat and autonomous coding assistant written in 
 - streaming responses and reasoning in a separate collapsible thinking block (GUI)
 - api key, endpoint and model are editable right in the GUI settings; the model dropdown is filled from the provider's `/models` endpoint
 - configurable hotkeys (`[keys]` in config or capture fields in GUI settings)
-- tool calling: read_file (line numbers, offset/limit), write_file, edit (tolerant to CRLF/LF, BOM and trailing whitespace), list_files, glob, grep, bash (workdir, timeout, tail output), webfetch (http/https, html converted to markdown/text), websearch (DuckDuckGo, no key needed) + MCP servers
+- tool calling: read_file (line numbers, offset/limit, images come back as native image parts), write_file, edit (tolerant to CRLF/LF, BOM, trailing whitespace; a third pass normalizes smart quotes/dashes for unicode-mangled files), apply_patch (multi-file V4A patches — nothing is written unless every hunk matches), list_files, glob, grep, bash (workdir, timeout, tail output, background tasks), webfetch (http/https, html converted to markdown/text), websearch (DuckDuckGo, no key needed) + MCP servers
+- bash hygiene: `AGENT=1` and `HI_DEROLA=1` are exported to every shell (scripts can detect the agent), timed-out processes are killed with the shell (`kill_on_drop` + own process group on unix)
 - lsp diagnostics after write_file/edit: edits are pushed to a language server (rust-analyzer, pyright, typescript-language-server, gopls, clangd — auto-detected on PATH) and errors/warnings come back to the model in the tool result, so it fixes its own mistakes immediately
-- formatters after write_file/edit: rustfmt, gofmt and prettier run on the touched file automatically (prettier is picked from node_modules/.bin or PATH)
+- formatters after write_file/edit: rustfmt, gofmt, prettier (from node_modules/.bin or PATH), ruff/black (py), clang-format (c/c++), shfmt (sh), ktlint (kotlin) run on the touched file automatically
 - glob/grep/list_files respect .gitignore and .ignore and skip hidden files
 - prompt caching: anthropic requests mark system/tools/last message with cache_control, openai requests get a prompt_cache_key — long agent loops stop re-paying the full prompt
 - background bash: `background: true` runs a command as a task (`bg-2`) — useful for dev servers and long builds; the tool returns immediately, the output streams live (GUI card with a kill button) and the full result arrives as a new message when the command finishes, `task_status` lists tasks and shows the running output, `task_kill` stops a task
 - todo tools: `todowrite` / `todoread` keep a structured task list (content, status, priority) for multi-step work; the live list renders as a card in the GUI and info lines in the TUI, and is stored with the session
 - question tool pauses the run and asks the user multiple-choice questions right in the UI (free-form answer, esc skips)
-- subagent tool delegates a task to a fresh-context agent with a trimmed toolset; `background: true` runs it async — the tool returns a task id (`bg-1`) immediately, the result arrives as a new message when done, `task_status` lists tasks and returns finished results, `task_kill` aborts a running one; finished runs are kept as child sessions (↳ in the sidebar)
+- subagent tool delegates a task to a fresh-context agent with a trimmed toolset; `background: true` runs it async — the tool returns a task id (`bg-1`) immediately, the result arrives as a new message when done, `task_status` lists tasks and returns finished results, `task_kill` aborts a running one; finished runs are kept as child sessions (↳ in the sidebar) and can be continued by passing `session_id` back to the subagent tool with full context; `subagent_depth` in `[agent]` controls how deep subagents may nest and spawn their own subagents
 - custom agents: a markdown file at `.hi-derola/agents/<name>.md` or `~/.config/hi-derola/agents/<name>.md` (frontmatter: `description`, `model`, `temperature`, `read_only`) defines an agent profile; the `subagent` tool accepts `agent: <name>`, built-in profiles are `general` and `explore`; typing `@<agent> <task>` in the input runs it directly (with autocomplete)
 - vision: attach images (png/jpeg/gif/webp, up to 5 MB) via `/file <path>` or the attach picker — they are sent to the model as native image parts (OpenAI-compatible and Anthropic)
 - reject with feedback: deny a confirmation and type what to change instead — the feedback reaches the model as the tool result and the run continues with the adjusted plan (TUI: `f` at the confirm prompt, GUI: the feedback field in the dialog)
 - plan mode: read-only research — write_file/edit are removed from the toolset and denied, the system prompt asks for a step-by-step plan instead of changes (GUI: the `plan` toggle or ctrl+shift+p, TUI and GUI: `/plan`)
 - diff preview before edit/write approval, colored in GUI and TUI, mutations require confirmation
 - snapshots: every turn is snapshotted, `/undo` / `/redo` reverts file changes
-- AGENTS.md / CLAUDE.md project instructions are picked up from the working directory into the system prompt; `/init` scans the repo and creates or improves AGENTS.md itself
+- AGENTS.md / CLAUDE.md project instructions are picked up from the working directory into the system prompt; when the agent reads a file deeper down, an AGENTS.md/CLAUDE.md found between the working directory and that file is attached to the read result; `/init` scans the repo and creates or improves AGENTS.md itself
 - skills: drop a `SKILL.md` (frontmatter + instructions) into `.hi-derola/skills/<name>/` or `~/.config/hi-derola/skills/<name>/` and the agent gets a `skill` tool to load it on demand
 - custom commands: a markdown file at `.hi-derola/commands/<name>.md` or `~/.config/hi-derola/commands/<name>.md` (optional `description:` frontmatter, `$ARGUMENTS` and `$1..$9` placeholders) becomes a `/name` command in the GUI and TUI
 - `/compact` summarizes and shrinks the conversation on demand, `/export [path]` saves the session as markdown
@@ -38,8 +39,57 @@ A high-performance, lightweight chat and autonomous coding assistant written in 
 - steer/queue: messages sent while the agent is busy are queued — they steer the current run between tool rounds, or start the next run right after it finishes (esc stops the current run, a queued message keeps going)
 - permission rules: `allow | ask | deny` per tool plus wildcard patterns (e.g. allow `git *`, deny `rm *`) in `[permissions]`, shown in GUI settings; built-in protections ask before reading secret files (`.env`, `prod.env`, ...) and before touching paths outside the working directory (explicit rules override); "always allow" (`w` in TUI, button in GUI) saves a wildcard rule to the config (`git push *`, `*.rs`, `https://host/*`, `mcp__srv__*`)
 - mcp servers over stdio and streamable http: tools exposed as `mcp__<name>__<tool>`
-- agent loop: token-budgeted context compaction (template summary, keeps the last ~15k tokens verbatim, on overflow too), output `max_tokens` shrinks to the remaining window, per-tool output budget, cached-tokens-aware cost, graceful wrap-up at the round limit that keeps the cache prefix
+- agent loop: token-budgeted context compaction (template summary, keeps the last ~15k tokens verbatim, on overflow too), output `max_tokens` shrinks to the remaining window, per-tool output budget, cached-tokens-aware cost, graceful wrap-up at the round limit that keeps the cache prefix; a reply cut off by the output limit continues automatically ("continue from where you left off", up to 3 times — truncated tool calls are dropped instead of corrupting the transcript)
 - markdown rendering in answers, token usage counters, automatic retry with backoff on 429/5xx and empty replies
+
+### gui extras
+
+- command palette (`ctrl+k`): fuzzy search across slash commands, saved sessions, models and actions (theme, settings, review, sidebar) — keyboard-first, enter runs, esc closes
+- review panel (diff button with a per-file badge in the top bar): every file the session changed with cumulative `+adds / −dels`, expandable diff per file; counts survive a reload (stored with the session), diffs stay for the live session
+- context pill in the status bar: percent of the context window used by the current conversation (amber above 80%, red above 92%), click runs `/compact`; fed by the real usage numbers of the last request
+- session list with model-generated titles, cost and message counts; reopen or delete from the sidebar, undo/redo buttons, plan-mode toggle, attachment chips
+
+## architecture
+
+```
+src/
+  main.rs          binary entry: starts the TUI by default, --tui forces it
+  lib.rs           inline AGENTS.md discovery for read_file
+  app.rs           TUI (ratatui): event loop, transcript rendering, /commands, sessions
+  agent.rs         the agent loop: rounds, steering, compaction, output fitting,
+                   wrap-up, subagent spawning, permission checks
+  chat.rs          Message / Session / ToolCall / Image types
+  provider/        openai (SSE) + anthropic (messages) clients, ApiEvent stream,
+                   list_models, retry with jitter
+  tools.rs         tool specs, dispatch, detail/preview/paths, bash, bg tasks
+  bg.rs            background task registry (bash + subagents), live output
+  perm.rs          permission resolution (allow/ask/deny + wildcard rules)
+  sessions.rs      persisted sessions (json per session) + ChangeRec for review
+  snapshot.rs      per-turn file snapshots for /undo /redo
+  diff.rs          LCS line diff used everywhere
+  patch.rs         V4A patch parser + applier for apply_patch
+  files.rs         read/write, images, @mention scanning, file trees
+  lsp.rs           language-server pool, diagnostics after edits
+  fmt.rs           auto-formatters per file type
+  mcp.rs           stdio + streamable http MCP clients
+  models.rs        model catalog: context windows, prices, cost with cached discount
+  todo.rs          shared todo state for the todo tools
+  skills.rs        SKILL.md loader for the skill tool
+  commands.rs      custom /commands + /init + /export
+  agents.rs        custom agent profiles, @-mentions
+  web.rs           webfetch + websearch (duckduckgo)
+  search.rs        glob/grep/list_files with gitignore support
+  config.rs        config.toml model + persistence
+  md.rs, ui.rs     markdown + shared UI helpers
+
+src-tauri/         desktop shell: Shared state, event pump (ApiEvent -> webview),
+                   tauri commands (send/open_session/confirm/ask/...)
+ui/                static html/css/js frontend, no build step; mock.js fakes the
+                   backend so the GUI runs in a plain browser
+scripts/           mock LLM + pty driver for end-to-end tests
+```
+
+a turn flows: input -> command or prompt -> `agent::run` loop (chat -> stream events -> tool calls -> confirm/ask -> tool results) -> `Done`; every event crosses to the TUI or through the tauri pump into the webview, which renders chunks, diffs, todos and usage live.
 
 ## run
 
@@ -84,6 +134,7 @@ redo = "ctrl+shift+z"
 toggle_thinking = "ctrl+t"
 toggle_sidebar = "ctrl+b"
 toggle_theme = "ctrl+shift+t"
+palette = "ctrl+k"
 
 # interface
 [ui]
@@ -94,6 +145,7 @@ toggle_theme = "ctrl+shift+t"
 context_limit = 0                                # tokens, 0 = auto from the model catalog (90% of the window)
 max_rounds = 15                                  # tool rounds per message
 output_budget = 32768                            # max chars of one tool result
+subagent_depth = 1                               # how deep subagents may spawn subagents
 
 # tool permissions: allow | ask | deny, first matching rule wins
 # unset tools default to: write_file/edit/bash/mcp ask, read-only (incl. webfetch/subagent/todowrite) allow
@@ -115,6 +167,14 @@ permission = "allow"
 /file <path>   attach file to next message
 /model <name>  switch model, saved to config
 /models        list models available for the api key
+/plan          toggle plan mode (read-only research)
 /undo /redo    revert or reapply file changes of a turn
+/init          create or improve AGENTS.md for this project
+/compact       summarize and shrink the conversation context
+/export [path] save the session as markdown
+/sessions      list saved sessions (TUI; the GUI has the sidebar)
+/resume [id]   switch to a saved session, latest by default (TUI)
 /clear         start new session
 ```
+
+gui-only: command palette (`ctrl+k`), review panel, context pill, attachment chips, hotkey capture in settings.
