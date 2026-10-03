@@ -122,23 +122,7 @@ fn key_seq(c: char) -> usize {
 impl App {
     pub fn new(cfg: Config, provider: Arc<dyn Provider>, tx: mpsc::UnboundedSender<ApiEvent>) -> Self {
         let model = cfg.provider.model.clone();
-        let cwd = std::env::current_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        let mut system = format!(
-            "You are hi-derola, a coding assistant running in the user's terminal.\n\
-             Working directory: {cwd}\n\
-             Be concise and practical. Use markdown for formatting.\n\n\
-             Use the provided tools to work with files and run commands instead of printing code \
-             fences with file contents. Use glob and grep to locate code before reading. \
-             Prefer read_file before modifying a file. \
-             write_file writes the complete file content."
-        );
-        let agents = crate::agents_md();
-        if !agents.is_empty() {
-            system.push_str("\n\n");
-            system.push_str(&agents);
-        }
+        let system = crate::base_prompt("in the user's terminal");
         let status = format!("{} · {}", provider.name(), model);
         Self {
             cfg,

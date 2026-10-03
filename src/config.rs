@@ -48,6 +48,10 @@ pub struct AgentConfig {
     pub subagent_depth: usize,
     #[serde(default)]
     pub compaction: CompactionCfg,
+    /// shell used by the bash tool: program name or full path
+    /// (cmd / powershell / pwsh get their own flag, everything else gets -c)
+    #[serde(default)]
+    pub shell: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -58,6 +62,7 @@ impl Default for AgentConfig {
             output_budget: default_output_budget(),
             subagent_depth: default_subagent_depth(),
             compaction: Default::default(),
+            shell: None,
         }
     }
 }
@@ -188,6 +193,15 @@ mod tests {
         assert!(c.auto);
         assert_eq!(c.buffer, 0);
         assert_eq!(c.keep, 15_000);
+    }
+
+    #[test]
+    fn agent_shell_option() {
+        let cfg: Config =
+            toml::from_str(&format!("{MINIMAL}[agent]\nshell = \"/opt/homebrew/bin/fish\"\n")).unwrap();
+        assert_eq!(cfg.agent.shell.as_deref(), Some("/opt/homebrew/bin/fish"));
+        let cfg: Config = toml::from_str(MINIMAL).unwrap();
+        assert_eq!(cfg.agent.shell, None);
     }
 
     #[test]

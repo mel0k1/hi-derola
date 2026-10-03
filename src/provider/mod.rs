@@ -248,3 +248,87 @@ pub async fn sse_lines(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use tokio::sync::mpsc::unbounded_channel;
+
+    /// one-shot HTTP/1.1 server: serves one canned response per connection
+    fn spawn_server(responses: Vec<String>) -> std::net::SocketAddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for resp in responses {
+                let Ok((mut sock, _)) = listener.accept() else {
+                    break;
+                };
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf);
+                let _ = sock.write_all(resp.as_bytes());
+                let _ = sock.flush();
+            }
+        });
+        addr
+    }
+
+    #[tokio::test]
+    async fn send_retries_retryable_status_then_succeeds() {
+        let body = "{\"ok\":true}";
+        let addr = spawn_server(vec![
+            "HTTP/1.1 429 Too Many Requests\r\nconnection: close\r\nretry-after: 0.05\r\ncontent-length: 0\r\n\r\n"
+                .into(),
+            "HTTP/1.1 503 Service Unavailable\r\nconnection: close\r\nretry-after-ms: 50\r\ncontent-length: 0\r\n\r\n"
+                .into(),
+            format!(
+                "HTTP/1.1 200 OK\r\nconnection: close\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            ),
+        ]);
+        let http = reqwest::Client::new();
+        let (tx, mut rx) = unbounded_channel();
+        let started = std::time::Instant::now();
+        let resp = send(
+            &http,
+            format!("http://{addr}/chat"),
+            vec![],
+            serde_json::json!({"x": 1}),
+            &tx,
+        )
+        .await
+        .unwrap();
+        assert!(resp.status().is_success());
+        // both retry-after hints (50 ms each) were honored
+        assert!(started.elapsed() >= std::time::Duration::from_millis(100));
+        drop(tx);
+        let mut notes = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            if let ApiEvent::Note(n) = ev {
+                notes.push(n);
+            }
+        }
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].contains("429"), "first note: {}", notes[0]);
+        assert!(notes[1].contains("503"), "second note: {}", notes[1]);
+    }
+
+    #[tokio::test]
+    async fn send_does_not_retry_client_errors() {
+        let addr = spawn_server(vec![
+            "HTTP/1.1 400 Bad Request\r\nconnection: close\r\ncontent-length: 11\r\n\r\nbad request".into(),
+        ]);
+        let http = reqwest::Client::new();
+        let (tx, _rx) = unbounded_channel();
+        let err = send(
+            &http,
+            format!("http://{addr}/chat"),
+            vec![],
+            serde_json::json!({}),
+            &tx,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("400"), "error: {err}");
+    }
+}

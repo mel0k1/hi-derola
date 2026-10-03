@@ -9,7 +9,7 @@ A high-performance, lightweight chat and autonomous coding assistant written in 
 - chat sessions persist to disk (`~/.local/share/hi-derola/sessions`), sidebar lists past chats, tap to reopen, delete with two clicks
 - dark and light themes, toggled from the sidebar, remembered in config
 - inline icons, attachment chips, file browser with folder trees, no npm toolchain — static html/css/js
-- windows, linux, macos — shell commands run via `cmd /C` on windows, `sh -c` elsewhere
+- windows, linux, macos — shell commands run via `cmd /C` on windows, `sh -c` elsewhere; the shell is configurable (`[agent] shell`, e.g. `"C:\\Program Files\\Git\\bin\\bash.exe"` — cmd/powershell/pwsh get their own flag, everything else gets `-c`)
 - multi-provider: any OpenAI-compatible endpoint (OpenAI, OpenRouter, ...) + native Anthropic
 - streaming responses and reasoning in a separate collapsible thinking block (GUI)
 - api key, endpoint and model are editable right in the GUI settings; the model dropdown is filled from the provider's `/models` endpoint
@@ -31,6 +31,7 @@ A high-performance, lightweight chat and autonomous coding assistant written in 
 - diff preview before edit/write approval, colored in GUI and TUI, mutations require confirmation
 - snapshots: every turn is snapshotted, `/undo` / `/redo` reverts file changes
 - AGENTS.md / CLAUDE.md project instructions are picked up from the working directory into the system prompt; when the agent reads a file deeper down, an AGENTS.md/CLAUDE.md found between the working directory and that file is attached to the read result; `/init` scans the repo and creates or improves AGENTS.md itself
+- the system prompt opens with an env block — working directory, git repo flag, platform/arch, today's date — so the model knows its surroundings without burning a tool call
 - skills: drop a `SKILL.md` (frontmatter + instructions) into `.hi-derola/skills/<name>/` or `~/.config/hi-derola/skills/<name>/` and the agent gets a `skill` tool to load it on demand
 - custom commands: a markdown file at `.hi-derola/commands/<name>.md` or `~/.config/hi-derola/commands/<name>.md` (optional `description:` frontmatter, `$ARGUMENTS` and `$1..$9` placeholders) becomes a `/name` command in the GUI and TUI
 - `/compact` summarizes and shrinks the conversation on demand, `/export [path]` saves the session as markdown

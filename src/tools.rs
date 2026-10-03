@@ -1,5 +1,6 @@
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
+use std::sync::OnceLock;
 
 use crate::files::{self, WriteBlock};
 use crate::mcp::McpClient;
@@ -690,14 +691,45 @@ pub fn spawn_shell(cmd: &str, workdir: Option<&str>) -> Result<tokio::process::C
     Ok(command.spawn()?)
 }
 
-#[cfg(windows)]
-fn shell() -> (&'static str, &'static str) {
-    ("cmd", "/C")
+static SHELL_OVERRIDE: OnceLock<Option<String>> = OnceLock::new();
+
+/// set the shell used by the bash tool, from [agent] shell in the config;
+/// a program name or a full path, empty strings fall back to the default
+pub fn set_shell(prog: Option<String>) {
+    let _ = SHELL_OVERRIDE.set(prog);
 }
 
-#[cfg(not(windows))]
-fn shell() -> (&'static str, &'static str) {
-    ("sh", "-c")
+/// command-line flag that makes the shell run one command string;
+/// derived from the program basename so both "pwsh" and full paths work
+fn shell_args(prog: &str) -> &'static str {
+    let base = prog
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(prog)
+        .trim_end_matches(".exe")
+        .to_lowercase();
+    match base.as_str() {
+        "cmd" => "/C",
+        "powershell" | "pwsh" => "-Command",
+        _ => "-c",
+    }
+}
+
+fn shell() -> (String, &'static str) {
+    let over = SHELL_OVERRIDE
+        .get()
+        .and_then(|o| o.as_deref())
+        .filter(|s| !s.trim().is_empty());
+    match over {
+        Some(p) => (p.trim().to_string(), shell_args(p)),
+        None => {
+            if cfg!(windows) {
+                ("cmd".into(), "/C")
+            } else {
+                ("sh".into(), "-c")
+            }
+        }
+    }
 }
 
 fn norm(p: &str) -> String {
@@ -1288,6 +1320,18 @@ mod tests {
         assert!(out.contains("exit code: 3"), "{out}");
         let out = bash_run("echo ok", None, None).await.unwrap();
         assert_eq!(out.trim(), "ok");
+    }
+
+    #[test]
+    fn shell_flag_derivation() {
+        assert_eq!(shell_args("cmd"), "/C");
+        assert_eq!(shell_args("cmd.exe"), "/C");
+        assert_eq!(shell_args("pwsh"), "-Command");
+        assert_eq!(shell_args("pwsh.exe"), "-Command");
+        assert_eq!(shell_args("C:\\Program Files\\PowerShell\\7\\pwsh.exe"), "-Command");
+        assert_eq!(shell_args("bash"), "-c");
+        assert_eq!(shell_args("/usr/bin/zsh"), "-c");
+        assert_eq!(shell_args("/opt/homebrew/bin/fish"), "-c");
     }
 
     #[test]

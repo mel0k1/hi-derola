@@ -69,6 +69,9 @@ max_rounds = 15
 output_budget = 32768
 # how many levels of subagent-in-subagent are allowed (1 = the main agent can spawn subagents)
 subagent_depth = 1
+# shell used by the bash tool: program name or full path
+# cmd / powershell / pwsh get their own flag, anything else gets -c
+# shell = "C:\\Program Files\\Git\\bin\\bash.exe"
 
 # context compaction tuning
 # [agent.compaction]

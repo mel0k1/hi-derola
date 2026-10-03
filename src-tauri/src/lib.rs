@@ -37,24 +37,7 @@ pub struct Shared {
 }
 
 fn system_prompt() -> String {
-    let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_default();
-    let mut system = format!(
-        "You are hi-derola, a coding assistant running on the user's machine.\n\
-         Working directory: {cwd}\n\
-         Be concise and practical. Use markdown for formatting.\n\n\
-         Use the provided tools to work with files and run commands instead of printing code \
-         fences with file contents. Use glob and grep to locate code before reading. \
-         Prefer read_file before modifying a file. \
-         write_file writes the complete file content."
-    );
-    let agents = hi_derola::agents_md();
-    if !agents.is_empty() {
-        system.push_str("\n\n");
-        system.push_str(&agents);
-    }
-    system
+    hi_derola::base_prompt("on the user's machine")
 }
 
 fn diff_json(rows: Vec<hi_derola::diff::Row>) -> Value {
@@ -426,6 +409,7 @@ async fn save(sh: State<'_, Arc<Shared>>, app: AppHandle, cfg: Config) -> Result
     cfg.save().map_err(|e| format!("{e:#}"))?;
     lsp::set_enabled(cfg.lsp.enabled);
     fmt::set_enabled(cfg.formatters.enabled);
+    hi_derola::tools::set_shell(cfg.agent.shell.clone());
     let model = cfg.provider.model.clone();
     let kind = cfg.provider.kind.clone();
     let theme = cfg.ui.theme.clone();
@@ -1138,6 +1122,7 @@ pub fn run() -> Result<()> {
     let (cfg, _) = Config::load_or_default()?;
     lsp::set_enabled(cfg.lsp.enabled);
     fmt::set_enabled(cfg.formatters.enabled);
+    hi_derola::tools::set_shell(cfg.agent.shell.clone());
     let cfg = Arc::new(cfg);
     tauri::Builder::default()
         .setup(move |app| {
