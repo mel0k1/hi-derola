@@ -20,6 +20,13 @@ let CWD = "";
 let filesPath = "";
 let filesParent = null;
 let PLAN = false;
+let CTX = { used: 0, limit: 0 };
+let CHANGES = {};
+let reviewOpen = false;
+let reviewExpanded = new Set();
+let paletteOpen = false;
+let paletteItems = [];
+let paletteIdx = 0;
 
 let streamRaw = null;
 let streamBody = null;
@@ -40,6 +47,8 @@ const ICONS = {
   send: '<path d="M12 19V5"/><path d="M5 12l7-7 7 7"/>',
   undo: '<path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>',
   redo: '<path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 0 0 0 11H13"/>',
+  diff: '<path d="M12 3v6"/><path d="M9 6h6"/><path d="M12 21v-6"/><path d="M9 18h6"/><path d="M5 9.5v5a1.5 1.5 0 0 1 -1.5 1.5"/><path d="M19 14.5v-5A1.5 1.5 0 0 1 20.5 8"/>',
+  command: '<path d="M9 9V6a3 3 0 1 0 -3 3h3zm0 0v6m0-6h6m-6 6H6a3 3 0 1 0 3 3v-3zm6-6h3a3 3 0 1 0 -3-3v3zm0 0v6m0 0h3a3 3 0 1 1 -3 3v-3z"/>',
   trash: '<path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>',
   folder: '<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>',
   file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/>',
@@ -70,6 +79,7 @@ const KEY_ACTIONS = [
   ["undo", "undo file changes"],
   ["redo", "redo file changes"],
   ["toggle_thinking", "toggle thinking"],
+  ["palette", "command palette"],
 ];
 
 const DEFAULT_KEYS = Object.fromEntries(KEY_ACTIONS.map(([k]) => [k, ""]));
@@ -85,6 +95,7 @@ Object.assign(DEFAULT_KEYS, {
   undo: "ctrl+z",
   redo: "ctrl+shift+z",
   toggle_thinking: "ctrl+t",
+  palette: "ctrl+k",
 });
 
 /* theme */
@@ -179,6 +190,13 @@ async function openSession(id) {
   }
   SID = st.id;
   tokens = { in: st.tokens_in || 0, out: st.tokens_out || 0, cost: st.cost || 0 };
+  CTX.used = 0;
+  CHANGES = {};
+  reviewExpanded.clear();
+  for (const c of st.changes || []) {
+    CHANGES[c.path] = { adds: c.adds, dels: c.dels, rows: null };
+  }
+  renderReviewBadge();
   $("chat-col").replaceChildren();
   streamRaw = null;
   streamBody = null;
@@ -255,6 +273,17 @@ function applyStatus() {
     }
     if (tokens.cost > 0) s += (s ? " · " : "") + fmtCost(tokens.cost);
     right.textContent = s;
+  }
+  const pill = $("ctx-pill");
+  if (CTX.limit > 0 && CTX.used > 0) {
+    const pct = Math.min(100, Math.round((CTX.used / CTX.limit) * 100));
+    pill.textContent = pct + "% ctx";
+    pill.title = `context: ${fmtTokens(CTX.used)} of ${fmtTokens(CTX.limit)} tokens · click to /compact`;
+    pill.classList.remove("hidden", "warn", "crit");
+    if (pct >= 92) pill.classList.add("crit");
+    else if (pct >= 80) pill.classList.add("warn");
+  } else {
+    pill.classList.add("hidden");
   }
 }
 
@@ -539,6 +568,262 @@ function closeFiles() {
   $("input").focus();
 }
 
+/* session review */
+
+function trackChanges(ev) {
+  const paths = ev.paths || [];
+  if (!paths.length || !ev.diff || !ev.diff.length) return;
+  let adds = 0;
+  let dels = 0;
+  for (const r of ev.diff) {
+    if (r.tag === 1) adds++;
+    else if (r.tag === 2) dels++;
+  }
+  if (!adds && !dels) return;
+  if (paths.length === 1) {
+    const p = paths[0];
+    const old = CHANGES[p] || { adds: 0, dels: 0, rows: null };
+    CHANGES[p] = { adds: old.adds + adds, dels: old.dels + dels, rows: ev.diff };
+  } else {
+    for (const p of paths) {
+      const old = CHANGES[p] || { adds: 0, dels: 0, rows: null };
+      CHANGES[p] = { adds: old.adds + adds, dels: old.dels + dels, rows: null };
+    }
+    const key = "__patch__" + Date.now() + "_" + Math.random().toString(36).slice(2, 6);
+    CHANGES[key] = { adds, dels, rows: ev.diff, label: `${ev.name}: ${ev.detail}` };
+  }
+  renderReviewBadge();
+  if (reviewOpen) renderReviewList();
+}
+
+function changesTotals() {
+  let adds = 0;
+  let dels = 0;
+  let files = 0;
+  for (const [k, c] of Object.entries(CHANGES)) {
+    if (k.startsWith("__patch__")) continue;
+    files++;
+    adds += c.adds;
+    dels += c.dels;
+  }
+  return { adds, dels, files };
+}
+
+function renderReviewBadge() {
+  const btn = $("btn-review");
+  const badge = $("review-badge");
+  const t = changesTotals();
+  if (!t.files) {
+    btn.classList.add("hidden");
+    badge.classList.add("hidden");
+    return;
+  }
+  btn.classList.remove("hidden");
+  badge.classList.remove("hidden");
+  badge.textContent = t.files;
+  badge.classList.toggle("dirty", t.dels > 0);
+}
+
+function renderReviewList() {
+  const box = $("review-list");
+  box.replaceChildren();
+  const files = Object.entries(CHANGES).filter(([k]) => !k.startsWith("__patch__"));
+  const patches = Object.entries(CHANGES).filter(([k]) => k.startsWith("__patch__"));
+  files.sort((a, b) => b[1].adds + b[1].dels - (a[1].adds + a[1].dels));
+  const t = changesTotals();
+  const pt = { adds: 0, dels: 0 };
+  for (const [, c] of patches) {
+    pt.adds += c.adds;
+    pt.dels += c.dels;
+  }
+  $("review-total").textContent =
+    `${t.files} file${t.files === 1 ? "" : "s"} · +${t.adds} −${t.dels}` +
+    (patches.length ? ` · ${patches.length} multi-file patch${patches.length === 1 ? "" : "es"} (+${pt.adds} −${pt.dels})` : "");
+  if (!files.length && !patches.length) {
+    box.appendChild(el("div", "sess-empty", "no file changes yet"));
+    return;
+  }
+  for (const [path, c] of files) {
+    const item = el("div", "rev-item");
+    const head = el("div", "rev-head");
+    head.innerHTML = `<span class="ic file-ic">${icon("file")}</span>`;
+    const name = el("span", "rev-path");
+    const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+    if (slash > 0) {
+      name.appendChild(el("span", "rev-dir", path.slice(0, slash + 1)));
+    }
+    name.appendChild(el("span", null, slash > 0 ? path.slice(slash + 1) : path));
+    head.appendChild(name);
+    const stat = el("span", "rev-stat");
+    if (c.adds) stat.appendChild(el("span", "adds", "+" + c.adds));
+    if (c.dels) stat.appendChild(el("span", "dels", "−" + c.dels));
+    if (!c.rows) stat.appendChild(el("span", "hint", " (counts only)"));
+    head.appendChild(stat);
+    item.appendChild(head);
+    if (c.rows) {
+      const body = el("div", "rev-body");
+      body.appendChild(buildDiffPre(c.rows));
+      item.appendChild(body);
+      head.classList.add("expandable");
+      head.onclick = () => {
+        if (reviewExpanded.has(path)) reviewExpanded.delete(path);
+        else reviewExpanded.add(path);
+        renderReviewList();
+      };
+      body.classList.toggle("open", reviewExpanded.has(path));
+    }
+    box.appendChild(item);
+  }
+  for (const [key, c] of patches) {
+    const item = el("div", "rev-item");
+    const head = el("div", "rev-head");
+    head.appendChild(el("span", "rev-path", c.label || "patch"));
+    const stat = el("span", "rev-stat");
+    if (c.adds) stat.appendChild(el("span", "adds", "+" + c.adds));
+    if (c.dels) stat.appendChild(el("span", "dels", "−" + c.dels));
+    head.appendChild(stat);
+    item.appendChild(head);
+    const body = el("div", "rev-body");
+    body.appendChild(buildDiffPre(c.rows));
+    item.appendChild(body);
+    if (c.rows) {
+      head.classList.add("expandable");
+      const pkey = key;
+      head.onclick = () => {
+        if (reviewExpanded.has(pkey)) reviewExpanded.delete(pkey);
+        else reviewExpanded.add(pkey);
+        renderReviewList();
+      };
+      body.classList.toggle("open", reviewExpanded.has(key));
+    }
+    box.appendChild(item);
+  }
+}
+
+function buildDiffPre(rows) {
+  const pre = el("pre", "diff");
+  for (const r of rows) {
+    const cls = r.tag === 1 ? "add" : r.tag === 2 ? "del" : "ctx";
+    const sign = r.tag === 1 ? "+ " : r.tag === 2 ? "- " : "  ";
+    pre.appendChild(el("span", cls, sign + r.text));
+    pre.appendChild(document.createTextNode("\n"));
+  }
+  return pre;
+}
+
+function openReview() {
+  reviewOpen = true;
+  renderReviewList();
+  $("review-overlay").classList.remove("hidden");
+}
+
+function closeReview() {
+  reviewOpen = false;
+  $("review-overlay").classList.add("hidden");
+  $("input").focus();
+}
+
+/* command palette */
+
+function paletteBuildItems() {
+  const items = [];
+  const cmds = [
+    ["/help", "show help", "commands help"],
+    ["/new", "new chat", "clear session"],
+    ["/compact", "compact context", "summarize shrink tokens"],
+    ["/plan", "toggle plan mode", "read-only research"],
+    ["/undo", "undo file changes", "revert"],
+    ["/redo", "redo file changes", "reapply"],
+    ["/init", "write AGENTS.md", "init project"],
+    ["/export", "export session to markdown", "save transcript"],
+    ["/models", "list provider models", "fetch"],
+  ];
+  for (const [cmd, label, hint] of cmds) {
+    items.push({ icon: "command", label, hint, run: () => runCmd(cmd) });
+  }
+  items.push({ icon: "sun", label: "toggle theme", hint: "dark / light", run: toggleTheme });
+  items.push({ icon: "sliders", label: "open settings", hint: "provider, hotkeys, mcp, permissions", run: openSettings });
+  items.push({ icon: "diff", label: "review session changes", hint: "changed files and diffs", run: openReview });
+  items.push({ icon: "menu", label: "toggle sidebar", hint: "history panel", run: toggleSidebar });
+  for (const s of SESSIONS.slice(0, 15)) {
+    items.push({
+      icon: "spark",
+      label: s.title || "new chat",
+      hint: `${s.count} msgs · ${fmtRel(s.updated)}`,
+      session: true,
+      run: () => openSession(s.id),
+    });
+  }
+  for (const m of models) {
+    if (m === MODEL) continue;
+    items.push({ icon: "file", label: "model: " + m, hint: "switch model", run: () => runCmd("/model " + m) });
+  }
+  return items;
+}
+
+function paletteFilter(q) {
+  const query = q.trim().toLowerCase();
+  const all = paletteBuildItems();
+  if (!query) return all.slice(0, 30);
+  const scored = [];
+  for (const it of all) {
+    const l = it.label.toLowerCase();
+    const idx = l.indexOf(query);
+    if (idx === 0) scored.push([0, it]);
+    else if (idx > 0) scored.push([1, it]);
+    else if (it.hint && it.hint.toLowerCase().includes(query)) scored.push([2, it]);
+  }
+  scored.sort((a, b) => a[0] - b[0]);
+  return scored.slice(0, 30).map(([, it]) => it);
+}
+
+function renderPalette() {
+  const box = $("palette-list");
+  box.replaceChildren();
+  if (!paletteItems.length) {
+    box.appendChild(el("div", "sess-empty", "nothing matches"));
+    return;
+  }
+  paletteItems.forEach((it, i) => {
+    const row = el("div", "prow" + (i === paletteIdx ? " active" : ""));
+    row.innerHTML = `<span class="ic">${icon(it.icon)}</span>`;
+    row.appendChild(el("span", "prow-label", it.label));
+    if (it.hint) row.appendChild(el("span", "prow-hint", it.hint));
+    row.onmousedown = (e) => {
+      e.preventDefault();
+      paletteIdx = i;
+      runPalette();
+    };
+    box.appendChild(row);
+  });
+  const act = box.children[paletteIdx];
+  if (act) act.scrollIntoView({ block: "nearest" });
+}
+
+function openPalette() {
+  if (waiting || confirmOpen || askOpen || settingsOpen || filesOpen) return;
+  paletteOpen = true;
+  paletteIdx = 0;
+  $("palette-input").value = "";
+  paletteItems = paletteFilter("");
+  renderPalette();
+  $("palette-overlay").classList.remove("hidden");
+  $("palette-input").focus();
+}
+
+function closePalette() {
+  paletteOpen = false;
+  $("palette-overlay").classList.add("hidden");
+  $("input").focus();
+}
+
+function runPalette() {
+  const it = paletteItems[paletteIdx];
+  if (!it) return;
+  closePalette();
+  it.run();
+}
+
 /* events */
 
 async function handleEvent(ev) {
@@ -581,6 +866,7 @@ async function handleEvent(ev) {
       const head = el("div", "thead", `${ev.name} ${ev.detail}`);
       m.appendChild(head);
       addDiff(m, ev.diff);
+      trackChanges(ev);
       break;
     }
     case "confirm": {
@@ -617,6 +903,8 @@ async function handleEvent(ev) {
       tokens.out += ev.output;
       tokens.cached = (tokens.cached || 0) + (ev.cached || 0);
       if (typeof ev.cost === "number") tokens.cost = ev.cost;
+      if (typeof ev.ctx_used === "number") CTX.used = ev.ctx_used;
+      if (typeof ev.ctx_limit === "number" && ev.ctx_limit > 0) CTX.limit = ev.ctx_limit;
       applyStatus();
       break;
     case "attachments":
@@ -629,6 +917,10 @@ async function handleEvent(ev) {
       break;
     case "cleared":
       SID = "";
+      CTX.used = 0;
+      CHANGES = {};
+      reviewExpanded.clear();
+      renderReviewBadge();
       clearChat();
       break;
     case "done": {
@@ -1169,6 +1461,32 @@ $("btn-send").onclick = doSend;
 $("btn-sidebar").onclick = toggleSidebar;
 $("btn-theme").onclick = toggleTheme;
 $("btn-attach").onclick = openFiles;
+$("btn-review").onclick = openReview;
+$("btn-palette").onclick = openPalette;
+$("review-close").onclick = closeReview;
+$("ctx-pill").onclick = () => runCmd("/compact");
+$("palette-input").addEventListener("input", () => {
+  paletteIdx = 0;
+  paletteItems = paletteFilter($("palette-input").value);
+  renderPalette();
+});
+$("palette-input").addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    paletteIdx = Math.min(paletteIdx + 1, paletteItems.length - 1);
+    renderPalette();
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    paletteIdx = Math.max(paletteIdx - 1, 0);
+    renderPalette();
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    runPalette();
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    closePalette();
+  }
+});
 $("files-close").onclick = closeFiles;
 $("files-up").onclick = () => filesParent && browse(filesParent);
 $("files-here").onclick = async () => {
@@ -1327,6 +1645,20 @@ window.addEventListener("keydown", (e) => {
     }
     return;
   }
+  if (reviewOpen) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeReview();
+    }
+    return;
+  }
+  if (paletteOpen) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closePalette();
+    }
+    return;
+  }
   if (mention && e.target === $("input")) {
     if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Tab" || e.key === "Enter" || e.key === "Escape") {
       e.preventDefault();
@@ -1394,6 +1726,9 @@ window.addEventListener("keydown", (e) => {
       const last = boxes[boxes.length - 1];
       last.classList.toggle("open");
     }
+  } else if (hit("palette")) {
+    e.preventDefault();
+    openPalette();
   }
 });
 

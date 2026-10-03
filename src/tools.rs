@@ -340,6 +340,31 @@ pub fn detail(name: &str, args: &str) -> String {
     }
 }
 
+/// file paths a mutation touches; drives the session review panel
+pub fn paths(name: &str, args: &str) -> Vec<String> {
+    let v: Value = serde_json::from_str(args).unwrap_or(Value::Null);
+    match name {
+        "write_file" | "edit" => v["path"]
+            .as_str()
+            .map(|p| vec![p.to_string()])
+            .unwrap_or_default(),
+        "apply_patch" => v["patch"]
+            .as_str()
+            .and_then(|s| crate::patch::parse(s).ok())
+            .map(|ops| {
+                ops.into_iter()
+                    .map(|o| match o {
+                        crate::patch::Op::Add { path, .. }
+                        | crate::patch::Op::Update { path, .. }
+                        | crate::patch::Op::Delete { path } => path,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
 pub fn preview(name: &str, args: &str) -> Vec<crate::diff::Row> {
     let v: Value = serde_json::from_str(args).unwrap_or(Value::Null);
     match name {

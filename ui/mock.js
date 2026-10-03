@@ -158,14 +158,14 @@
     runAbort = false;
     running = true;
     (async () => {
-      emit({ t: "usage", input: 1200, output: 0 });
+      emit({ t: "usage", input: 1200, output: 0, ctx_used: 1200, ctx_limit: 115200 });
       for (const piece of ["Let me check the project layout first.\n", "The entry point is src/main.rs.\n"]) {
         if (runAbort) return;
         emit({ t: "reasoning", s: piece });
         await sleep(150);
       }
       if (runAbort) return;
-      emit({ t: "tool", name: "read_file", detail: "src/main.rs", diff: [] });
+      emit({ t: "tool", name: "read_file", detail: "src/main.rs", diff: [], paths: [] });
       await sleep(200);
       if (runAbort) return;
       emit({ t: "note", s: "src/main.rs (3 lines)" });
@@ -182,13 +182,30 @@
           emit({ t: "note", s: "user denied this action" });
           msgs.push({ role: "tool", content: "user denied this action", tool_call_id: "t1" });
         } else {
-          emit({ t: "tool", name: "bash", detail: "ls -la", diff: [] });
+          emit({ t: "tool", name: "bash", detail: "ls -la", diff: [], paths: [] });
           await sleep(150);
           if (runAbort) return;
           emit({ t: "note", s: "README.md\nCargo.toml\nsrc/\nui/" });
           msgs.push({ role: "assistant", content: "", tool_calls: [{ id: "t1", name: "bash", args: "{\"command\":\"ls -la\"}" }] });
           msgs.push({ role: "tool", content: "README.md\nCargo.toml\nsrc/\nui/", tool_call_id: "t1" });
         }
+      }
+      if (runAbort) return;
+      if (/edit|write|fix /i.test(text)) {
+        if (runAbort) return;
+        emit({
+          t: "tool",
+          name: "edit",
+          detail: "src/main.rs",
+          paths: ["src/main.rs"],
+          diff: [
+            { tag: 0, text: "fn main() {" },
+            { tag: 2, text: "    println!(\"hello\");" },
+            { tag: 1, text: "    println!(\"hello from hi-derola\");" },
+            { tag: 0, text: "}" },
+          ],
+        });
+        await sleep(200);
       }
       if (runAbort) return;
       const answer = [
@@ -205,7 +222,7 @@
         emit({ t: "chunk", s: c });
         await sleep(35);
       }
-      emit({ t: "usage", input: 800, output: 350 });
+      emit({ t: "usage", input: 800, output: 350, ctx_used: 2350, ctx_limit: 115200 });
       msgs.push({ role: "assistant", content: answer });
       s.messages.push(...msgs);
       s.updated = Math.floor(Date.now() / 1000);
@@ -279,7 +296,7 @@
       const s = sessions.find((x) => x.id === id);
       if (!s) throw "no session: " + id;
       sid = id;
-      return { id: s.id, title: s.title, created: s.created, updated: s.updated, transcript: transcript(s) };
+      return { id: s.id, title: s.title, created: s.created, updated: s.updated, transcript: transcript(s), changes: s.changes || [] };
     },
     async new_session() {
       const cur = current();

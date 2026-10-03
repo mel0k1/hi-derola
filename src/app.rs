@@ -236,7 +236,7 @@ impl App {
                 self.flush_stream();
                 self.info(s);
             }
-            ApiEvent::Tool { name, detail, diff } => {
+            ApiEvent::Tool { name, detail, diff, .. } => {
                 self.flush_stream();
                 self.reasoning = None;
                 self.info(format!("tool {name} {detail}"));
@@ -353,6 +353,7 @@ impl App {
             cost: self.cost,
             todos: crate::todo::get(),
             parent: None,
+            changes: Vec::new(),
         };
         if let Err(e) = crate::sessions::save(&st) {
             self.info(format!("session not saved: {e:#}"));

@@ -30,6 +30,8 @@
       <div class="top-actions">
         <button id="btn-plan" class="ghost plan-btn" title="plan mode: read-only research, the agent proposes a plan (ctrl+shift+p)">plan</button>
         <select id="model-select" title="model"></select>
+        <button id="btn-review" class="icon-btn hidden" title="review session changes"><span class="ic" data-icon="diff"></span><span id="review-badge" class="badge hidden"></span></button>
+        <button id="btn-palette" class="icon-btn" title="command palette (ctrl+k)"><span class="ic" data-icon="command"></span></button>
         <button id="btn-undo" class="icon-btn" title="undo file changes (ctrl+z)"><span class="ic" data-icon="undo"></span></button>
         <button id="btn-redo" class="icon-btn" title="redo (ctrl+shift+z)"><span class="ic" data-icon="redo"></span></button>
       </div>
@@ -59,6 +61,7 @@
 
     <div id="statusbar">
       <div id="status-left">hi-derola</div>
+      <button id="ctx-pill" class="hidden" title="context usage - click to compact"></button>
       <div id="status-right"></div>
     </div>
   </div>
@@ -163,6 +166,28 @@
         <button id="s-cancel" class="ghost">cancel</button>
         <button id="s-save" class="accent">save</button>
       </div>
+    </div>
+  </div>
+
+  <div id="review-overlay" class="overlay hidden">
+    <div class="panel review-panel">
+      <div class="review-head">
+        <span><span class="ic" data-icon="diff"></span> session changes</span>
+        <button id="review-close" class="icon-btn"><span class="ic" data-icon="x"></span></button>
+      </div>
+      <div id="review-list"></div>
+      <div class="review-foot">
+        <span id="review-total" class="hint"></span>
+        <span class="hint">diffs are kept for this session only; counts survive reload</span>
+      </div>
+    </div>
+  </div>
+
+  <div id="palette-overlay" class="overlay hidden">
+    <div class="panel palette-panel">
+      <input id="palette-input" placeholder="type a command, session or model..." spellcheck="false" />
+      <div id="palette-list"></div>
+      <div class="palette-foot hint">up/down navigate · enter run · esc close</div>
     </div>
   </div>
 

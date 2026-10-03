@@ -4,7 +4,7 @@ use hi_derola::chat::{Role, Session};
 use hi_derola::config::Config;
 use hi_derola::mcp::{self, McpSlot};
 use hi_derola::provider::{self, ApiEvent, ChatRequest, ConfirmReply, Provider};
-use hi_derola::sessions::{self, SessionMeta, StoredSession};
+use hi_derola::sessions::{self, ChangeRec as SessionChange, SessionMeta, StoredSession};
 use hi_derola::todo::Todo;
 use hi_derola::{fmt, lsp, models, snapshot, tools};
 use serde_json::{json, Value};
@@ -32,6 +32,7 @@ pub struct Shared {
     plan: AtomicBool,
     queue: Arc<Mutex<Vec<String>>>,
     titled: AtomicBool,
+    changes: Mutex<Vec<SessionChange>>,
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
@@ -91,6 +92,7 @@ fn persist(sh: &Shared) {
         cost: *sh.cost.lock().unwrap(),
         todos: sh.todos.lock().unwrap().clone(),
         parent: None,
+        changes: sh.changes.lock().unwrap().clone(),
     };
     drop(ses);
     let _ = sessions::save(&st);
@@ -266,9 +268,39 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                 ApiEvent::Chunk(s) => json!({"t": "chunk", "s": s}),
                 ApiEvent::Reasoning(s) => json!({"t": "reasoning", "s": s}),
                 ApiEvent::Note(s) => json!({"t": "note", "s": s}),
-                ApiEvent::Tool { name, detail, diff } => json!({
-                    "t": "tool", "name": name, "detail": detail, "diff": diff_json(diff),
-                }),
+                ApiEvent::Tool { name, detail, diff, paths } => {
+                    if !paths.is_empty() {
+                        let mut adds = 0u64;
+                        let mut dels = 0u64;
+                        for r in &diff {
+                            match r.tag {
+                                1 => adds += 1,
+                                2 => dels += 1,
+                                _ => {}
+                            }
+                        }
+                        if adds > 0 || dels > 0 {
+                            let mut ch = sh.changes.lock().unwrap();
+                            for p in &paths {
+                                if let Some(rec) = ch.iter_mut().find(|r| &r.path == p) {
+                                    rec.adds += adds;
+                                    rec.dels += dels;
+                                } else {
+                                    ch.push(SessionChange {
+                                        path: p.clone(),
+                                        adds,
+                                        dels,
+                                    });
+                                }
+                            }
+                            persist(&sh);
+                        }
+                    }
+                    json!({
+                        "t": "tool", "name": name, "detail": detail, "diff": diff_json(diff),
+                        "paths": paths,
+                    })
+                }
                 ApiEvent::Confirm { name, args, rx } => {
                     *sh.confirm.lock().unwrap() = Some((rx, name.clone(), args.clone()));
                     confirm_payload(&name, &args)
@@ -284,12 +316,17 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                 }
                 ApiEvent::BgOut { id, chunk } => json!({"t": "bgout", "id": id, "s": chunk}),
                 ApiEvent::Usage { input, output, cached } => {
-                    let model = sh.cfg.lock().unwrap().provider.model.clone();
-                    let disc = if sh.cfg.lock().unwrap().provider.kind == "anthropic" {
-                        0.1
-                    } else {
-                        0.5
+                    let (model, kind, ctx_limit) = {
+                        let cfg = sh.cfg.lock().unwrap();
+                        let limit = if cfg.agent.context_limit > 0 {
+                            cfg.agent.context_limit
+                        } else {
+                            let w = models::lookup(&cfg.provider.model).window;
+                            if w > 0 { w / 10 * 9 } else { 0 }
+                        };
+                        (cfg.provider.model.clone(), cfg.provider.kind.clone(), limit)
                     };
+                    let disc = if kind == "anthropic" { 0.1 } else { 0.5 };
                     let delta = models::cost_cached(&model, input, output, cached, disc);
                     let mut t = sh.tokens.lock().unwrap();
                     t.0 += input;
@@ -299,7 +336,9 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     *c += delta;
                     let total = *c;
                     drop(c);
-                    json!({"t": "usage", "input": input, "output": output, "cached": cached, "cost": total})
+                    let ctx_used = input + output;
+                    json!({"t": "usage", "input": input, "output": output, "cached": cached, "cost": total,
+                           "ctx_used": ctx_used, "ctx_limit": ctx_limit})
                 }
                 ApiEvent::Done { text, messages } => {
                     *sh.inflight.lock().unwrap() = None;
@@ -341,6 +380,7 @@ fn start_new(sh: &Shared, app: &AppHandle) {
     sh.attachments.lock().unwrap().clear();
     sh.allow_all.store(false, Ordering::Relaxed);
     sh.titled.store(false, Ordering::Relaxed);
+    *sh.changes.lock().unwrap() = Vec::new();
     *sh.sid.lock().unwrap() = sessions::new_id();
     *sh.title.lock().unwrap() = String::new();
     *sh.created.lock().unwrap() = 0;
@@ -585,6 +625,7 @@ async fn open_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) ->
     sh.attachments.lock().unwrap().clear();
     sh.confirm.lock().unwrap().take();
     sh.ask.lock().unwrap().take();
+    *sh.changes.lock().unwrap() = st.changes.clone();
     emit_attachments(&sh, &app);
     Ok(json!({
         "id": st.id,
@@ -595,6 +636,7 @@ async fn open_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) ->
         "tokens_out": st.tokens_out,
         "cost": st.cost,
         "transcript": transcript(&st.messages),
+        "changes": st.changes,
     }))
 }
 #[tauri::command]
@@ -606,6 +648,7 @@ async fn delete_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) 
         sh.attachments.lock().unwrap().clear();
         sh.allow_all.store(false, Ordering::Relaxed);
         sh.titled.store(false, Ordering::Relaxed);
+        *sh.changes.lock().unwrap() = Vec::new();
         *sh.sid.lock().unwrap() = sessions::new_id();
         *sh.title.lock().unwrap() = String::new();
         *sh.created.lock().unwrap() = 0;
@@ -1121,6 +1164,7 @@ pub fn run() -> Result<()> {
                 plan: AtomicBool::new(false),
                 queue: Arc::new(Mutex::new(Vec::new())),
                 titled: AtomicBool::new(restore.is_some()),
+                changes: Mutex::new(restore.as_ref().map(|s| s.changes.clone()).unwrap_or_default()),
                 tx: tx.clone(),
             });
             let tx2 = tx.clone();

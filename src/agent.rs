@@ -218,6 +218,7 @@ pub async fn run(
                 name: call.name.clone(),
                 detail: tools::detail(&call.name, &call.args),
                 diff: tools::preview(&call.name, &call.args),
+                paths: tools::paths(&call.name, &call.args),
             })
             .map_err(|_| anyhow!("closed"))?;
             let plan_block = cfg.plan
@@ -888,6 +889,7 @@ fn run_subagent<'a>(
                     cost: 0.0,
                     todos: Vec::new(),
                     parent: cfg.parent_sid.clone(),
+                    changes: Vec::new(),
                 };
                 let _ = crate::sessions::save(&st);
             }

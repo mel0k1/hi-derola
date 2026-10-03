@@ -18,6 +18,13 @@ pub struct SessionMeta {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangeRec {
+    pub path: String,
+    pub adds: u64,
+    pub dels: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredSession {
     pub id: String,
     pub title: String,
@@ -35,6 +42,8 @@ pub struct StoredSession {
     pub todos: Vec<crate::todo::Todo>,
     #[serde(default)]
     pub parent: Option<String>,
+    #[serde(default)]
+    pub changes: Vec<ChangeRec>,
 }
 
 pub fn store_dir() -> PathBuf {
@@ -230,6 +239,7 @@ mod tests {
             cost: 0.0,
             todos: vec![],
             parent: None,
+            changes: vec![],
         };
         save(&st).unwrap();
         let got = load(&st.id).unwrap();
@@ -275,6 +285,7 @@ mod tests {
             cost: 0.0,
             todos: vec![],
             parent: None,
+            changes: vec![],
         };
         save(&a).unwrap();
         a.id = "s-2-test".into();
