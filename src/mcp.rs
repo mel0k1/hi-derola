@@ -39,6 +39,7 @@ struct McpServer {
     name: String,
     transport: Transport,
     tools: Vec<McpTool>,
+    oauth: Option<crate::config::McpOAuthCfg>,
 }
 
 impl Drop for McpServer {
@@ -122,6 +123,7 @@ impl McpServer {
                     headers: cfg.headers.clone(),
                     next_id: 0,
                 },
+                oauth: cfg.oauth_cfg(),
                 tools: Vec::new(),
             }
         } else {
@@ -147,6 +149,7 @@ impl McpServer {
                     reader: tokio::io::BufReader::new(stdout),
                     next_id: 0,
                 },
+                oauth: None,
                 tools: Vec::new(),
             }
         };
@@ -196,21 +199,49 @@ impl McpServer {
                 let id = *next_id;
                 let body =
                     json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-                let mut req = http
-                    .post(url.as_str())
-                    .header("Content-Type", "application/json")
-                    .header("Accept", "application/json, text/event-stream");
-                if let Some(sid) = session.as_ref() {
-                    req = req.header("mcp-session-id", sid);
+                let mut resp = None;
+                for attempt in 0..2 {
+                    let token = crate::mcpauth::bearer(
+                        &self.name,
+                        url,
+                        self.oauth.as_ref(),
+                        http,
+                        attempt > 0,
+                    )
+                    .await?;
+                    let mut req = http
+                        .post(url.as_str())
+                        .header("Content-Type", "application/json")
+                        .header("Accept", "application/json, text/event-stream");
+                    if let Some(t) = &token {
+                        req = req.header("Authorization", format!("Bearer {t}"));
+                    }
+                    if let Some(sid) = session.as_ref() {
+                        req = req.header("mcp-session-id", sid);
+                    }
+                    for (k, v) in headers.iter() {
+                        req = req.header(k.as_str(), v.as_str());
+                    }
+                    let fut = req.body(body.to_string()).send();
+                    let r = match tokio::time::timeout(timeout, fut).await {
+                        Err(_) => bail!("mcp {}: {method} timeout", self.name),
+                        Ok(r) => r?,
+                    };
+                    if r.status().as_u16() == 401 && attempt == 0 {
+                        continue;
+                    }
+                    if r.status().as_u16() == 401 {
+                        let hint = if self.oauth.is_some() {
+                            format!(" — run /mcpauth {}", self.name)
+                        } else {
+                            String::new()
+                        };
+                        bail!("mcp {}: 401 unauthorized{hint}", self.name);
+                    }
+                    resp = Some(r);
+                    break;
                 }
-                for (k, v) in headers.iter() {
-                    req = req.header(k.as_str(), v.as_str());
-                }
-                let fut = req.body(body.to_string()).send();
-                let resp = match tokio::time::timeout(timeout, fut).await {
-                    Err(_) => bail!("mcp {}: {method} timeout", self.name),
-                    Ok(r) => r?,
-                };
+                let resp = resp.context("mcp: no response")?;
                 let status = resp.status();
                 if !status.is_success() {
                     let text = resp.text().await.unwrap_or_default();
@@ -260,10 +291,17 @@ impl McpServer {
             }
             Transport::Http { url, http, session, headers, .. } => {
                 let body = json!({"jsonrpc": "2.0", "method": method});
+                let token = crate::mcpauth::bearer(&self.name, url, self.oauth.as_ref(), http, false)
+                    .await
+                    .ok()
+                    .flatten();
                 let mut req = http
                     .post(url.as_str())
                     .header("Content-Type", "application/json")
                     .header("Accept", "application/json, text/event-stream");
+                if let Some(t) = &token {
+                    req = req.header("Authorization", format!("Bearer {t}"));
+                }
                 if let Some(sid) = session.as_ref() {
                     req = req.header("mcp-session-id", sid);
                 }
@@ -307,7 +345,36 @@ pub async fn connect_all(cfgs: &[McpConfig]) -> (Option<std::sync::Arc<McpClient
     (client, logs)
 }
 
+pub async fn reconnect_one(slot: &McpSlot, cfgs: &[McpConfig], name: &str) -> Vec<String> {
+    let Some(cfg) = cfgs.iter().find(|c| c.name == name) else {
+        return vec![format!("mcp {name}: not in config")];
+    };
+    let existing = slot.lock().unwrap().clone();
+    if let Some(client) = existing {
+        let mut logs = Vec::new();
+        match tokio::time::timeout(CONNECT_TIMEOUT, client.replace(cfg)).await {
+            Ok(Ok(n)) => logs.push(format!("mcp {name}: connected ({n} tools)")),
+            Ok(Err(e)) => logs.push(format!("mcp {name}: {e:#}")),
+            Err(_) => logs.push(format!("mcp {name}: connect timeout")),
+        }
+        logs
+    } else {
+        let (client, logs) = connect_all(cfgs).await;
+        *slot.lock().unwrap() = client;
+        logs
+    }
+}
+
 impl McpClient {
+    async fn replace(&self, cfg: &McpConfig) -> Result<usize> {
+        let mut servers = self.servers.lock().await;
+        servers.retain(|s| s.name != cfg.name);
+        let s = McpServer::connect(cfg).await?;
+        let n = s.tools.len();
+        servers.push(s);
+        Ok(n)
+    }
+
     pub async fn specs(&self) -> Vec<ToolSpec> {
         let servers = self.servers.lock().await;
         let mut out = Vec::new();

@@ -13,6 +13,7 @@ pub mod lsp;
 pub mod md;
 pub mod models;
 pub mod mcp;
+pub mod mcpauth;
 pub mod patch;
 pub mod perm;
 pub mod provider;

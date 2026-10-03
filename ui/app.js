@@ -1321,12 +1321,39 @@ function effectiveKeys(overrides) {
 function fillMcpList() {
   const box = $("s-mcp");
   const list = (CFG && CFG.mcp) || [];
-  box.textContent = list.length
-    ? list
-        .map((m) => `${m.name}: ${m.type === "remote" || m.url ? "remote " + (m.url || "") : (m.command || "") + " " + (m.args || []).join(" ")}`)
-        .join("\n")
-    : "no servers configured (config.toml [mcp])";
-  box.style.whiteSpace = "pre-wrap";
+  if (!list.length) {
+    box.textContent = "no servers configured (config.toml [[mcp]])";
+    box.style.whiteSpace = "pre-wrap";
+    return;
+  }
+  box.replaceChildren();
+  for (const m of list) {
+    const row = el("div", "mcprow");
+    const remote = m.type === "remote" || m.url;
+    row.append(el("span", "", {
+      text: `${m.name}: ${remote ? "remote " + (m.url || "") : (m.command || "") + " " + (m.args || []).join(" ")}`
+    }));
+    if (remote) {
+      const btn = el("button", "ghost", { text: "auth" });
+      btn.style.cssText = "margin-left:8px;padding:0 8px;font-size:11px";
+      btn.onclick = async () => {
+        btn.disabled = true;
+        btn.textContent = "...";
+        try {
+          const logs = await invoke("mcp_auth", { name: m.name });
+          for (const l of logs) note(l);
+        } catch (e) {
+          note(String(e));
+        } finally {
+          btn.disabled = false;
+          btn.textContent = "auth";
+        }
+      };
+      row.append(btn);
+    }
+    box.append(row);
+  }
+  box.style.whiteSpace = "";
 }
 
 function fillPermList() {

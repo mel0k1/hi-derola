@@ -38,6 +38,11 @@ stream = true
 # type = "remote"
 # url = "https://example.com/mcp"
 # headers = { Authorization = "Bearer ..." }
+# oauth: browser authorization (PKCE), tokens cached in the data dir
+# oauth = true — or a table to pin client_id/client_secret/scope/redirect_uri
+# [mcp.oauth]
+# client_id = "hi-derola"
+# scope = "read write"
 
 # gui hotkeys, combos: enter, escape, tab, ctrl+x, shift+enter, alt+f, comma...
 # set to "none" to disable, unknown keys fall back to defaults

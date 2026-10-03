@@ -175,6 +175,25 @@ fn default_true() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct McpOAuthCfg {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_uri: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum McpOAuthOpt {
+    On(McpOAuthCfg),
+    Off(bool),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpConfig {
     pub name: String,
@@ -190,6 +209,18 @@ pub struct McpConfig {
     pub url: Option<String>,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+    #[serde(default)]
+    pub oauth: Option<McpOAuthOpt>,
+}
+
+impl McpConfig {
+    pub fn oauth_cfg(&self) -> Option<McpOAuthCfg> {
+        match &self.oauth {
+            Some(McpOAuthOpt::On(c)) => Some(c.clone()),
+            Some(McpOAuthOpt::Off(true)) => Some(McpOAuthCfg::default()),
+            _ => None,
+        }
+    }
 }
 
 pub fn config_path() -> PathBuf {
@@ -248,6 +279,29 @@ mod tests {
         assert!(!back.agent.compaction.prune);
         assert_eq!(back.agent.compaction.prune_protect, 10_000);
         assert_eq!(back.agent.compaction.prune_min, 5_000);
+    }
+
+    #[test]
+    fn mcp_oauth_config_forms() {
+        let raw = format!(
+            "{MINIMAL}[[mcp]]\nname = \"a\"\ncommand = \"x\"\n\n[[mcp]]\nname = \"b\"\ntype = \"remote\"\nurl = \"https://h/mcp\"\noauth = false\n\n[[mcp]]\nname = \"c\"\ntype = \"remote\"\nurl = \"https://h2/mcp\"\n\n[mcp.oauth]\nclient_id = \"cid\"\nscope = \"read write\"\n"
+        );
+        let cfg: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(cfg.mcp.len(), 3);
+        assert!(cfg.mcp[0].oauth_cfg().is_none(), "stdio without oauth");
+        assert!(
+            cfg.mcp[1].oauth_cfg().is_none(),
+            "oauth = false disables the flow"
+        );
+        let c = cfg.mcp[2].oauth_cfg().expect("table enables oauth");
+        assert_eq!(c.client_id.as_deref(), Some("cid"));
+        assert_eq!(c.scope.as_deref(), Some("read write"));
+        assert_eq!(c.client_secret, None);
+        // oauth = true -> defaults, round-trip keeps the shape
+        let raw2 = format!("{MINIMAL}[[mcp]]\nname = \"b\"\ntype = \"remote\"\nurl = \"u\"\noauth = true\n");
+        let cfg2: Config = toml::from_str(&raw2).unwrap();
+        assert!(cfg2.mcp[0].oauth_cfg().is_some());
+        let _ = toml::to_string_pretty(&cfg2).unwrap();
     }
 }
 

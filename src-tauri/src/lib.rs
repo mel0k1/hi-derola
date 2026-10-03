@@ -3,6 +3,7 @@ use hi_derola::agent;
 use hi_derola::chat::{Role, Session};
 use hi_derola::config::Config;
 use hi_derola::mcp::{self, McpSlot};
+use hi_derola::mcpauth;
 use hi_derola::provider::{self, ApiEvent, ChatRequest, ConfirmReply, Provider};
 use hi_derola::sessions::{self, ChangeRec as SessionChange, SessionMeta, StoredSession};
 use hi_derola::todo::Todo;
@@ -538,6 +539,17 @@ async fn mcp_reconnect(sh: State<'_, Arc<Shared>>) -> Result<Vec<String>, String
     let cfgs = sh.cfg.lock().unwrap().mcp.clone();
     let (client, logs) = mcp::connect_all(&cfgs).await;
     *sh.mcp.lock().unwrap() = client;
+    Ok(logs)
+}
+
+#[tauri::command]
+async fn mcp_auth(sh: State<'_, Arc<Shared>>, name: String) -> Result<Vec<String>, String> {
+    let cfgs = sh.cfg.lock().unwrap().mcp.clone();
+    let mut logs = vec![match mcpauth::authorize_flow(&name, &cfgs).await {
+        Ok(m) => m,
+        Err(e) => return Err(format!("{e:#}")),
+    }];
+    logs.extend(mcp::reconnect_one(&sh.mcp, &cfgs, &name).await);
     Ok(logs)
 }
 
@@ -1200,7 +1212,8 @@ pub fn run() -> Result<()> {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            init, save, send, confirm, answer, allow_all, stop, list_models, mcp_reconnect, undo,
+            init, save, send, confirm, answer, allow_all, stop, list_models, mcp_reconnect,
+            mcp_auth, undo,
             redo, list_sessions, new_session, open_session, delete_session, list_dir, attach_path,
             detach, set_theme, list_project_files, set_plan, task_kill, list_agents
         ])
