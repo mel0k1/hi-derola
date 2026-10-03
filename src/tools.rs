@@ -8,6 +8,9 @@ use crate::provider::ToolSpec;
 const MAX_LIST: usize = 500;
 const MAX_CAPTURE: usize = 256 * 1024;
 const READ_LIMIT: usize = 2000;
+/// how long a timed-out process tree may finish dying after SIGTERM
+/// (escalated to SIGKILL) before the shell result is returned
+const KILL_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 pub fn budget(out: String, max: usize) -> String {
     if max == 0 || out.len() <= max {
@@ -114,7 +117,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "bash".into(),
-            description: "Run a shell command (sh on unix, cmd on Windows) and return stdout/stderr combined. Long output keeps only the tail. Exit code is added on failure. A foreground timeout kills the whole process tree (process group on unix, job object on Windows) and returns 'command timed out (Ns)'. Set background=true for dev servers and long-running builds: the tool returns a task id immediately and the output arrives as a new message when the command finishes; do not poll task_status for completion.".into(),
+            description: "Run a shell command (sh on unix, cmd on Windows) and return stdout/stderr combined. Long output keeps only the tail. Exit code is added on failure. A foreground timeout asks the tree to exit (SIGTERM on unix), then kills the whole tree (process group on unix, job object on Windows) and returns 'command timed out (Ns)'. Set background=true for dev servers and long-running builds: the tool returns a task id immediately and the output arrives as a new message when the command finishes; do not poll task_status for completion.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -619,10 +622,19 @@ pub async fn bash_run(cmd: &str, workdir: Option<&str>, timeout: Option<u64>) ->
         {
             Err(_) => {
                 // kill the direct child (kill_on_drop fires when the dropped
-                // future unwinds) plus everything it spawned
+                // future unwinds) plus everything it spawned: SIGTERM first
+                // so the tree can clean up, SIGKILL after a short grace
                 #[cfg(unix)]
                 if let Some(pid) = pgid {
-                    unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
+                    let pgid = pid as libc::pid_t;
+                    unsafe { libc::killpg(pgid, libc::SIGTERM) };
+                    let deadline = std::time::Instant::now() + KILL_GRACE;
+                    while std::time::Instant::now() < deadline
+                        && unsafe { libc::killpg(pgid, 0) } == 0
+                    {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    unsafe { libc::killpg(pgid, libc::SIGKILL) };
                 }
                 #[cfg(windows)]
                 if let Some(j) = &job {
@@ -1244,6 +1256,24 @@ mod tests {
         );
         std::thread::sleep(std::time::Duration::from_secs(2));
         assert!(!marker.exists(), "grandchild survived the timeout kill");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_timeout_escalates_to_sigkill() {
+        let dir = std::env::temp_dir().join(format!("hiderola-escalate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("alive");
+        // the shell ignores SIGTERM, so only the SIGKILL escalation can stop
+        // it: without the escalation the marker appears at t=2.3s, while the
+        // check happens at t~3.1s
+        let cmd = format!("trap '' TERM; sleep 0.3 && sleep 2 && touch {}", marker.display());
+        let out = bash_run(&cmd, None, Some(1)).await.unwrap();
+        assert!(out.contains("timed out"), "{out}");
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        assert!(!marker.exists(), "TERM-immune shell survived the timeout");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
