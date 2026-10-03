@@ -52,7 +52,15 @@ impl PermCfg {
             if key == "read_file" && env_protected(&subject) {
                 return Perm::Ask;
             }
-            if external_dir(&subject).is_some() {
+            // our own spilled tool outputs are always readable: they live
+            // outside the project by design and exist to be read back
+            if key == "read_file"
+                && crate::tools::truncation_dir()
+                    .map(|d| crate::tools::path_in_dir(&d, &subject))
+                    .unwrap_or(false)
+            {
+                // fall through to the configured/default permission
+            } else if external_dir(&subject).is_some() {
                 return Perm::Ask;
             }
         }
@@ -518,6 +526,49 @@ mod tests {
         assert_eq!(allowed_edit.check("edit", r#"{"path":"src/lib.rs"}"#), Perm::Allow);
         // relative reads stay internal
         assert_eq!(cfg.check("list_files", r#"{"path":"."}"#), Perm::Allow);
+    }
+
+    #[test]
+    fn truncation_dir_reads_are_internal() {
+        let tmp = std::env::temp_dir().join("hi-derola-spill-perm");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        crate::tools::set_truncation_dir(Some(tmp.clone()));
+        let big = "z".repeat(60_000);
+        let res = crate::tools::spill_into(&tmp, big, "bash", 4096);
+        let path = res
+            .lines()
+            .find(|l| l.contains("full output saved to "))
+            .and_then(|l| l.split("saved to ").nth(1))
+            .and_then(|p| p.split(" — ").next())
+            .unwrap()
+            .trim()
+            .to_string();
+        let cfg = PermCfg::default();
+        // reading our own spilled output needs no approval, editing it does
+        assert_eq!(
+            cfg.check("read_file", &format!(r#"{{"path":"{path}"}}"#)),
+            Perm::Allow
+        );
+        assert_eq!(
+            cfg.check("edit", &format!(r#"{{"path":"{path}"}}"#)),
+            Perm::Ask
+        );
+        // a deny rule from the user still wins
+        let deny = PermCfg {
+            rules: vec![PermRule {
+                tool: "read_file".into(),
+                pattern: Some("*".into()),
+                permission: "deny".into(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            deny.check("read_file", &format!(r#"{{"path":"{path}"}}"#)),
+            Perm::Deny
+        );
+        crate::tools::set_truncation_dir(None);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

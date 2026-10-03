@@ -1,6 +1,6 @@
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use crate::files::{self, WriteBlock};
 use crate::mcp::McpClient;
@@ -27,6 +27,115 @@ fn tail(s: &str, max: usize) -> String {
     }
     let dropped: usize = s[..start].chars().count();
     format!("... ({} chars truncated from the head)\n{}", dropped, &s[start..])
+}
+
+/// tool outputs at or above this many bytes are also saved to a file so the
+/// model can read back whatever the inline budget cut away
+pub const SPILL_MIN: usize = 50_000;
+/// spilled files older than this are deleted opportunistically on every spill
+const SPILL_RETENTION_SECS: u64 = 7 * 24 * 3600;
+
+static TRUNCATION_OVERRIDE: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
+
+/// tests point the spill store at a temp directory; None clears the override
+pub fn set_truncation_dir(dir: Option<std::path::PathBuf>) {
+    *TRUNCATION_OVERRIDE.lock().unwrap() = dir;
+}
+
+/// where spilled tool outputs live: <data>/hi-derola/truncated
+pub fn truncation_dir() -> Option<std::path::PathBuf> {
+    if let Some(d) = TRUNCATION_OVERRIDE.lock().unwrap().clone() {
+        return Some(d);
+    }
+    dirs::data_dir().map(|d| d.join("hi-derola").join("truncated"))
+}
+
+/// same budgeting as budget(), but oversized outputs additionally get saved
+/// verbatim to the truncation directory and the result carries the path, so
+/// nothing is truly lost to the inline cap; max == 0 (unlimited) skips spilling
+pub fn spill(out: String, tool: &str, max: usize) -> String {
+    match truncation_dir() {
+        Some(dir) => spill_into(&dir, out, tool, max),
+        None => budget(out, max),
+    }
+}
+
+pub fn spill_into(dir: &std::path::Path, out: String, tool: &str, max: usize) -> String {
+    if out.len() < SPILL_MIN || max == 0 {
+        return budget(out, max);
+    }
+    let saved = save_spill(dir, tool, &out);
+    let kept = budget(out, max);
+    match saved {
+        Ok(path) => format!(
+            "{kept}\n\n[full output saved to {path} — read it with read_file if you need the part cut off here]"
+        ),
+        Err(_) => kept,
+    }
+}
+
+fn save_spill(dir: &std::path::Path, tool: &str, text: &str) -> std::io::Result<String> {
+    std::fs::create_dir_all(dir)?;
+    spill_cleanup(dir);
+    let name: String = tool
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    for i in 0u32..1000 {
+        let suffix = if i == 0 { String::new() } else { format!("-{i}") };
+        let file = dir.join(format!("{name}-{stamp}{suffix}.txt"));
+        if file.exists() {
+            continue;
+        }
+        std::fs::write(&file, text)?;
+        return Ok(file.display().to_string());
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "spill: no free file name",
+    ))
+}
+
+fn spill_cleanup(dir: &std::path::Path) {
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(SPILL_RETENTION_SECS));
+    let Some(cutoff) = cutoff else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|t| t < cutoff)
+            .unwrap_or(false);
+        if old {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// true when `path` (an existing file) resolves inside `base`; used to let the
+/// model read our own spilled outputs without an external-directory approval
+pub fn path_in_dir(base: &std::path::Path, path: &str) -> bool {
+    let Ok(base) = std::fs::canonicalize(base) else {
+        return false;
+    };
+    let p = std::path::Path::new(path.trim());
+    let probe = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(p),
+            Err(_) => return false,
+        }
+    };
+    match std::fs::canonicalize(&probe) {
+        Ok(c) => c.starts_with(&base),
+        Err(_) => false,
+    }
 }
 
 pub fn specs() -> Vec<ToolSpec> {
@@ -1269,6 +1378,88 @@ mod tests {
         assert_eq!(budget("short".into(), 0), "short");
         let uni = "ё".repeat(50);
         assert!(budget(uni, 10).contains("ёё"));
+    }
+
+    #[test]
+    fn spill_under_threshold_is_untouched() {
+        let tmp = std::env::temp_dir().join("hi-derola-spill-under");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let out = "x".repeat(SPILL_MIN - 1);
+        let res = spill_into(&tmp, out.clone(), "bash", 4096);
+        assert_eq!(res, budget(out, 4096));
+        assert!(!tmp.exists() || std::fs::read_dir(&tmp).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn spill_over_threshold_saves_full_output() {
+        let tmp = std::env::temp_dir().join("hi-derola-spill-over");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let mut out = "HEAD_MARKER\n".to_string();
+        out.push_str(&"x".repeat(SPILL_MIN + 100));
+        out.push_str("TAIL_MARKER");
+        let res = spill_into(&tmp, out.clone(), "bash", 4096);
+        assert!(res.contains("full output saved to "), "{res}");
+        assert!(res.contains("TAIL_MARKER"), "budgeted tail keeps the end");
+        assert!(res.ends_with("cut off here]"), "the path hint closes the reply");
+        // exactly one spill file and it holds the verbatim output
+        let mut entries: Vec<_> = std::fs::read_dir(&tmp)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        assert_eq!(entries.len(), 1, "exactly one spill file");
+        let file = entries.pop().unwrap();
+        let saved = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(saved, out, "spill file must hold the full output");
+        assert!(saved.starts_with("HEAD_MARKER\n"));
+        assert!(file.file_name().unwrap().to_string_lossy().starts_with("bash-"));
+    }
+
+    #[test]
+    fn spill_cleanup_deletes_old_files() {
+        let tmp = std::env::temp_dir().join("hi-derola-spill-retention");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let old = tmp.join("bash-old.txt");
+        std::fs::write(&old, "stale").unwrap();
+        let f = std::fs::OpenOptions::new().write(true).open(&old).unwrap();
+        let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 24 * 3600);
+        f.set_times(std::fs::FileTimes::new().set_modified(stale)).unwrap();
+        drop(f);
+        let fresh = tmp.join("bash-fresh.txt");
+        std::fs::write(&fresh, "keep me").unwrap();
+        let out = "y".repeat(SPILL_MIN + 10);
+        spill_into(&tmp, out, "bash", 4096);
+        assert!(!old.exists(), "stale spill file must be removed");
+        assert!(fresh.exists(), "fresh files survive");
+        assert_eq!(std::fs::read_dir(&tmp).unwrap().flatten().count(), 2);
+    }
+
+    #[test]
+    fn spill_zero_budget_skips_file() {
+        let tmp = std::env::temp_dir().join("hi-derola-spill-unlimited");
+        let _ = std::fs::remove_dir_all(&tmp);
+        let out = "z".repeat(SPILL_MIN + 10);
+        let res = spill_into(&tmp, out, "bash", 0);
+        assert_eq!(res.len(), SPILL_MIN + 10, "unlimited budget returns everything");
+        assert!(!tmp.exists() || std::fs::read_dir(&tmp).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn path_in_dir_semantics() {
+        let tmp = std::env::temp_dir().join("hi-derola-spill-pid");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let inside = tmp.join("bash-1.txt");
+        std::fs::write(&inside, "x").unwrap();
+        assert!(path_in_dir(&tmp, &inside.display().to_string()));
+        assert!(path_in_dir(&tmp, &format!("{}/", tmp.display())));
+        let outside = std::env::temp_dir().join("hi-derola-spill-pid-outside.txt");
+        let _ = std::fs::remove_file(&outside);
+        std::fs::write(&outside, "x").unwrap();
+        assert!(!path_in_dir(&tmp, &outside.display().to_string()));
+        assert!(!path_in_dir(&tmp, "src/main.rs"), "relative non-existent paths are not in");
+        assert!(!path_in_dir(&std::env::temp_dir().join("hi-derola-no-such-base"), &inside.display().to_string()));
     }
 
     #[test]

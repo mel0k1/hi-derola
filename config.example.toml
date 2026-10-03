@@ -83,6 +83,11 @@ subagent_depth = 1
 # buffer = 0
 # tokens of the most recent messages kept verbatim when compacting
 # keep = 15000
+# prune stale tool outputs between turns (big one-shot outputs become short
+# placeholders, the newest ~40k tokens of tool output stay verbatim)
+# prune = true
+# prune_protect = 40000
+# prune_min = 20000
 
 # language server integration: diagnostics fed back after write_file/edit,
 # plus the lsp tool for code navigation (hover, definition, references,

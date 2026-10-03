@@ -44,6 +44,8 @@ A high-performance, lightweight chat and autonomous coding assistant written in 
 - mcp servers over stdio and streamable http: tools exposed as `mcp__<name>__<tool>`
 - agent loop: token-budgeted context compaction (template summary, keeps the last ~15k tokens verbatim, tunable via `[agent.compaction]`, on overflow too), output `max_tokens` shrinks to the remaining window, per-tool output budget, cached-tokens-aware cost, graceful wrap-up at the round limit that keeps the cache prefix; a reply cut off by the output limit continues automatically ("continue from where you left off", up to 3 times — truncated tool calls are dropped instead of corrupting the transcript)
 - repeated compaction merges instead of starting over: a fresh `/compact` (or an auto one) passes the previous summary as `<prior-summary>` and folds it into the new one — older decisions and constraints survive every compaction cycle, and the old summary is replaced rather than accumulating
+- tool-output spill: a result over 50 KB is saved verbatim to `<data>/hi-derola/truncated/` (kept for 7 days) and the inline reply carries the path, so the budgeted-away part stays reachable with `read_file`; reading these files is exempt from the external-directory approval, writing them is not
+- stale tool-output pruning between turns (`[agent.compaction] prune`): walking backwards from the newest exchange, tool outputs beyond the protected ~40k-token window are replaced with short `[pruned tool output (~N tokens)]` placeholders — big one-shot logs and dumps stop riding along in the context forever; pruning only commits when it frees at least ~20k tokens, `skill` outputs stay verbatim, the current and previous exchange are never touched
 - markdown rendering in answers, token usage counters, automatic retry with backoff on 429/5xx and empty replies
 
 ### gui extras
@@ -157,6 +159,9 @@ subagent_depth = 1                               # how deep subagents may spawn 
 auto = true                                      # proactive compaction near the window; overflow recovery and /compact stay on anyway
 buffer = 0                                       # headroom in tokens before compaction, 0 = a quarter of the window (~75% trigger)
 keep = 15000                                     # tokens of recent messages kept verbatim when compacting
+prune = true                                     # prune stale tool outputs between turns
+prune_protect = 40000                            # recent tool-output tokens kept verbatim
+prune_min = 20000                                # prune only when it frees at least this many tokens
 
 # tool permissions: allow | ask | deny, first matching rule wins
 # unset tools default to: write_file/edit/bash/mcp ask, read-only (incl. webfetch/subagent/todowrite) allow

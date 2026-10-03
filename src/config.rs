@@ -81,6 +81,15 @@ pub struct CompactionCfg {
     /// tokens of the most recent messages kept verbatim when compacting
     #[serde(default = "default_keep_tokens")]
     pub keep: usize,
+    /// prune stale tool outputs between turns to keep the context lean
+    #[serde(default = "default_true")]
+    pub prune: bool,
+    /// recent tool-output tokens protected from pruning
+    #[serde(default = "default_prune_protect")]
+    pub prune_protect: usize,
+    /// pruning applies only when it frees at least this many tokens
+    #[serde(default = "default_prune_min")]
+    pub prune_min: usize,
 }
 
 impl Default for CompactionCfg {
@@ -89,12 +98,23 @@ impl Default for CompactionCfg {
             auto: true,
             buffer: 0,
             keep: default_keep_tokens(),
+            prune: true,
+            prune_protect: default_prune_protect(),
+            prune_min: default_prune_min(),
         }
     }
 }
 
 fn default_keep_tokens() -> usize {
     15_000
+}
+
+fn default_prune_protect() -> usize {
+    40_000
+}
+
+fn default_prune_min() -> usize {
+    20_000
 }
 
 fn default_subagent_depth() -> usize {
@@ -193,6 +213,9 @@ mod tests {
         assert!(c.auto);
         assert_eq!(c.buffer, 0);
         assert_eq!(c.keep, 15_000);
+        assert!(c.prune);
+        assert_eq!(c.prune_protect, 40_000);
+        assert_eq!(c.prune_min, 20_000);
     }
 
     #[test]
@@ -207,18 +230,24 @@ mod tests {
     #[test]
     fn compaction_overrides_and_partial_section() {
         let raw = format!(
-            "{MINIMAL}[agent.compaction]\nauto = false\nbuffer = 20000\n"
+            "{MINIMAL}[agent.compaction]\nauto = false\nbuffer = 20000\nprune = false\nprune_protect = 10000\nprune_min = 5000\n"
         );
         let cfg: Config = toml::from_str(&raw).unwrap();
         let c = &cfg.agent.compaction;
         assert!(!c.auto);
         assert_eq!(c.buffer, 20_000);
         assert_eq!(c.keep, 15_000, "unset keep keeps the default");
+        assert!(!c.prune);
+        assert_eq!(c.prune_protect, 10_000);
+        assert_eq!(c.prune_min, 5_000);
         // round-trips through save/load without losing the section
         let raw = toml::to_string_pretty(&cfg).unwrap();
         let back: Config = toml::from_str(&raw).unwrap();
         assert!(!back.agent.compaction.auto);
         assert_eq!(back.agent.compaction.buffer, 20_000);
+        assert!(!back.agent.compaction.prune);
+        assert_eq!(back.agent.compaction.prune_protect, 10_000);
+        assert_eq!(back.agent.compaction.prune_min, 5_000);
     }
 }
 

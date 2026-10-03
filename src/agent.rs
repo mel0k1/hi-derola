@@ -116,6 +116,79 @@ fn clamp_output(configured: Option<u32>, ctx_limit: u64, prompt_tokens: u64) -> 
     Some(room.min(u32::MAX as u64) as u32)
 }
 
+/// tool outputs older than the protected window are replaced with short
+/// placeholders between turns, so big one-shot outputs (logs, dumps) do not
+/// ride along in the context forever; mirrors opencode 2.0 compaction.prune
+const PRUNE_PROTECT_TOKENS: usize = 40_000;
+/// outputs of these tools carry instructions the model may still need verbatim
+const PRUNE_PROTECTED_TOOLS: [&str; 1] = ["skill"];
+const PRUNE_MARKER: &str = "[pruned tool output";
+
+fn prune_tool_outputs(msgs: &mut [Message], cfg: &CompactionCfg) -> bool {
+    if !cfg.prune {
+        return false;
+    }
+    // only content older than the second-to-last user turn is fair game:
+    // the current and the previous exchange always stay verbatim
+    let mut turns = 0;
+    let mut start = None;
+    for (i, m) in msgs.iter().enumerate().rev() {
+        if m.role == Role::User {
+            turns += 1;
+            if turns == 2 {
+                start = Some(i);
+                break;
+            }
+        }
+    }
+    let Some(start) = start else {
+        return false;
+    };
+    // tool names live on the assistant message that requested the call
+    let mut names = std::collections::HashMap::new();
+    for m in msgs.iter() {
+        for c in &m.tool_calls {
+            names.insert(c.id.clone(), c.name.clone());
+        }
+    }
+    let protect = if cfg.prune_protect > 0 {
+        cfg.prune_protect
+    } else {
+        PRUNE_PROTECT_TOKENS
+    };
+    let mut total = 0usize;
+    let mut pruned = 0usize;
+    let mut targets: Vec<(usize, usize)> = Vec::new();
+    for i in (0..start).rev() {
+        let m = &msgs[i];
+        if m.role != Role::Tool {
+            continue;
+        }
+        // an earlier pass already pruned beyond this point — stop the walk
+        if m.content.starts_with(PRUNE_MARKER) {
+            break;
+        }
+        let name = names.get(&m.tool_call_id).map(String::as_str).unwrap_or("");
+        if PRUNE_PROTECTED_TOOLS.contains(&name) {
+            continue;
+        }
+        let est = (m.content.len() + 3) / 4;
+        total += est;
+        if total > protect {
+            pruned += est;
+            targets.push((i, est));
+        }
+    }
+    if pruned <= cfg.prune_min {
+        return false;
+    }
+    for (i, est) in targets {
+        msgs[i].content =
+            format!("{PRUNE_MARKER} (~{est} tokens) — re-run the tool if you need the details]");
+    }
+    true
+}
+
 pub async fn run(
     provider: Arc<dyn Provider>,
     mut req: ChatRequest,
@@ -128,6 +201,9 @@ pub async fn run(
     let ctx_limit = effective_limit(&cfg, &req.model);
     let configured_max = req.max_tokens;
     let mut msgs = req.messages.clone();
+    if prune_tool_outputs(&mut msgs, &cfg.compaction) {
+        req.messages = msgs.clone();
+    }
     let mut round = 0;
     let mut empty_retries = 0usize;
     let mut overflow_retries = 0usize;
@@ -479,7 +555,7 @@ pub async fn run(
                     Err(e) => format!("error: {e:#}"),
                 }
             };
-            let out = tools::budget(out, cfg.output_budget);
+            let out = tools::spill(out, &call.name, cfg.output_budget);
             let summary: String = out
                 .lines()
                 .next()
@@ -597,22 +673,19 @@ fn run_bash_background(
                 let _ = tx2.send(ApiEvent::Note(format!(
                     "background task {id2} finished: {desc2}"
                 )));
-                tools::budget(
-                    format!("Background task {id2} ({desc2}) finished. Output:\n{text}"),
-                    budget,
-                )
+                format!("Background task {id2} ({desc2}) finished. Output:\n{text}")
             } else {
                 crate::bg::finish(&id2, Some(text.clone()));
                 let _ = tx2.send(ApiEvent::Note(format!(
                     "background task {id2} failed (exit {code:?}): {desc2}"
                 )));
-                tools::budget(
-                    format!("Background task {id2} ({desc2}) failed. Output:\n{text}"),
-                    budget,
-                )
+                format!("Background task {id2} ({desc2}) failed. Output:\n{text}")
             }
         };
-        queue.lock().unwrap().push(tools::budget(msg, budget));
+        queue
+            .lock()
+            .unwrap()
+            .push(tools::spill(msg, "task", budget));
         let _ = tx2.send(ApiEvent::Wake);
     });
     format!(
@@ -960,8 +1033,9 @@ pub fn spawn_standalone_subagent(
                 let _ = tx2.send(ApiEvent::Note(format!(
                     "background task {id2} finished: {desc2}"
                 )));
-                tools::budget(
+                tools::spill(
                     format!("Background task {id2} ({desc2}) finished. Result:\n{text}"),
+                    "task",
                     budget,
                 )
             }
@@ -1546,5 +1620,152 @@ mod tests {
         let cut = compact_split(&msgs, 50).unwrap();
         let t = transcript(&msgs[1..cut]);
         assert!(!t.contains("Objective: fix the parser"));
+    }
+
+    fn tool_msg(id: &str, _tool: &str, text: &str) -> Message {
+        Message::tool(id, text)
+    }
+
+    fn call(id: &str, tool: &str) -> Message {
+        Message::new(Role::Assistant, "").with_calls(vec![crate::chat::ToolCall {
+            id: id.into(),
+            name: tool.into(),
+            args: "{}".into(),
+        }])
+    }
+
+    fn compaction(prune: bool, protect: usize, min: usize) -> CompactionCfg {
+        CompactionCfg {
+            prune,
+            prune_protect: protect,
+            prune_min: min,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn prune_replaces_old_tool_outputs() {
+        let big = "a".repeat(200_000); // ~50k tokens
+        // the last two user turns (t2..t3) are protected: only tool1 is old
+        let mut msgs = vec![
+            m(Role::User, "turn one"),
+            call("c1", "bash"),
+            tool_msg("c1", "", &big),
+            m(Role::User, "turn two"),
+            call("c2", "bash"),
+            tool_msg("c2", "", &big),
+            m(Role::User, "turn three"),
+        ];
+        assert!(prune_tool_outputs(&mut msgs, &compaction(true, 40_000, 20_000)));
+        assert!(msgs[2].content.starts_with(PRUNE_MARKER), "{}", msgs[2].content);
+        assert!(msgs[2].content.contains("~50000 tokens"));
+        assert_eq!(msgs[5].content, big, "the previous exchange stays verbatim");
+        assert_eq!(msgs[0].content, "turn one");
+
+        // with four turns both outputs are older than the protected window
+        let mut msgs = vec![
+            m(Role::User, "t1"),
+            call("c1", "bash"),
+            tool_msg("c1", "", &big),
+            m(Role::User, "t2"),
+            call("c2", "bash"),
+            tool_msg("c2", "", &big),
+            m(Role::User, "t3"),
+            m(Role::User, "t4"),
+        ];
+        assert!(prune_tool_outputs(&mut msgs, &compaction(true, 40_000, 20_000)));
+        assert!(msgs[2].content.starts_with(PRUNE_MARKER));
+        assert!(msgs[5].content.starts_with(PRUNE_MARKER));
+    }
+
+    #[test]
+    fn prune_protects_recent_outputs() {
+        let big = "a".repeat(200_000); // ~50k tokens
+        // one exchange only: nothing is older than the last two user turns
+        let mut msgs = vec![
+            m(Role::User, "turn one"),
+            call("c1", "bash"),
+            tool_msg("c1", "", &big),
+            m(Role::User, "turn two"),
+        ];
+        assert!(!prune_tool_outputs(&mut msgs, &compaction(true, 40_000, 20_000)));
+        assert_eq!(msgs[2].content, big);
+        // a tool output newer than the second-to-last user turn is off limits
+        let mut msgs = vec![
+            m(Role::User, "turn one"),
+            m(Role::User, "turn two"),
+            call("c2", "bash"),
+            tool_msg("c2", "", &big),
+            m(Role::User, "turn three"),
+        ];
+        assert!(!prune_tool_outputs(&mut msgs, &compaction(true, 0, 0)));
+        assert_eq!(msgs[3].content, big, "the newest exchange must stay verbatim");
+    }
+
+    #[test]
+    fn prune_respects_min_gate_and_switch() {
+        let mid = "a".repeat(100_000); // ~25k tokens
+        let mut msgs = vec![
+            m(Role::User, "t1"),
+            call("c1", "bash"),
+            tool_msg("c1", "", &mid),
+            m(Role::User, "t2"),
+            call("c2", "bash"),
+            tool_msg("c2", "", &mid),
+            m(Role::User, "t3"),
+        ];
+        // protect 20k -> the old output is a candidate freeing ~25k, but the
+        // 30k gate is not met -> nothing commits
+        assert!(!prune_tool_outputs(&mut msgs, &compaction(true, 20_000, 30_000)));
+        assert_eq!(msgs[2].content, mid);
+        // prune = false disables the pass entirely
+        assert!(!prune_tool_outputs(&mut msgs, &compaction(false, 0, 0)));
+        assert_eq!(msgs[2].content, mid);
+        // min = 0 commits as soon as anything crosses protect
+        assert!(prune_tool_outputs(&mut msgs, &compaction(true, 20_000, 0)));
+        assert!(msgs[2].content.starts_with(PRUNE_MARKER));
+        assert_eq!(msgs[5].content, mid);
+    }
+
+    #[test]
+    fn prune_skips_protected_tools_and_marked_history() {
+        let big = "a".repeat(200_000);
+        let mut msgs = vec![
+            m(Role::User, "t1"),
+            call("c1", "skill"),
+            tool_msg("c1", "", &big),
+            call("c2", "bash"),
+            tool_msg("c2", "", &big),
+            m(Role::User, "t2"),
+            m(Role::User, "t3"),
+        ];
+        // skill output is protected, the bash one is the only candidate
+        assert!(prune_tool_outputs(&mut msgs, &compaction(true, 40_000, 0)));
+        assert_eq!(msgs[2].content, big, "skill outputs stay verbatim");
+        assert!(msgs[4].content.starts_with(PRUNE_MARKER));
+
+        // a second pass stops at the marker: older history is left alone
+        let mut msgs = vec![
+            m(Role::User, "t0"),
+            call("c0", "bash"),
+            tool_msg("c0", "", &big),
+            tool_msg("marked", "", &format!("{PRUNE_MARKER} (~1 tokens)")),
+            m(Role::User, "t1"),
+            call("c1", "bash"),
+            tool_msg("c1", "", &big),
+            m(Role::User, "t2"),
+        ];
+        assert!(!prune_tool_outputs(&mut msgs, &compaction(true, 40_000, 0)));
+        assert_eq!(msgs[2].content, big, "walk stops at the marker");
+        assert_eq!(msgs[6].content, big);
+
+        // fewer than two user turns -> nothing is prunable yet
+        let mut msgs = vec![
+            m(Role::User, "only turn"),
+            call("c", "bash"),
+            tool_msg("c", "", &big),
+        ];
+        assert!(!prune_tool_outputs(&mut msgs, &compaction(true, 0, 0)));
+        assert_eq!(msgs[2].content, big);
     }
 }
