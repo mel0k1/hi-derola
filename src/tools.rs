@@ -363,11 +363,11 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "lsp".into(),
-            description: "Navigate code with the language server (LSP) when one is installed: hover, definition, references, implementation, document_symbols, workspace_symbols. Line and column are 1-based as shown in editors. document_symbols needs path only; workspace_symbols needs query only; the position operations need path + line + column. Returns nothing useful when no server supports the file type.".into(),
+            description: "Navigate code with the language server (LSP) when one is installed: hover, definition, references, implementation, document_symbols, workspace_symbols, incoming_calls (who calls the function at the position), outgoing_calls (what that function calls). Line and column are 1-based as shown in editors. document_symbols needs path only; workspace_symbols needs query only; the position operations need path + line + column. Returns nothing useful when no server supports the file type.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "operation": {"type": "string", "enum": ["hover", "definition", "references", "implementation", "document_symbols", "workspace_symbols"], "description": "The LSP operation to perform"},
+                    "operation": {"type": "string", "enum": ["hover", "definition", "references", "implementation", "document_symbols", "workspace_symbols", "prepare_call_hierarchy", "incoming_calls", "outgoing_calls"], "description": "The LSP operation to perform"},
                     "path": {"type": "string", "description": "File path (required for everything except workspace_symbols)"},
                     "line": {"type": "integer", "description": "Line number, 1-based"},
                     "column": {"type": "integer", "description": "Character offset on the line, 1-based, default 1"},
@@ -777,6 +777,11 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
                 "workspace_symbols" => {
                     crate::lsp::workspace_symbols(v["query"].as_str().unwrap_or("")).await
                 }
+                "prepare_call_hierarchy" => {
+                    crate::lsp::prepare_call_hierarchy(path, line, col).await
+                }
+                "incoming_calls" => crate::lsp::incoming_calls(path, line, col).await,
+                "outgoing_calls" => crate::lsp::outgoing_calls(path, line, col).await,
                 _ => bail!("lsp: unknown operation: {op}"),
             }
         }

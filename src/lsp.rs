@@ -821,6 +821,185 @@ pub async fn workspace_symbols(query: &str) -> anyhow::Result<String> {
     Ok(out)
 }
 
+// ---------- call hierarchy ----------
+
+/// incoming = "who calls this", outgoing = "what this calls"
+#[derive(Clone, Copy)]
+enum CallDir {
+    Incoming,
+    Outgoing,
+}
+
+impl CallDir {
+    fn method(self) -> &'static str {
+        match self {
+            CallDir::Incoming => "callHierarchy/incomingCalls",
+            CallDir::Outgoing => "callHierarchy/outgoingCalls",
+        }
+    }
+    /// "from" (incoming) / "to" (outgoing) key on result entries
+    fn item_key(self) -> &'static str {
+        match self {
+            CallDir::Incoming => "from",
+            CallDir::Outgoing => "to",
+        }
+    }
+    fn op_name(self) -> &'static str {
+        match self {
+            CallDir::Incoming => "incoming_calls",
+            CallDir::Outgoing => "outgoing_calls",
+        }
+    }
+}
+
+/// resolve the call-hierarchy item under the cursor
+async fn prepare_item(p: &Prepared, line: u32, col: u32) -> anyhow::Result<Option<Value>> {
+    let params = json!({
+        "textDocument": {"uri": p.uri},
+        "position": to_lsp_position(&p.text, line, col)
+    });
+    let res = request_warm(
+        &p.srv,
+        "textDocument/prepareCallHierarchy",
+        params,
+        NAV_TIMEOUT,
+    )
+    .await?;
+    Ok(res.as_array().and_then(|a| a.first().cloned()))
+}
+
+/// CallHierarchyItem -> "kind name path:line:col"
+fn fmt_call_item(item: &Value, base: &str, cache: &mut HashMap<String, String>) -> Option<String> {
+    let name = item["name"].as_str()?;
+    let kind = symbol_kind(item["kind"].as_i64().unwrap_or(0));
+    let uri = item["uri"].as_str()?;
+    let range = if item["selectionRange"].is_object() {
+        &item["selectionRange"]
+    } else {
+        &item["range"]
+    };
+    let line0 = range["start"]["line"].as_i64().unwrap_or(0);
+    let units = range["start"]["character"].as_i64().unwrap_or(0);
+    let abs = uri_to_path(uri);
+    let col = read_cached(&abs, cache)
+        .and_then(|t| line_text_of(&t, line0))
+        .map(|l| from_lsp_units(&l, units))
+        .unwrap_or(units.max(0) as usize + 1);
+    Some(format!(
+        "{kind} {name} {}:{}:{col}",
+        display_path(&abs, base),
+        line0 + 1
+    ))
+}
+
+/// call-site ranges (UTF-16 positions inside `uri`) -> one "  sites: ..." line
+fn fmt_call_sites(
+    ranges: &Value,
+    uri: &str,
+    base: &str,
+    cache: &mut HashMap<String, String>,
+) -> Option<String> {
+    const MAX_SITES: usize = 6;
+    let arr = ranges.as_array()?;
+    if arr.is_empty() {
+        return None;
+    }
+    let abs = uri_to_path(uri);
+    let path = display_path(&abs, base);
+    let mut sites = Vec::new();
+    let mut extra = 0usize;
+    for r in arr {
+        if sites.len() >= MAX_SITES {
+            extra += 1;
+            continue;
+        }
+        let line0 = r["start"]["line"].as_i64().unwrap_or(0);
+        let units = r["start"]["character"].as_i64().unwrap_or(0);
+        let col = read_cached(&abs, cache)
+            .and_then(|t| line_text_of(&t, line0))
+            .map(|l| from_lsp_units(&l, units))
+            .unwrap_or(units.max(0) as usize + 1);
+        sites.push(format!("{path}:{}:{col}", line0 + 1));
+    }
+    if extra > 0 {
+        sites.push(format!("+{extra} more"));
+    }
+    Some(format!("  sites: {}", sites.join(", ")))
+}
+
+async fn call_hierarchy_dir(
+    path: &str,
+    line: u32,
+    col: u32,
+    dir: CallDir,
+) -> anyhow::Result<String> {
+    let p = prepare(path).await?;
+    let Some(item) = prepare_item(&p, line, col).await? else {
+        return Ok(format!(
+            "{}: no call hierarchy item at this position (not a function/method?)",
+            dir.op_name()
+        ));
+    };
+    let res = request_warm(&p.srv, dir.method(), json!({"item": item}), NAV_TIMEOUT).await?;
+    let rel = relative_root();
+    let mut cache = HashMap::new();
+    let key = dir.item_key();
+    let mut lines: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
+    let mut truncated = false;
+    for c in res.as_array().into_iter().flatten() {
+        let Some(main) = fmt_call_item(&c[key], &rel, &mut cache) else {
+            continue;
+        };
+        if !seen.insert(main.clone()) {
+            continue;
+        }
+        if lines.len() + 2 > MAX_NAV_RESULTS {
+            truncated = true;
+            break;
+        }
+        lines.push(main);
+        // sites live in the caller's file (incoming) or in ours (outgoing)
+        let sites_uri = match dir {
+            CallDir::Incoming => c[key]["uri"].as_str().map(str::to_string),
+            CallDir::Outgoing => Some(p.uri.clone()),
+        };
+        if let Some(uri) = sites_uri {
+            if let Some(sites) = fmt_call_sites(&c["fromRanges"], &uri, &rel, &mut cache) {
+                lines.push(sites);
+            }
+        }
+    }
+    if lines.is_empty() {
+        return Ok(format!("{}: no calls found", dir.op_name()));
+    }
+    let mut out = lines.join("\n");
+    if truncated {
+        out.push_str(&format!("\n... truncated at {MAX_NAV_RESULTS} results"));
+    }
+    Ok(out)
+}
+
+pub async fn incoming_calls(path: &str, line: u32, col: u32) -> anyhow::Result<String> {
+    call_hierarchy_dir(path, line, col, CallDir::Incoming).await
+}
+
+pub async fn outgoing_calls(path: &str, line: u32, col: u32) -> anyhow::Result<String> {
+    call_hierarchy_dir(path, line, col, CallDir::Outgoing).await
+}
+
+pub async fn prepare_call_hierarchy(path: &str, line: u32, col: u32) -> anyhow::Result<String> {
+    let p = prepare(path).await?;
+    let Some(item) = prepare_item(&p, line, col).await? else {
+        return Ok("prepare_call_hierarchy: no call hierarchy item at this position".into());
+    };
+    let rel = relative_root();
+    let mut cache = HashMap::new();
+    Ok(fmt_call_item(&item, &rel, &mut cache).unwrap_or_else(|| {
+        "prepare_call_hierarchy: no call hierarchy item at this position".into()
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -963,6 +1142,59 @@ mod tests {
         assert_eq!(symbol_kind(999), "symbol");
     }
 
+    #[test]
+    fn call_item_formatting() {
+        let dir = std::env::temp_dir().join(format!("hd-lsp-ch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("callh.rs");
+        std::fs::write(&f, "fn alpha() {}\nfn beta() { alpha() }\nlet \u{1f980}\u{0418} = 1;\n").unwrap();
+        let abs = f.display().to_string();
+        let base = std::env::current_dir().unwrap().display().to_string();
+        let mut cache = HashMap::new();
+        let item = serde_json::json!({
+            "name": "beta", "kind": 12, "uri": path_to_uri(&abs),
+            "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 19}},
+            "selectionRange": {"start": {"line": 1, "character": 3}, "end": {"line": 1, "character": 7}}
+        });
+        let s = fmt_call_item(&item, &base, &mut cache).unwrap();
+        assert!(s.starts_with("function beta "), "{s}");
+        assert!(s.ends_with(":2:4"), "{s}"); // UTF-16 units 3 -> char 4
+        assert!(!s.contains('\u{1f980}'), "{s}");
+
+        // missing name / uri -> None, no panic
+        assert!(fmt_call_item(&json!({"kind": 12}), &base, &mut cache).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn call_sites_formatting() {
+        let dir = std::env::temp_dir().join(format!("hd-lsp-sites-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("sites.rs");
+        std::fs::write(&f, "fn one() {}\nfn two() { one(); one(); }\n").unwrap();
+        let abs = f.display().to_string();
+        let base = std::env::current_dir().unwrap().display().to_string();
+        let mut cache = HashMap::new();
+        let ranges = json!([
+            {"start": {"line": 1, "character": 12}, "end": {"line": 1, "character": 15}},
+            {"start": {"line": 1, "character": 18}, "end": {"line": 1, "character": 21}}
+        ]);
+        let s = fmt_call_sites(&ranges, &path_to_uri(&abs), &base, &mut cache).unwrap();
+        assert!(s.contains("sites: "), "{s}");
+        assert!(s.contains(":2:13") && s.contains(":2:19"), "{s}");
+
+        // more than 6 sites -> "+N more" tail
+        let many: Vec<Value> = (0..9)
+            .map(|i| json!({"start": {"line": 1, "character": i * 2}, "end": {"line": 1, "character": i * 2}}))
+            .collect();
+        let s2 = fmt_call_sites(&json!(many), &path_to_uri(&abs), &base, &mut cache).unwrap();
+        assert!(s2.contains("+3 more"), "{s2}");
+
+        // empty ranges -> None
+        assert!(fmt_call_sites(&json!([]), &path_to_uri(&abs), &base, &mut cache).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// end-to-end navigation against the real workspace; skipped silently
     /// when rust-analyzer is not installed
     #[tokio::test]
@@ -999,6 +1231,22 @@ mod tests {
         let syms = document_symbols(&snap.display().to_string()).await.unwrap();
         eprintln!("document_symbols -> {syms}");
         assert!(syms.contains("function begin_turn"), "{syms}");
+
+        // call hierarchy on the same site (snapshot.rs:25:13 = begin_turn)
+        let prep = prepare_call_hierarchy(&snap.display().to_string(), 25, 13).await.unwrap();
+        eprintln!("prepare_call_hierarchy -> {prep}");
+        assert!(prep.contains("function begin_turn"), "{prep}");
+
+        let inc = incoming_calls(&snap.display().to_string(), 25, 13).await.unwrap();
+        eprintln!("incoming_calls -> {inc}");
+        assert!(inc.contains("app.rs"), "callers must include app.rs: {inc}");
+
+        let outg = outgoing_calls(&snap.display().to_string(), 25, 13).await.unwrap();
+        eprintln!("outgoing_calls -> {outg}");
+        assert!(
+            outg.contains("begin_turn_in"),
+            "callees must include begin_turn_in: {outg}"
+        );
     }
 
     /// 1-based line/column of the first occurrence of `needle`
