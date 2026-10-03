@@ -226,6 +226,9 @@ async function openSession(id) {
     }
   }
   if (st.transcript.length) autoscroll();
+  if ((st.queue || []).length) {
+    note(`${st.queue.length} queued message(s) restored from the previous run — they will steer the next run`);
+  }
   renderSessions();
 }
 

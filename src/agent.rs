@@ -893,6 +893,7 @@ fn run_subagent<'a>(
                     todos: Vec::new(),
                     parent: cfg.parent_sid.clone(),
                     changes: Vec::new(),
+                    queue: Vec::new(),
                 };
                 let _ = crate::sessions::save(&st);
             }

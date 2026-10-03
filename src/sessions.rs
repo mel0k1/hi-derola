@@ -44,6 +44,8 @@ pub struct StoredSession {
     pub parent: Option<String>,
     #[serde(default)]
     pub changes: Vec<ChangeRec>,
+    #[serde(default)]
+    pub queue: Vec<String>,
 }
 
 pub fn store_dir() -> PathBuf {
@@ -240,6 +242,7 @@ mod tests {
             todos: vec![],
             parent: None,
             changes: vec![],
+            queue: vec![],
         };
         save(&st).unwrap();
         let got = load(&st.id).unwrap();
@@ -271,6 +274,36 @@ mod tests {
     }
 
     #[test]
+    fn queue_roundtrip_and_compat() {
+        let _g = env_guard("q");
+        let st = StoredSession {
+            id: new_id(),
+            title: "t".into(),
+            created: 1,
+            updated: 1,
+            system: String::new(),
+            messages: vec![],
+            tokens_in: 0,
+            tokens_out: 0,
+            cost: 0.0,
+            todos: vec![],
+            parent: None,
+            changes: vec![],
+            queue: vec!["first".into(), "second".into()],
+        };
+        save(&st).unwrap();
+        let got = load(&st.id).unwrap();
+        assert_eq!(got.queue, vec!["first".to_string(), "second".to_string()]);
+
+        // a session written before the queue field existed still loads
+        let mut v = serde_json::to_value(&got).unwrap();
+        v.as_object_mut().unwrap().remove("queue");
+        let old: StoredSession = serde_json::from_value(v).unwrap();
+        assert!(old.queue.is_empty());
+        assert_eq!(old.id, st.id);
+    }
+
+    #[test]
     fn latest_picks_recent() {
         let _g = env_guard("c");
         let mut a = StoredSession {
@@ -286,6 +319,7 @@ mod tests {
             todos: vec![],
             parent: None,
             changes: vec![],
+            queue: vec![],
         };
         save(&a).unwrap();
         a.id = "s-2-test".into();

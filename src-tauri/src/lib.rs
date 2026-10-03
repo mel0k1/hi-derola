@@ -93,6 +93,7 @@ fn persist(sh: &Shared) {
         todos: sh.todos.lock().unwrap().clone(),
         parent: None,
         changes: sh.changes.lock().unwrap().clone(),
+        queue: sh.queue.lock().unwrap().clone(),
     };
     drop(ses);
     let _ = sessions::save(&st);
@@ -387,6 +388,7 @@ fn start_new(sh: &Shared, app: &AppHandle) {
     *sh.tokens.lock().unwrap() = (0, 0);
     *sh.cost.lock().unwrap() = 0.0;
     *sh.todos.lock().unwrap() = Vec::new();
+    sh.queue.lock().unwrap().clear();
     hi_derola::todo::clear();
     let _ = app.emit("ev", json!({"t": "cleared"}));
     emit_sessions(app, sh);
@@ -626,7 +628,14 @@ async fn open_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) ->
     sh.confirm.lock().unwrap().take();
     sh.ask.lock().unwrap().take();
     *sh.changes.lock().unwrap() = st.changes.clone();
+    *sh.queue.lock().unwrap() = st.queue.clone();
     emit_attachments(&sh, &app);
+    if !st.queue.is_empty() {
+        let _ = sh.tx.send(ApiEvent::Note(format!(
+            "restored {} queued message(s) from the previous run, they will steer the next run",
+            st.queue.len()
+        )));
+    }
     Ok(json!({
         "id": st.id,
         "title": st.title,
@@ -637,6 +646,7 @@ async fn open_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) ->
         "cost": st.cost,
         "transcript": transcript(&st.messages),
         "changes": st.changes,
+        "queue": st.queue,
     }))
 }
 #[tauri::command]
@@ -655,6 +665,7 @@ async fn delete_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) 
         *sh.tokens.lock().unwrap() = (0, 0);
         *sh.cost.lock().unwrap() = 0.0;
         *sh.todos.lock().unwrap() = Vec::new();
+        sh.queue.lock().unwrap().clear();
         hi_derola::todo::clear();
         let _ = app.emit("ev", json!({"t": "cleared"}));
     }
@@ -985,6 +996,9 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
 fn dispatch_prompt(sh: &Arc<Shared>, app: &AppHandle, text: String) -> Value {
     if sh.inflight.lock().unwrap().is_some() {
         sh.queue.lock().unwrap().push(text);
+        // the queue is durable: it lives in the session file, so a crash
+        // cannot lose messages typed while the agent was busy
+        persist(sh);
         let _ = sh.tx.send(ApiEvent::Note("queued: will run after the current task".into()));
         return json!({"cmd": false, "queued": true});
     }
@@ -1101,6 +1115,7 @@ async fn send(sh: State<'_, Arc<Shared>>, app: AppHandle, text: String) -> Resul
     if sh.inflight.lock().unwrap().is_some() {
         sh.queue.lock().unwrap().push(composed);
         emit_attachments(&sh, &app);
+        persist(&sh);
         let _ = sh.tx.send(ApiEvent::Note("queued: will steer the current run".into()));
         return Ok(json!({"cmd": false, "queued": true}));
     }

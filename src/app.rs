@@ -354,6 +354,7 @@ impl App {
             todos: crate::todo::get(),
             parent: None,
             changes: Vec::new(),
+            queue: self.queue.lock().unwrap().clone(),
         };
         if let Err(e) = crate::sessions::save(&st) {
             self.info(format!("session not saved: {e:#}"));
@@ -374,6 +375,13 @@ impl App {
         self.tokens_cached = 0;
         self.cost = st.cost;
         crate::todo::set_list(st.todos);
+        *self.queue.lock().unwrap() = st.queue.clone();
+        if !st.queue.is_empty() {
+            self.info(format!(
+                "{} queued message(s) restored, they will steer the next run",
+                st.queue.len()
+            ));
+        }
         for m in &st.messages {
             match m.role {
                 Role::User if !m.content.trim().is_empty() => self.entries.push(Entry {
@@ -765,6 +773,7 @@ impl App {
         if !matches!(self.phase, Phase::Idle) {
             self.queue.lock().unwrap().push(composed);
             self.info("queued: will steer the current run");
+            self.save_session();
             return;
         }
         self.session.messages.push(
@@ -847,6 +856,7 @@ impl App {
         if let Some(composed) = next {
             self.session.push(Role::User, composed);
             self.info("running queued message");
+            self.save_session();
             self.start_run(inflight);
         }
     }
@@ -864,6 +874,7 @@ impl App {
                 self.entries.clear();
                 self.attachments.clear();
                 self.allow_all.store(false, Ordering::Relaxed);
+                self.queue.lock().unwrap().clear();
                 crate::todo::clear();
                 self.sid = crate::sessions::new_id();
                 self.title = None;

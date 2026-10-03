@@ -296,7 +296,7 @@
       const s = sessions.find((x) => x.id === id);
       if (!s) throw "no session: " + id;
       sid = id;
-      return { id: s.id, title: s.title, created: s.created, updated: s.updated, transcript: transcript(s), changes: s.changes || [] };
+      return { id: s.id, title: s.title, created: s.created, updated: s.updated, transcript: transcript(s), changes: s.changes || [], queue: s.queue || [] };
     },
     async new_session() {
       const cur = current();
