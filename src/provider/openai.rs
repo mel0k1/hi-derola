@@ -123,6 +123,7 @@ impl Provider for OpenAi {
 
         let mut full = String::new();
         let mut calls: Vec<ToolCall> = Vec::new();
+        let mut finish = String::new();
         if req.stream {
             let mut pending: Vec<Value> = Vec::new();
             sse_lines(resp, |line| {
@@ -137,6 +138,11 @@ impl Provider for OpenAi {
                     return Ok(());
                 };
                 let d = &v["choices"][0]["delta"];
+                if let Some(fr) = v["choices"][0]["finish_reason"].as_str() {
+                    if !fr.is_empty() {
+                        finish = fr.to_string();
+                    }
+                }
                 if let Some(c) = d["content"].as_str() {
                     if !c.is_empty() {
                         full.push_str(c);
@@ -192,6 +198,10 @@ impl Provider for OpenAi {
             let text = resp.text().await?;
             let v: Value = serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
             let msg = &v["choices"][0]["message"];
+            finish = v["choices"][0]["finish_reason"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
             if let Some(c) = msg["content"].as_str() {
                 full = c.to_string();
                 if !full.is_empty() {
@@ -216,6 +226,10 @@ impl Provider for OpenAi {
                 .map_err(|_| anyhow::anyhow!("closed"))?;
             }
         }
-        Ok(Reply { text: full, calls })
+        Ok(Reply {
+            text: full,
+            calls,
+            truncated: finish == "length",
+        })
     }
 }

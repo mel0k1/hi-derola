@@ -53,6 +53,8 @@ pub struct App {
     pub model: String,
     pub provider: Arc<dyn Provider>,
     pub session: Session,
+    pub sid: String,
+    pub title: Option<String>,
     pub entries: Vec<Entry>,
     pub input: String,
     pub scroll_up: usize,
@@ -79,7 +81,7 @@ pub struct App {
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
-const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/list/glob/grep/bash (background: true)/webfetch + question, subagent (background), task_status, task_kill, todowrite/todoread, skill, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
+const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /sessions      list saved sessions\n  /resume [id]   switch to a saved session (latest by default)\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch + question, subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
 
 pub fn help_text() -> &'static str {
     HELP
@@ -98,6 +100,16 @@ fn fmt_cost(c: f64) -> String {
         format!("${c:.2}")
     } else {
         format!("${c:.4}")
+    }
+}
+
+fn fmt_age(secs: u64) -> String {
+    if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
     }
 }
 
@@ -133,6 +145,8 @@ impl App {
             model,
             provider,
             session: Session::new(system),
+            sid: crate::sessions::new_id(),
+            title: None,
             entries: Vec::new(),
             input: String::new(),
             scroll_up: 0,
@@ -218,7 +232,10 @@ impl App {
                 }
                 self.scroll_up = 0;
             }
-            ApiEvent::Note(s) => self.info(s),
+            ApiEvent::Note(s) => {
+                self.flush_stream();
+                self.info(s);
+            }
             ApiEvent::Tool { name, detail, diff } => {
                 self.flush_stream();
                 self.reasoning = None;
@@ -303,6 +320,7 @@ impl App {
                 self.streaming = None;
                 self.reasoning = None;
                 crate::snapshot::end_turn();
+                self.save_session();
             }
             ApiEvent::Failed(e) => {
                 self.info(format!("error: {e}"));
@@ -314,6 +332,68 @@ impl App {
             ApiEvent::Wake => {}
         }
         self.status = self.status_line();
+    }
+
+    fn save_session(&mut self) {
+        if self.session.messages.is_empty() {
+            return;
+        }
+        let st = crate::sessions::StoredSession {
+            id: self.sid.clone(),
+            title: self
+                .title
+                .clone()
+                .unwrap_or_else(|| "new chat".into()),
+            created: 0,
+            updated: 0,
+            system: self.session.system.clone(),
+            messages: self.session.messages.clone(),
+            tokens_in: self.tokens_in,
+            tokens_out: self.tokens_out,
+            cost: self.cost,
+            todos: crate::todo::get(),
+            parent: None,
+        };
+        if let Err(e) = crate::sessions::save(&st) {
+            self.info(format!("session not saved: {e:#}"));
+        }
+    }
+
+    fn load_session(&mut self, st: crate::sessions::StoredSession) {
+        self.entries.clear();
+        self.streaming = None;
+        self.reasoning = None;
+        self.attachments.clear();
+        self.sid = st.id.clone();
+        self.title = Some(st.title.clone());
+        self.session.system = st.system;
+        self.session.messages = st.messages.clone();
+        self.tokens_in = st.tokens_in;
+        self.tokens_out = st.tokens_out;
+        self.tokens_cached = 0;
+        self.cost = st.cost;
+        crate::todo::set_list(st.todos);
+        for m in &st.messages {
+            match m.role {
+                Role::User if !m.content.trim().is_empty() => self.entries.push(Entry {
+                    kind: Kind::You,
+                    text: m.content.clone(),
+                }),
+                Role::Assistant if !m.content.trim().is_empty() => {
+                    self.entries.push(Entry {
+                        kind: Kind::Bot,
+                        text: m.content.clone(),
+                    })
+                }
+                _ => {}
+            }
+        }
+        self.info(format!(
+            "resumed {} ({} messages)",
+            st.title,
+            st.messages.len()
+        ));
+        self.scroll_up = 0;
     }
 
     pub fn cancelled(&mut self) {
@@ -600,15 +680,28 @@ impl App {
             }
             let (blocks, _ok, _miss) = files::mentions(&rest);
             let prompt = format!("{blocks}{rest}");
-            let id = agent::spawn_standalone_subagent(
-                self.provider.clone(),
-                Some(agent_name.clone()),
-                prompt,
-                String::new(),
-                self.model.clone(),
+            let (sub_req, sid, read_only) = match agent::resolve_sub_req(
+                Some(&agent_name),
+                &prompt,
+                None,
+                Some(&self.sid),
+                &self.model,
                 self.cfg.provider.max_tokens,
                 self.cfg.provider.temperature,
                 self.cfg.provider.top_p,
+            ) {
+                Ok(r) => r,
+                Err(e) => {
+                    self.info(e);
+                    return;
+                }
+            };
+            let id = agent::spawn_standalone_subagent(
+                self.provider.clone(),
+                sub_req,
+                sid,
+                String::new(),
+                read_only,
                 agent::AgentCfg {
                     context_limit: self.cfg.agent.context_limit,
                     max_rounds: self.cfg.agent.max_rounds,
@@ -617,7 +710,9 @@ impl App {
                     nested: false,
                     plan: false,
                     read_only: false,
-                    parent_sid: None,
+                    parent_sid: Some(self.sid.clone()),
+                    depth: 0,
+                    max_depth: self.cfg.agent.subagent_depth,
                 },
                 self.allow_all.clone(),
                 self.mcp.clone(),
@@ -683,6 +778,17 @@ impl App {
         self.status = self.status_line();
         self.scroll_up = 0;
         crate::snapshot::begin_turn();
+        if self.title.is_none() {
+            if let Some(m) = self
+                .session
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == Role::User)
+            {
+                self.title = Some(crate::sessions::title_from(&m.content));
+            }
+        }
 
         let provider = self.provider.clone();
         let tx = self.tx.clone();
@@ -697,7 +803,9 @@ impl App {
             nested: false,
             plan: self.plan,
             read_only: false,
-            parent_sid: None,
+            parent_sid: Some(self.sid.clone()),
+            depth: 0,
+            max_depth: self.cfg.agent.subagent_depth,
         };
         let mut req = ChatRequest {
             system: self.session.system.clone(),
@@ -756,7 +864,67 @@ impl App {
                 self.attachments.clear();
                 self.allow_all.store(false, Ordering::Relaxed);
                 crate::todo::clear();
+                self.sid = crate::sessions::new_id();
+                self.title = None;
+                self.tokens_in = 0;
+                self.tokens_out = 0;
+                self.tokens_cached = 0;
+                self.cost = 0.0;
                 self.info("new session");
+            }
+            "/sessions" => {
+                let list = crate::sessions::list();
+                if list.is_empty() {
+                    self.info("no saved sessions");
+                } else {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let mut out = String::from("saved sessions (/resume <id prefix>):");
+                    for (i, s) in list.iter().take(12).enumerate() {
+                        let mark = if s.parent.is_some() { "↳ " } else { "" };
+                        out.push_str(&format!(
+                            "\n{}. {}{} · {} · {} msgs · {}",
+                            i + 1,
+                            mark,
+                            &s.id[..s.id.len().min(12)],
+                            s.title,
+                            s.count,
+                            fmt_age(now.saturating_sub(s.updated))
+                        ));
+                    }
+                    self.info(out);
+                }
+            }
+            "/resume" => {
+                if !matches!(self.phase, Phase::Idle)
+                    || self.confirm.is_some()
+                    || self.ask.is_some()
+                {
+                    self.info("wait for the current run to finish");
+                    return;
+                }
+                let target = if arg.is_empty() {
+                    // default to the latest main session, not a subagent child
+                    crate::sessions::list()
+                        .into_iter()
+                        .find(|s| s.parent.is_none())
+                        .map(|s| s.id)
+                } else {
+                    crate::sessions::list()
+                        .into_iter()
+                        .find(|s| s.id.starts_with(arg))
+                        .map(|s| s.id)
+                };
+                let Some(t) = target else {
+                    self.info("no matching session");
+                    return;
+                };
+                match crate::sessions::load(&t) {
+                    Ok(st) => self.load_session(st),
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
             }
             "/model" => {
                 if arg.is_empty() {

@@ -19,6 +19,8 @@ pub struct ToolSpec {
 pub struct Reply {
     pub text: String,
     pub calls: Vec<ToolCall>,
+    /// the provider cut the response short (finish_reason length / stop_reason max_tokens)
+    pub truncated: bool,
 }
 
 pub enum ApiEvent {

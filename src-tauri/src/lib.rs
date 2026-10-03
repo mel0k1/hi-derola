@@ -90,6 +90,7 @@ fn persist(sh: &Shared) {
         tokens_out: sh.tokens.lock().unwrap().1,
         cost: *sh.cost.lock().unwrap(),
         todos: sh.todos.lock().unwrap().clone(),
+        parent: None,
     };
     drop(ses);
     let _ = sessions::save(&st);
@@ -146,6 +147,8 @@ fn launch(sh: &Arc<Shared>) -> Result<(), String> {
         plan,
         read_only: false,
         parent_sid: Some(sh.sid.lock().unwrap().clone()),
+        depth: 0,
+        max_depth: cfg.agent.subagent_depth,
     };
     let sh2 = sh.clone();
     let handle = tauri::async_runtime::spawn(async move {
@@ -971,15 +974,26 @@ async fn send(sh: State<'_, Arc<Shared>>, app: AppHandle, text: String) -> Resul
         let cfg = sh.cfg.lock().unwrap().clone();
         let (blocks, _ok, _miss) = hi_derola::files::mentions(&rest);
         let prompt = format!("{blocks}{rest}");
-        let id = agent::spawn_standalone_subagent(
-            provider,
-            Some(agent_name.clone()),
-            prompt,
-            String::new(),
-            cfg.provider.model.clone(),
+        let parent_sid = sh.sid.lock().unwrap().clone();
+        let (sub_req, sid, read_only) = match agent::resolve_sub_req(
+            Some(&agent_name),
+            &prompt,
+            None,
+            Some(&parent_sid),
+            &cfg.provider.model,
             cfg.provider.max_tokens,
             cfg.provider.temperature,
             cfg.provider.top_p,
+        ) {
+            Ok(r) => r,
+            Err(e) => return Err(e),
+        };
+        let id = agent::spawn_standalone_subagent(
+            provider,
+            sub_req,
+            sid,
+            String::new(),
+            read_only,
             hi_derola::agent::AgentCfg {
                 context_limit: cfg.agent.context_limit,
                 max_rounds: cfg.agent.max_rounds,
@@ -988,16 +1002,15 @@ async fn send(sh: State<'_, Arc<Shared>>, app: AppHandle, text: String) -> Resul
                 nested: false,
                 plan: false,
                 read_only: false,
-                parent_sid: Some(sh.sid.lock().unwrap().clone()),
+                parent_sid: Some(parent_sid),
+                depth: 0,
+                max_depth: cfg.agent.subagent_depth,
             },
             sh.allow_all.clone(),
             sh.mcp.clone(),
             sh.queue.clone(),
             sh.tx.clone(),
         );
-        if id.is_empty() {
-            return Err(format!("unknown agent: {agent_name}"));
-        }
         return Ok(json!({"cmd": false, "subagent": id}));
     }
     let mut composed = String::new();

@@ -37,15 +37,12 @@ pub struct PermCfg {
 
 impl PermCfg {
     pub fn check(&self, tool: &str, args: &str) -> Perm {
+        if tool == "apply_patch" {
+            return self.check_patch(args);
+        }
         let (key, subject) = split_tool(tool, args);
-        for r in &self.rules {
-            if !wc(&r.tool, &key) {
-                continue;
-            }
-            match &r.pattern {
-                Some(p) if !wc(p, &subject) => continue,
-                _ => return parse(&r.permission),
-            }
+        if let Some(p) = self.rules_perm(&key, &subject) {
+            return p;
         }
         // builtin protections: explicit user rules above can override these
         if matches!(
@@ -73,6 +70,39 @@ impl PermCfg {
             Some(s) => parse(s),
             None => default_perm(&key),
         }
+    }
+
+    /// apply_patch touches every path of the patch at once: user rules are
+    /// matched against the first path, builtin protections scan all of them
+    fn check_patch(&self, args: &str) -> Perm {
+        let v: serde_json::Value =
+            serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
+        let paths = v["patch"]
+            .as_str()
+            .map(crate::patch::paths)
+            .unwrap_or_default();
+        if let Some(p) = self.rules_perm("apply_patch", paths.first().map(String::as_str).unwrap_or("")) {
+            return p;
+        }
+        for p in &paths {
+            if env_protected(p) || external_dir(p).is_some() {
+                return Perm::Ask;
+            }
+        }
+        default_perm("apply_patch")
+    }
+
+    fn rules_perm(&self, key: &str, subject: &str) -> Option<Perm> {
+        for r in &self.rules {
+            if !wc(&r.tool, key) {
+                continue;
+            }
+            match &r.pattern {
+                Some(p) if !wc(p, subject) => continue,
+                _ => return Some(parse(&r.permission)),
+            }
+        }
+        None
     }
 }
 
@@ -109,7 +139,7 @@ fn split_tool(tool: &str, args: &str) -> (String, String) {
 
 fn default_perm(key: &str) -> Perm {
     match key {
-        "write_file" | "edit" | "bash" | "mcp" => Perm::Ask,
+        "write_file" | "edit" | "apply_patch" | "bash" | "mcp" => Perm::Ask,
         _ => Perm::Allow,
     }
 }
@@ -181,6 +211,22 @@ pub fn derive_rule(tool: &str, args: &str) -> Option<PermRule> {
         "edit" | "write_file" => {
             let path = v["path"].as_str().unwrap_or("");
             let ext = std::path::Path::new(path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            let p = if ext.is_empty() {
+                "*".to_string()
+            } else {
+                format!("*.{ext}")
+            };
+            (tool.to_string(), p)
+        }
+        "apply_patch" => {
+            let path = crate::patch::paths(v["patch"].as_str().unwrap_or(""))
+                .first()
+                .cloned()
+                .unwrap_or_default();
+            let ext = std::path::Path::new(&path)
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("");

@@ -67,6 +67,17 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "apply_patch".into(),
+            description: "Apply a multi-file patch in the V4A format. Starts with *** Begin Patch, then one or more sections: *** Add File: <path> with every content line prefixed by '+', *** Update File: <path> (optional *** Move to: <newpath>) with hunks of ' ' context, '-' old and '+' new lines (optional '@@' separators), *** Delete File: <path>, and *** End Patch. The ' ' and '-' lines must match the current file contents exactly. Several files can be patched in one call; nothing is written unless every hunk matches. Use it for wide-reaching multi-file changes; prefer edit for small single-file tweaks.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "patch": {"type": "string", "description": "The full patch text"}
+                },
+                "required": ["patch"]
+            }),
+        },
+        ToolSpec {
             name: "list_files".into(),
             description: "List files and directories recursively, up to 3 levels deep.".into(),
             parameters: json!({
@@ -178,7 +189,7 @@ pub fn specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "subagent".into(),
             description: format!(
-                "Spawns a subagent in a fresh context to work on the task and returns its final response. Include all relevant context and instructions in the prompt: the subagent starts with no history. Use for isolated research, exploration or bulk changes. For long tasks set background=true: the tool returns a task id immediately and the result arrives as a new message when done. Cannot ask the user questions.\nAvailable agents:\n{}",
+                "Spawns a subagent in a child context to work on the task and returns its final response. Include all relevant context and instructions in the prompt: a new subagent starts with no history. Use for isolated research, exploration or bulk changes. For long tasks set background=true: the tool returns a task id immediately and the result arrives as a new message when done. Cannot ask the user questions.\nAvailable agents:\n{}",
                 crate::agents::list_for_spec()
             ),
             parameters: json!({
@@ -187,6 +198,7 @@ pub fn specs() -> Vec<ToolSpec> {
                     "description": {"type": "string", "description": "A short 3-5 word label for the task, displayed to the user"},
                     "prompt": {"type": "string", "description": "The task for the subagent to perform"},
                     "agent": {"type": "string", "description": "Agent profile to use, see the list in the description; omit for the default general agent"},
+                    "session_id": {"type": "string", "description": "Continue a previous subagent conversation by passing the id reported with its result; omit to start a new conversation"},
                     "background": {"type": "boolean", "description": "Run in the background: return a task id now, deliver the result later; check progress with task_status"}
                 },
                 "required": ["description", "prompt"]
@@ -253,14 +265,14 @@ pub fn specs() -> Vec<ToolSpec> {
     specs
 }
 
-pub fn specs_core() -> Vec<ToolSpec> {
-    specs().into_iter().filter(|s| s.name != "subagent").collect()
-}
-
-pub fn specs_nested() -> Vec<ToolSpec> {
-    specs_core()
+pub fn specs_nested(allow_subagent: bool) -> Vec<ToolSpec> {
+    specs()
         .into_iter()
-        .filter(|s| s.name != "question" && s.name != "todowrite" && s.name != "todoread")
+        .filter(|s| match s.name.as_str() {
+            "subagent" => allow_subagent,
+            "question" | "todowrite" | "todoread" => false,
+            _ => true,
+        })
         .collect()
 }
 
@@ -282,6 +294,17 @@ pub fn detail(name: &str, args: &str) -> String {
                 d.push_str(" (background)");
             }
             d
+        }
+        "apply_patch" => {
+            let s = v["patch"]
+                .as_str()
+                .map(crate::patch::summarize)
+                .unwrap_or_default();
+            if s.is_empty() {
+                "patch".to_string()
+            } else {
+                s
+            }
         }
         "webfetch" => v["url"].as_str().unwrap_or("").to_string(),
         "websearch" => v["query"].as_str().unwrap_or("").to_string(),
@@ -344,6 +367,35 @@ pub fn preview(name: &str, args: &str) -> Vec<crate::diff::Row> {
             let old = std::fs::read_to_string(path).ok();
             crate::diff::preview_write(old.as_deref(), new)
         }
+        "apply_patch" => {
+            let Some(patch) = v["patch"].as_str() else {
+                return Vec::new();
+            };
+            let mut rows: Vec<crate::diff::Row> = Vec::new();
+            for pv in crate::patch::preview(patch) {
+                if rows.len() > 80 {
+                    break;
+                }
+                rows.push(crate::diff::Row {
+                    tag: 0,
+                    text: format!("--- {}", pv.label),
+                });
+                match (pv.old.as_deref(), pv.new.as_deref()) {
+                    (Some(o), Some(n)) => rows.extend(crate::diff::lines_diff(o, n)),
+                    (None, Some(n)) => rows.extend(crate::diff::preview_write(None, n)),
+                    (Some(o), None) => rows.extend(crate::diff::lines_diff(o, "")),
+                    _ => {}
+                }
+            }
+            if rows.len() > 80 {
+                rows.truncate(80);
+                rows.push(crate::diff::Row {
+                    tag: 0,
+                    text: "...".into(),
+                });
+            }
+            rows
+        }
         _ => Vec::new(),
     }
 }
@@ -377,6 +429,23 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
                 content: content.to_string(),
             })?;
             Ok(format!("wrote {path} ({n} lines){}", post_edit(path).await))
+        }
+        "apply_patch" => {
+            let Some(patch) = v["patch"].as_str() else {
+                bail!("apply_patch: patch required");
+            };
+            let ops = crate::patch::parse(patch)?;
+            let planned = crate::patch::plan(ops)?;
+            let items = planned.items.clone();
+            let written = crate::patch::commit(planned)?;
+            let mut out = String::from("Success. Updated the following files:");
+            for (k, p) in &items {
+                out.push_str(&format!("\n{k} {p}"));
+            }
+            for p in &written {
+                out.push_str(&post_edit(p).await);
+            }
+            Ok(out)
         }
         "edit" => {
             let Some(path) = v["path"].as_str() else {

@@ -123,6 +123,7 @@ impl Provider for Anthropic {
 
         let mut full = String::new();
         let mut calls: Vec<ToolCall> = Vec::new();
+        let mut stop = String::new();
         if req.stream {
             let mut pending: Vec<(u64, String, String, String)> = Vec::new();
             sse_lines(resp, |line| {
@@ -185,6 +186,11 @@ impl Provider for Anthropic {
                         .map_err(|_| anyhow::anyhow!("closed"))?;
                     }
                     Some("message_delta") => {
+                        if let Some(sr) = v["delta"]["stop_reason"].as_str() {
+                            if !sr.is_empty() {
+                                stop = sr.to_string();
+                            }
+                        }
                         tx.send(ApiEvent::Usage {
                             input: 0,
                             output: v["usage"]["output_tokens"].as_u64().unwrap_or(0),
@@ -209,6 +215,7 @@ impl Provider for Anthropic {
         } else {
             let text = resp.text().await?;
             let v: Value = serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+            stop = v["stop_reason"].as_str().unwrap_or("").to_string();
             for block in v["content"].as_array().into_iter().flatten() {
                 match block["type"].as_str() {
                     Some("text") => {
@@ -242,7 +249,11 @@ impl Provider for Anthropic {
             })
             .map_err(|_| anyhow::anyhow!("closed"))?;
         }
-        Ok(Reply { text: full, calls })
+        Ok(Reply {
+            text: full,
+            calls,
+            truncated: stop == "max_tokens",
+        })
     }
 }
 

@@ -44,6 +44,8 @@ pub struct AgentConfig {
     pub max_rounds: usize,
     #[serde(default = "default_output_budget")]
     pub output_budget: usize,
+    #[serde(default = "default_subagent_depth")]
+    pub subagent_depth: usize,
 }
 
 impl Default for AgentConfig {
@@ -52,8 +54,13 @@ impl Default for AgentConfig {
             context_limit: default_context_limit(),
             max_rounds: default_max_rounds(),
             output_budget: default_output_budget(),
+            subagent_depth: default_subagent_depth(),
         }
     }
+}
+
+fn default_subagent_depth() -> usize {
+    1
 }
 
 fn default_context_limit() -> u64 {

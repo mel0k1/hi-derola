@@ -39,16 +39,22 @@ SCENARIO = {"edit_done": False, "steer_started": False, "steer_done": False,
             "feedback_seen": False,
             "kill_started": False, "kill_status_seen": False, "kill_requested": False,
             "kill_id": "", "killed_seen": False,
-            "plan_started": False, "plan_deny_seen": False}
+            "plan_started": False, "plan_deny_seen": False,
+            "patch_done": False, "cont_done": False,
+            "subcont_done": False, "subcont_sub_seen": False,
+            "sub_fresh": False, "sub_sid": "",
+            "resume_done": False}
 
 
-def sse_response(handler, chunks):
+def sse_response(handler, chunks, finish="stop"):
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream")
     handler.end_headers()
     for c in chunks:
         data = json.dumps({"choices": [{"delta": c}]})
         handler.wfile.write(f"data: {data}\n\n".encode())
+    fr = json.dumps({"choices": [{"delta": {}, "finish_reason": finish}]})
+    handler.wfile.write(f"data: {fr}\n\n".encode())
     handler.wfile.write(b"data: [DONE]\n\n")
     handler.wfile.flush()
 
@@ -85,12 +91,12 @@ class Mock(BaseHTTPRequestHandler):
         has_file_block = "[file: README.md]" in last_user
         tool_msgs = [m for m in msgs if m["role"] == "tool"]
 
-        def respond(chunks, handler=None):
+        def respond(chunks, handler=None, finish="stop"):
             handler = handler or self
             if body.get("stream") is False:
                 data = json.dumps({"choices": [
                     {"message": {"role": c.get("role", "assistant"), "content": c.get("content", "")},
-                     "finish_reason": "stop"} for c in chunks
+                     "finish_reason": finish} for c in chunks
                 ]})
                 raw = data.encode()
                 handler.send_response(200)
@@ -99,7 +105,7 @@ class Mock(BaseHTTPRequestHandler):
                 handler.end_headers()
                 handler.wfile.write(raw)
                 return
-            sse_response(handler, chunks)
+            sse_response(handler, chunks, finish)
 
         if not SCENARIO["edit_done"]:
             check("mention block reached the model", has_file_block)
@@ -159,10 +165,19 @@ class Mock(BaseHTTPRequestHandler):
             return
         is_sub = bool(msgs) and msgs[0]["role"] == "system" and "subagent" in msgs[0]["content"]
         if is_sub:
-            prompt = next((m["content"] for m in msgs if m["role"] == "user"), "")
+            user_msgs = [m for m in msgs if m["role"] == "user"]
+            prompt = user_msgs[-1]["content"] if user_msgs else ""
+            if len(user_msgs) > 1:
+                check("continued subagent kept history",
+                      "deep research task" in user_msgs[0]["content"])
+                SCENARIO["subcont_sub_seen"] = True
+                respond([{"role": "assistant", "content": "SUB2_DONE: continued with history"}])
+                return
             text = "SUB_DONE: found 3 files"
             if "count bg files" in prompt:
                 text = "SUB_BG: bg task result 42"
+            elif "deep research task" in prompt:
+                text = "SUB1_DONE: research part 1"
             respond([{"role": "assistant", "content": text}])
             return
         if not SCENARIO["sub_done"]:
@@ -294,6 +309,73 @@ class Mock(BaseHTTPRequestHandler):
             SCENARIO["plan_deny_seen"] = True
             respond([{"role": "assistant", "content": "PLAN_OK: step 1 read code, step 2 fix bug"}])
             return
+        if not SCENARIO["patch_done"]:
+            res = any("Success. Updated the following files" in m["content"] for m in tool_msgs)
+            if res:
+                check("apply_patch result reached the model", res)
+                SCENARIO["patch_done"] = True
+                chunks = [{"role": "assistant", "content": "PATCH_OK"}]
+            else:
+                patch = ("*** Begin Patch\n"
+                         "*** Add File: patch_new.txt\n"
+                         "+patch line one\n"
+                         "*** Update File: app.txt\n"
+                         "@@\n"
+                         " value = 2\n"
+                         "-name = demo\n"
+                         "+name = patched\n"
+                         "*** End Patch")
+                chunks = tool_call_chunks("apply_patch", json.dumps({"patch": patch}))
+            respond(chunks)
+            return
+        if not SCENARIO["cont_done"]:
+            if "Continue from where you left off" in last_user:
+                check("continue prompt reached the model", True)
+                SCENARIO["cont_done"] = True
+                chunks = [{"role": "assistant", "content": "CONT_OK"}]
+            else:
+                chunks = [{"role": "assistant", "content": "PARTIAL_ANALYSIS "}]
+            respond(chunks, finish="length" if "Continue from" not in last_user else "stop")
+            return
+        if not SCENARIO["subcont_done"]:
+            sub2 = any("SUB2_DONE" in m["content"] for m in tool_msgs)
+            if sub2:
+                SCENARIO["subcont_done"] = True
+                chunks = [{"role": "assistant", "content": "SUBCONT_OK"}]
+            elif SCENARIO["sub_sid"]:
+                chunks = tool_call_chunks("subagent", json.dumps({
+                    "description": "continue research",
+                    "prompt": "now summarize it",
+                    "session_id": SCENARIO["sub_sid"],
+                }))
+            elif SCENARIO["sub_fresh"]:
+                last = tool_msgs[-1]["content"] if tool_msgs else ""
+                mm = re.search(r"\(subagent session: (s-[0-9a-z-]+);", last)
+                if mm:
+                    SCENARIO["sub_sid"] = mm.group(1)
+                    chunks = tool_call_chunks("subagent", json.dumps({
+                        "description": "continue research",
+                        "prompt": "now summarize it",
+                        "session_id": SCENARIO["sub_sid"],
+                    }))
+                else:
+                    chunks = [{"role": "assistant", "content": "SUBCONT_NO_SID"}]
+            else:
+                SCENARIO["sub_fresh"] = True
+                chunks = tool_call_chunks("subagent", json.dumps({
+                    "description": "research",
+                    "prompt": "deep research task",
+                }))
+            respond(chunks)
+            return
+        if not SCENARIO["resume_done"]:
+            if len(msgs) > 3 and "after resume" in last_user and any(
+                    "check @README.md" in m["content"] for m in msgs if m["role"] == "user"):
+                check("resumed session kept history", True)
+                SCENARIO["resume_done"] = True
+            chunks = [{"role": "assistant", "content": "RESUME_OK"}]
+            respond(chunks)
+            return
         respond([{"role": "assistant", "content": "ALL_DONE"}])
 
 
@@ -307,6 +389,7 @@ def run_pty():
     cfg_dir = os.path.join(WORKDIR, ".config")
     os.makedirs(os.path.join(cfg_dir, "hi-derola"), exist_ok=True)
     env["XDG_CONFIG_HOME"] = cfg_dir
+    env["HI_DEROLA_SESSIONS_DIR"] = os.path.join(WORKDIR, "sessions")
     with open(os.path.join(cfg_dir, "hi-derola", "config.toml"), "w") as f:
         f.write(
             "[provider]\n"
@@ -461,6 +544,58 @@ def run_pty():
             os.write(fd, b"\r")
             sent = 18
         elif sent == 18 and "PLAN_OK" in plain:
+            time.sleep(0.4)
+            type_str("/plan")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            sent = 19
+        elif sent == 19 and "plan mode off" in plain:
+            time.sleep(0.4)
+            type_str("apply a patch")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            sent = 20
+        elif sent == 20 and "run apply_patch" in plain:
+            time.sleep(0.4)
+            os.write(fd, b"y")
+            sent = 21
+        elif sent == 21 and "PATCH_OK" in plain:
+            time.sleep(0.4)
+            type_str("test continuation")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            sent = 22
+        elif sent == 22 and "CONT_OK" in plain:
+            time.sleep(0.4)
+            type_str("spawn research")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            sent = 23
+        elif sent == 23 and "SUBCONT_OK" in plain:
+            time.sleep(0.4)
+            type_str("/sessions")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            sent = 24
+        elif sent == 24 and "saved sessions" in plain:
+            time.sleep(0.4)
+            type_str("/clear")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            sent = 25
+        elif sent == 25 and "new session" in plain:
+            time.sleep(0.4)
+            type_str("/resume")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            sent = 26
+        elif sent == 26 and "resumed" in plain:
+            time.sleep(0.4)
+            type_str("after resume")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            sent = 27
+        elif sent == 27 and "RESUME_OK" in plain:
             break
     try:
         os.kill(pid, signal.SIGKILL)
@@ -486,7 +621,7 @@ check("confirm box appeared", "y/n" in plain or "run edit" in plain.lower())
 check("mention note", "attached" in plain)
 with open(os.path.join(WORKDIR, "app.txt"), "rb") as f:
     disk = f.read()
-check("edit written with CRLF preserved", disk == b"value = 2\r\nname = demo\r\nend\r\n")
+check("edit + apply_patch kept CRLF", disk == b"value = 2\r\nname = patched\r\nend\r\n")
 check("queued note shown", "queued: will steer the current run" in plain)
 check("steer note shown", "steer: second" in plain)
 check("deny note shown", "denied by permissions" in plain)
@@ -514,6 +649,17 @@ check("plan mode note shown", "plan mode on" in plain)
 check("plan mode denial reached the model", SCENARIO["plan_deny_seen"])
 check("plan mode blocked the write", not os.path.exists(os.path.join(WORKDIR, "plan_probe.txt")))
 check("plan answer rendered", "PLAN_OK" in plain)
+check("apply_patch confirm shown", "run apply_patch" in plain)
+check("apply_patch result rendered", "PATCH_OK" in plain)
+check("apply_patch wrote new file", os.path.exists(os.path.join(WORKDIR, "patch_new.txt")))
+check("continue prompt reached the model", SCENARIO["cont_done"])
+check("continuation answer rendered", "CONT_OK" in plain)
+check("subagent continuation kept history", SCENARIO["subcont_sub_seen"])
+check("continued subagent answer rendered", "SUBCONT_OK" in plain)
+check("sessions listed", "saved sessions" in plain)
+check("session resumed", "resumed" in plain)
+check("resumed history reached the model", SCENARIO["resume_done"])
+check("resume answer rendered", "RESUME_OK" in plain)
 
 shutil.rmtree(WORKDIR, ignore_errors=True)
 with open("/tmp/hiderola-e2e-log.txt", "w") as f:

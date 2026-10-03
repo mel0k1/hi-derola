@@ -565,6 +565,10 @@ async function handleEvent(ev) {
     }
     case "note": {
       if (ev.s) {
+        if (streamRaw !== null) {
+          streamRaw = null;
+          streamBody = null;
+        }
         note(ev.s);
         const m = ev.s.match(/task (bg-\d+) (finished|failed|was killed|killed)/);
         if (m) endBg(m[1]);

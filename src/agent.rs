@@ -22,6 +22,8 @@ pub struct AgentCfg {
     pub plan: bool,
     pub read_only: bool,
     pub parent_sid: Option<String>,
+    pub depth: usize,
+    pub max_depth: usize,
 }
 
 impl Default for AgentCfg {
@@ -35,6 +37,8 @@ impl Default for AgentCfg {
             plan: false,
             read_only: false,
             parent_sid: None,
+            depth: 0,
+            max_depth: 1,
         }
     }
 }
@@ -46,6 +50,8 @@ const IMG_TOKEN_EST: usize = 1_500;
 const OUTPUT_FLOOR: u64 = 1_024;
 const EMPTY_RETRIES: usize = 2;
 const OVERFLOW_RETRIES: usize = 2;
+const MAX_CONTINUES: usize = 3;
+const CONTINUE_PROMPT: &str = "The previous response was interrupted by the output token limit. Continue from where you left off without repeating completed content.";
 
 fn effective_limit(cfg: &AgentCfg, model: &str) -> u64 {
     if cfg.context_limit > 0 {
@@ -90,17 +96,20 @@ pub async fn run(
     let mut round = 0;
     let mut empty_retries = 0usize;
     let mut overflow_retries = 0usize;
+    let mut continues = 0usize;
     let mut used: u64 = 0;
     loop {
         round += 1;
         let mcp_now = mcp.lock().unwrap().clone();
         let mut specs = if cfg.nested {
-            tools::specs_nested()
+            tools::specs_nested(cfg.depth < cfg.max_depth)
         } else {
             tools::specs()
         };
         if cfg.plan {
-            specs.retain(|s| s.name != "write_file" && s.name != "edit");
+            specs.retain(|s| {
+                s.name != "write_file" && s.name != "edit" && s.name != "apply_patch"
+            });
         }
         if let Some(m) = &mcp_now {
             specs.extend(m.specs().await);
@@ -180,6 +189,18 @@ pub async fn run(
                 continue;
             }
         }
+        if reply.truncated && continues < MAX_CONTINUES {
+            continues += 1;
+            let _ = tx.send(ApiEvent::Note(format!(
+                "output was cut off by the token limit, continuing ({continues}/{MAX_CONTINUES})"
+            )));
+            // truncated tool calls are dropped: their args would be broken JSON
+            // and an unanswered tool_use would corrupt the transcript
+            msgs.push(Message::new(Role::Assistant, reply.text.clone()));
+            msgs.push(Message::new(Role::User, CONTINUE_PROMPT));
+            req.messages = msgs.clone();
+            continue;
+        }
         if reply.calls.is_empty() {
             msgs.push(Message::new(Role::Assistant, reply.text.clone()));
             let _ = tx.send(ApiEvent::Done {
@@ -199,7 +220,11 @@ pub async fn run(
                 diff: tools::preview(&call.name, &call.args),
             })
             .map_err(|_| anyhow!("closed"))?;
-            let plan_block = cfg.plan && matches!(call.name.as_str(), "write_file" | "edit");
+            let plan_block = cfg.plan
+                && matches!(
+                    call.name.as_str(),
+                    "write_file" | "edit" | "apply_patch"
+                );
             let perm = if plan_block {
                 crate::perm::Perm::Deny
             } else {
@@ -281,102 +306,53 @@ pub async fn run(
                     .filter(|s| !s.is_empty() && *s != "general")
                     .map(str::to_string);
                 let background = v["background"].as_bool().unwrap_or(false);
+                let session_id = v["session_id"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
                 if prompt.is_empty() {
                     "error: subagent: prompt required".to_string()
-                } else if cfg.nested {
-                    "error: nested subagents are not allowed".to_string()
+                } else if cfg.depth >= cfg.max_depth {
+                    "error: subagent: max nesting depth reached (agent.subagent_depth)".to_string()
                 } else if let Some(name) = &agent_name {
                     if crate::agents::get(name).is_none() {
                         format!("error: subagent: unknown agent: {name}")
-                    } else if background {
-                        spawn_standalone_subagent(
+                    } else {
+                        dispatch_subagent(
                             provider.clone(),
-                            Some(name.clone()),
-                            prompt,
+                            agent_name.as_deref(),
+                            &prompt,
+                            session_id.as_deref(),
+                            cfg.parent_sid.as_deref(),
+                            &req,
                             desc,
-                            req.model.clone(),
-                            req.max_tokens,
-                            req.temperature,
-                            req.top_p,
+                            background,
                             cfg.clone(),
                             allow_all.clone(),
                             mcp.clone(),
                             queue.clone(),
-                            tx.clone(),
-                        )
-                    } else {
-                        let _ = tx.send(ApiEvent::Note(format!("subagent started: {desc}")));
-                        let sub_req = build_sub_req(
-                            crate::agents::get(name).as_ref(),
-                            &prompt,
-                            &req.model,
-                            req.max_tokens,
-                            req.temperature,
-                            req.top_p,
-                        );
-                        match run_subagent(
-                            provider.clone(),
-                            sub_req,
-                            cfg.clone(),
-                            allow_all.clone(),
                             &tx,
-                            mcp.clone(),
-                            crate::agents::get(name).map(|d| d.read_only).unwrap_or(false),
-                            desc.clone(),
                         )
                         .await
-                        {
-                            Ok(t) => {
-                                let _ = tx.send(ApiEvent::Note(format!("subagent done: {desc}")));
-                                t
-                            }
-                            Err(e) => format!("error: subagent failed: {e:#}"),
-                        }
                     }
-                } else if background {
-                    spawn_standalone_subagent(
+                } else {
+                    dispatch_subagent(
                         provider.clone(),
                         None,
-                        prompt,
+                        &prompt,
+                        session_id.as_deref(),
+                        cfg.parent_sid.as_deref(),
+                        &req,
                         desc,
-                        req.model.clone(),
-                        req.max_tokens,
-                        req.temperature,
-                        req.top_p,
+                        background,
                         cfg.clone(),
                         allow_all.clone(),
                         mcp.clone(),
                         queue.clone(),
-                        tx.clone(),
-                    )
-                } else {
-                    let _ = tx.send(ApiEvent::Note(format!("subagent started: {desc}")));
-                    let sub_req = build_sub_req(
-                        None,
-                        &prompt,
-                        &req.model,
-                        req.max_tokens,
-                        req.temperature,
-                        req.top_p,
-                    );
-                    match run_subagent(
-                        provider.clone(),
-                        sub_req,
-                        cfg.clone(),
-                        allow_all.clone(),
                         &tx,
-                        mcp.clone(),
-                        false,
-                        desc.clone(),
                     )
                     .await
-                    {
-                        Ok(t) => {
-                            let _ = tx.send(ApiEvent::Note(format!("subagent done: {desc}")));
-                            t
-                        }
-                        Err(e) => format!("error: subagent failed: {e:#}"),
-                    }
                 }
             } else if call.name == "read_file" {
                 let v: Value = serde_json::from_str(&call.args).unwrap_or(Value::Null);
@@ -651,18 +627,104 @@ fn build_sub_req(
     }
 }
 
+/// resolve + launch a subagent call from the tool loop (fresh or continued)
+#[allow(clippy::too_many_arguments)]
+async fn dispatch_subagent(
+    provider: Arc<dyn Provider>,
+    agent: Option<&str>,
+    prompt: &str,
+    session_id: Option<&str>,
+    parent_sid: Option<&str>,
+    req: &ChatRequest,
+    desc: String,
+    background: bool,
+    cfg: AgentCfg,
+    allow_all: Arc<AtomicBool>,
+    mcp: McpSlot,
+    queue: Arc<Mutex<Vec<String>>>,
+    tx: &UnboundedSender<ApiEvent>,
+) -> String {
+    let (sub_req, sid, read_only) = match resolve_sub_req(
+        agent,
+        prompt,
+        session_id,
+        parent_sid,
+        &req.model,
+        req.max_tokens,
+        req.temperature,
+        req.top_p,
+    ) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    if background {
+        spawn_standalone_subagent(
+            provider,
+            sub_req,
+            sid,
+            desc,
+            read_only,
+            cfg,
+            allow_all,
+            mcp,
+            queue,
+            tx.clone(),
+        )
+    } else {
+        let _ = tx.send(ApiEvent::Note(format!("subagent started: {desc}")));
+        match run_subagent(provider, sub_req, sid, cfg, allow_all, tx, mcp, read_only, desc.clone())
+            .await
+        {
+            Ok(t) => {
+                let _ = tx.send(ApiEvent::Note(format!("subagent done: {desc}")));
+                t
+            }
+            Err(e) => format!("error: subagent failed: {e:#}"),
+        }
+    }
+}
+
+/// Build the request for a subagent run. When session_id refers to a stored child
+/// of this session the conversation is continued, otherwise a fresh one starts.
+/// Returns (request, session id, read_only).
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_sub_req(
+    agent: Option<&str>,
+    prompt: &str,
+    session_id: Option<&str>,
+    parent_sid: Option<&str>,
+    model: &str,
+    max_tokens: Option<u32>,
+    temperature: Option<f64>,
+    top_p: Option<f64>,
+) -> Result<(ChatRequest, String, bool), String> {
+    let decl = agent.and_then(crate::agents::get);
+    let read_only = decl.as_ref().map(|d| d.read_only).unwrap_or(false);
+    let mut sub_req = build_sub_req(decl.as_ref(), prompt, model, max_tokens, temperature, top_p);
+    if let Some(sid) = session_id {
+        let st = crate::sessions::load(sid)
+            .map_err(|_| format!("error: subagent session not found: {sid}"))?;
+        if st.parent.is_none() || st.parent.as_deref() != parent_sid {
+            return Err("error: subagent session was not started from this session".to_string());
+        }
+        sub_req.system = st.system;
+        sub_req.messages = st.messages;
+        sub_req.messages.push(Message::new(Role::User, prompt.to_string()));
+        Ok((sub_req, sid.to_string(), read_only))
+    } else {
+        Ok((sub_req, crate::sessions::new_id(), read_only))
+    }
+}
+
 /// Spawn a background subagent outside of the tool loop (subagent tool with background=true
 /// and manual @agent invocations from the UIs). Returns the task id.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_standalone_subagent(
     provider: Arc<dyn Provider>,
-    agent: Option<String>,
-    prompt: String,
+    sub_req: ChatRequest,
+    sid: String,
     desc: String,
-    model: String,
-    max_tokens: Option<u32>,
-    temperature: Option<f64>,
-    top_p: Option<f64>,
+    read_only: bool,
     cfg: AgentCfg,
     allow_all: Arc<AtomicBool>,
     mcp: McpSlot,
@@ -670,32 +732,24 @@ pub fn spawn_standalone_subagent(
     tx: UnboundedSender<ApiEvent>,
 ) -> String {
     let desc = if desc.trim().is_empty() {
-        prompt
-            .lines()
-            .next()
-            .unwrap_or("subagent")
-            .chars()
-            .take(60)
-            .collect()
+        sub_req
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::User)
+            .map(|m| {
+                m.content
+                    .lines()
+                    .next()
+                    .unwrap_or("subagent")
+                    .chars()
+                    .take(60)
+                    .collect()
+            })
+            .unwrap_or_else(|| "subagent".to_string())
     } else {
         desc
     };
-    let decl = agent.as_deref().and_then(crate::agents::get);
-    if let Some(name) = &agent {
-        if decl.is_none() {
-            let _ = tx.send(ApiEvent::Note(format!("error: unknown agent: {name}")));
-            return String::new();
-        }
-    }
-    let read_only = decl.as_ref().map(|d| d.read_only).unwrap_or(false);
-    let sub_req = build_sub_req(
-        decl.as_ref(),
-        &prompt,
-        &model,
-        max_tokens,
-        temperature,
-        top_p,
-    );
     let id = crate::bg::start("subagent", &desc);
     let _ = tx.send(ApiEvent::Note(format!(
         "background task {id} started: {desc}"
@@ -712,6 +766,7 @@ pub fn spawn_standalone_subagent(
             run_subagent(
                 provider,
                 sub_req,
+                sid,
                 cfg2,
                 allow2,
                 &tx3,
@@ -755,9 +810,11 @@ pub fn spawn_standalone_subagent(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_subagent<'a>(
     provider: Arc<dyn Provider>,
     req: ChatRequest,
+    sid: String,
     cfg: AgentCfg,
     allow_all: Arc<AtomicBool>,
     tx: &'a UnboundedSender<ApiEvent>,
@@ -794,6 +851,7 @@ fn run_subagent<'a>(
         });
         let sub_cfg = AgentCfg {
             nested: true,
+            depth: cfg.depth + 1,
             read_only,
             parent_sid: None,
             ..cfg.clone()
@@ -814,30 +872,30 @@ fn run_subagent<'a>(
             return Err(e);
         }
         let text = result.lock().unwrap().take();
-        // persist the subagent run as a child session when the parent is known
-        if let Some(parent) = &cfg.parent_sid {
-            if let Some(msgs) = messages.lock().unwrap().take() {
-                if !msgs.is_empty() {
-                    let st = crate::sessions::StoredSession {
-                        id: crate::sessions::new_id(),
-                        title: format!("↳ {desc}"),
-                        created: 0,
-                        updated: 0,
-                        system: req.system.clone(),
-                        messages: msgs,
-                        tokens_in: 0,
-                        tokens_out: 0,
-                        cost: 0.0,
-                        todos: Vec::new(),
-                        parent: Some(parent.clone()),
-                    };
-                    let _ = crate::sessions::save(&st);
-                }
+        // persist the subagent conversation under a fixed id so the model can
+        // continue it later via the session_id argument
+        if let Some(msgs) = messages.lock().unwrap().take() {
+            if !msgs.is_empty() {
+                let st = crate::sessions::StoredSession {
+                    id: sid.clone(),
+                    title: format!("↳ {desc}"),
+                    created: 0,
+                    updated: 0,
+                    system: req.system.clone(),
+                    messages: msgs,
+                    tokens_in: 0,
+                    tokens_out: 0,
+                    cost: 0.0,
+                    todos: Vec::new(),
+                    parent: cfg.parent_sid.clone(),
+                };
+                let _ = crate::sessions::save(&st);
             }
         }
-        Ok(
-            text.unwrap_or_else(|| "(subagent finished without a final message)".into()),
-        )
+        let text = text.unwrap_or_else(|| "(subagent finished without a final message)".into());
+        Ok(format!(
+            "{text}\n\n(subagent session: {sid}; pass it back as session_id to continue this conversation with full context)"
+        ))
     })
 }
 

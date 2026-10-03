@@ -67,6 +67,8 @@ context_limit = 0
 max_rounds = 15
 # max chars of a single tool result kept in the context
 output_budget = 32768
+# how many levels of subagent-in-subagent are allowed (1 = the main agent can spawn subagents)
+subagent_depth = 1
 
 # language server diagnostics fed back after write_file/edit
 # auto-detected on PATH: rust-analyzer, pyright/basedpyright/pylsp, typescript-language-server, gopls, clangd
