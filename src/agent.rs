@@ -46,6 +46,9 @@ impl Default for AgentCfg {
 const COMPACT_KEEP_TOKENS: usize = 15_000;
 const COMPACT_MIN_MSGS: usize = 8;
 const COMPACT_TOOL_CLIP: usize = 1_250;
+/// separator between the original first user message and the compaction summary
+const SUMMARY_MARKER: &str =
+    "\n\n---\nSummary of the earlier conversation (dropped to fit the context window):\n";
 const IMG_TOKEN_EST: usize = 1_500;
 const OUTPUT_FLOOR: u64 = 1_024;
 const EMPTY_RETRIES: usize = 2;
@@ -1042,18 +1045,32 @@ async fn compact(
     };
     let text = transcript(&msgs[1..cut]);
     let kept = msgs.len() - cut;
+    // summary left by a previous compaction lives in the first user message;
+    // on re-compaction it must be merged, not dropped or duplicated
+    let prior = prior_summary(&msgs[0].content).map(str::to_string);
     const SUMMARY_RULES: &str = "Sections: Objective; Requirements; Decisions; Work State (Completed / Active / Blocked); Next Move; Relevant Files (up to 15, one line each); Important Context.\n\
          Rules: dense facts only, no fluff; keep file paths, commands and error messages exact; do not restate coding conventions from AGENTS.md (they are provided to the next agent separately); at most 600 words.";
+    const MERGE_RULES: &str = "The <prior-summary> summarizes everything that happened before the transcript above. Write a new summary that merges both sources. The prior summary is discarded after this: anything you do not carry into the new summary is lost.\n\
+         When merging:\n\
+         - carry objectives, constraints, user directives, decisions and parallel workstreams from the prior summary even when the transcript does not mention them; drop only what is finished and no longer needed;\n\
+         - the transcript is more recent than the prior summary: where they conflict, the transcript wins - state the corrected fact and drop the old claim;\n\
+         - add new progress, decisions, constraints and context from the transcript;\n\
+         - move finished work from Work State / Active to Completed;\n\
+         - if a blocker has been resolved, update it while keeping details still needed to continue;\n\
+         - update Objective and Next Move to reflect the current state.";
+    let task = match prior.as_deref() {
+        None => format!(
+            "Conversation transcript:\n\n{text}\n\nWrite the summary now, following the template sections."
+        ),
+        Some(p) => format!(
+            "Conversation transcript:\n\n{text}\n\nHere is the summary of the conversation before the transcript:\n\n<prior-summary>\n{p}\n</prior-summary>\n\n{MERGE_RULES}\n\nWrite the merged summary now, following the template sections."
+        ),
+    };
     let mut sum_req = ChatRequest {
         system: format!(
             "You summarize coding agent conversations so work can continue seamlessly. Reply following the template exactly.\n\n{SUMMARY_RULES}"
         ),
-        messages: vec![Message::new(
-            Role::User,
-            format!(
-                "Conversation transcript:\n\n{text}\n\nWrite the summary now, following the template sections."
-            ),
-        )],
+        messages: vec![Message::new(Role::User, task)],
         model: req.model.clone(),
         max_tokens: req.max_tokens,
         temperature: req.temperature,
@@ -1090,18 +1107,38 @@ async fn compact(
         }
     }
     let mut first = msgs[0].clone();
-    first
-        .content
-        .push_str("\n\n---\nSummary of the earlier conversation (dropped to fit the context window):\n");
-    first.content.push_str(&summary);
+    apply_summary(&mut first, &summary);
     msgs.drain(1..cut);
     msgs[0] = first;
     let _ = tx.send(ApiEvent::Note(format!(
-        "context compacted: {} messages summarized, {} kept",
+        "{}: {} messages summarized, {} kept",
+        if prior.is_some() {
+            "context compacted (merged with the previous summary)"
+        } else {
+            "context compacted"
+        },
         cut - 1,
         kept
     )));
     true
+}
+
+/// summary text left by a previous compaction in the first user message, if any
+fn prior_summary(content: &str) -> Option<&str> {
+    content
+        .split_once(SUMMARY_MARKER)
+        .map(|(_, s)| s.trim())
+        .filter(|s| !s.is_empty())
+}
+
+/// attach `summary` to the first user message, replacing any previous summary
+/// so repeated compactions do not accumulate stale summaries
+fn apply_summary(first: &mut Message, summary: &str) {
+    if let Some(i) = first.content.find(SUMMARY_MARKER) {
+        first.content.truncate(i);
+    }
+    first.content.push_str(SUMMARY_MARKER);
+    first.content.push_str(summary);
 }
 
 fn est_tokens(msgs: &[Message]) -> usize {
@@ -1202,5 +1239,44 @@ mod tests {
         assert!(clip("0123456789abcdef", 8).ends_with("..."));
         assert_eq!(est_tokens(&[m(Role::User, "x")]), 0);
         assert_eq!(est_tokens(&[m(Role::User, "abcd")]), 1);
+    }
+
+    #[test]
+    fn summary_merge() {
+        // plain first message -> no prior summary
+        assert_eq!(prior_summary("fix the parser"), None);
+        assert_eq!(prior_summary(""), None);
+        // a marker with an empty body is not a summary
+        assert_eq!(prior_summary("task\n\n---\nSummary of the earlier conversation (dropped to fit the context window):\n  "), None);
+
+        // first compaction attaches the summary after the original task text
+        let mut first = m(Role::User, "fix the parser");
+        apply_summary(&mut first, "Objective: fix the parser");
+        assert!(first.content.starts_with("fix the parser\n\n---\nSummary"));
+        assert!(first.content.ends_with("Objective: fix the parser"));
+        assert_eq!(prior_summary(&first.content), Some("Objective: fix the parser"));
+
+        // second compaction REPLACES the old summary instead of accumulating
+        apply_summary(&mut first, "Objective: fix the parser\nWork State: done");
+        assert_eq!(first.content.matches(SUMMARY_MARKER).count(), 1);
+        assert!(first.content.starts_with("fix the parser\n\n---\nSummary"));
+        assert!(!first.content.contains("done\n\n---\nSummary"));
+        assert_eq!(
+            prior_summary(&first.content),
+            Some("Objective: fix the parser\nWork State: done")
+        );
+        // the original task text survives every re-compaction
+        assert!(prior_summary(&first.content).is_some());
+        assert!(first.content.split_once(SUMMARY_MARKER).unwrap().0 == "fix the parser");
+
+        // a merged first message keeps compact_split happy: role stays User
+        let mut msgs: Vec<Message> = std::iter::once(first)
+            .chain((0..12).map(|_| m(Role::Assistant, &"x".repeat(40))))
+            .collect();
+        assert!(compact_split(&msgs, 50).is_some());
+        // and the prior summary never leaks into the transcript being summarized
+        let cut = compact_split(&msgs, 50).unwrap();
+        let t = transcript(&msgs[1..cut]);
+        assert!(!t.contains("Objective: fix the parser"));
     }
 }

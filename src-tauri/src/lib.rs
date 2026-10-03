@@ -822,7 +822,7 @@ fn note(s: impl Into<String>) -> Value {
     json!({"cmd": true, "note": s.into()})
 }
 
-fn command(sh: &Shared, app: &AppHandle, line: &str) -> Value {
+fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
     let (cmd, arg) = line
         .split_once(' ')
         .map(|(c, a)| (c, a.trim()))

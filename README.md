@@ -40,6 +40,7 @@ A high-performance, lightweight chat and autonomous coding assistant written in 
 - permission rules: `allow | ask | deny` per tool plus wildcard patterns (e.g. allow `git *`, deny `rm *`) in `[permissions]`, shown in GUI settings; built-in protections ask before reading secret files (`.env`, `prod.env`, ...) and before touching paths outside the working directory (explicit rules override); "always allow" (`w` in TUI, button in GUI) saves a wildcard rule to the config (`git push *`, `*.rs`, `https://host/*`, `mcp__srv__*`)
 - mcp servers over stdio and streamable http: tools exposed as `mcp__<name>__<tool>`
 - agent loop: token-budgeted context compaction (template summary, keeps the last ~15k tokens verbatim, on overflow too), output `max_tokens` shrinks to the remaining window, per-tool output budget, cached-tokens-aware cost, graceful wrap-up at the round limit that keeps the cache prefix; a reply cut off by the output limit continues automatically ("continue from where you left off", up to 3 times — truncated tool calls are dropped instead of corrupting the transcript)
+- repeated compaction merges instead of starting over: a fresh `/compact` (or an auto one) passes the previous summary as `<prior-summary>` and folds it into the new one — older decisions and constraints survive every compaction cycle, and the old summary is replaced rather than accumulating
 - markdown rendering in answers, token usage counters, automatic retry with backoff on 429/5xx and empty replies
 
 ### gui extras
