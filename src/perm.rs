@@ -56,6 +56,20 @@ impl PermCfg {
                 return Perm::Ask;
             }
         }
+        // an external bash workdir is the same escape as an external file path
+        if key == "bash" {
+            let v: serde_json::Value =
+                serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
+            if let Some(w) = v["workdir"]
+                .as_str()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                if external_dir(w).is_some() {
+                    return Perm::Ask;
+                }
+            }
+        }
         let field = match key.as_str() {
             "edit" => self.edit.as_deref(),
             "write_file" => self.write_file.as_deref(),
@@ -159,13 +173,17 @@ fn env_protected(path: &str) -> bool {
     name == ".env" || name.starts_with(".env.") || name.ends_with(".env")
 }
 
-/// returns Some(resolved path) when the target lies outside the working directory
+/// returns Some(resolved path) when the target lies outside the working
+/// directory; both sides are canonicalized, otherwise the Windows extended
+/// path prefix (\\?\C:\...) never matches the plain cwd and every internal
+/// path would look external
 fn external_dir(path: &str) -> Option<String> {
     let p = path.trim();
     if p.is_empty() {
         return None;
     }
-    let cwd = std::env::current_dir().ok()?;
+    let cwd_raw = std::env::current_dir().ok()?;
+    let cwd = std::fs::canonicalize(&cwd_raw).unwrap_or(cwd_raw);
     let base = std::path::Path::new(p);
     let abs = if base.is_absolute() {
         base.to_path_buf()
@@ -187,6 +205,34 @@ fn external_dir(path: &str) -> Option<String> {
     }
 }
 
+/// lexical absolute path: no fs access, no symlink resolution — used for
+/// rule patterns so they match the raw path spelling of later tool calls
+fn lexical_abs(p: &str) -> std::path::PathBuf {
+    let path = std::path::Path::new(p.trim());
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_default()
+            .join(path)
+    }
+}
+
+/// the directory a rule for `path` should grant: the file's parent for
+/// external targets (access to that directory, not a global extension
+/// wildcard), nothing special for internal ones
+fn dir_pattern(path: &str) -> Option<String> {
+    if external_dir(path).is_none() {
+        return None;
+    }
+    let abs = lexical_abs(path);
+    let dir = abs
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(&abs);
+    Some(format!("{}/**", dir.display()))
+}
+
 fn parse(s: &str) -> Perm {
     match s.trim().to_lowercase().as_str() {
         "allow" => Perm::Allow,
@@ -196,7 +242,8 @@ fn parse(s: &str) -> Perm {
 }
 
 /// build an allow-rule to persist when the user answers "always allow";
-/// bash -> "<first words> *", files -> "*.<ext>", urls -> "scheme://host/*"
+/// bash -> "<first words> *", internal files -> "*.<ext>", external paths ->
+/// "<directory>/**" (scoped to the granted directory), urls -> "scheme://host/*"
 pub fn derive_rule(tool: &str, args: &str) -> Option<PermRule> {
     let v: serde_json::Value = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
     let (key, pattern) = match tool {
@@ -208,34 +255,47 @@ pub fn derive_rule(tool: &str, args: &str) -> Option<PermRule> {
             }
             (tool.to_string(), format!("{} *", words.join(" ")))
         }
-        "edit" | "write_file" => {
+        "edit" | "write_file" | "read_file" | "list_files" | "glob" | "grep" => {
             let path = v["path"].as_str().unwrap_or("");
-            let ext = std::path::Path::new(path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
-            let p = if ext.is_empty() {
-                "*".to_string()
+            if let Some(dir) = dir_pattern(path) {
+                // external path: grant the containing directory instead of a
+                // global extension or catch-all wildcard
+                (tool.to_string(), dir)
+            } else if matches!(tool, "edit" | "write_file") {
+                let ext = std::path::Path::new(path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+                let p = if ext.is_empty() {
+                    "*".to_string()
+                } else {
+                    format!("*.{ext}")
+                };
+                (tool.to_string(), p)
             } else {
-                format!("*.{ext}")
-            };
-            (tool.to_string(), p)
+                (tool.to_string(), "*".to_string())
+            }
         }
         "apply_patch" => {
             let path = crate::patch::paths(v["patch"].as_str().unwrap_or(""))
                 .first()
                 .cloned()
                 .unwrap_or_default();
-            let ext = std::path::Path::new(&path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("");
-            let p = if ext.is_empty() {
-                "*".to_string()
+            if let Some(dir) = dir_pattern(&path) {
+                // external path: grant the containing directory
+                ("apply_patch".to_string(), dir)
             } else {
-                format!("*.{ext}")
-            };
-            (tool.to_string(), p)
+                let ext = std::path::Path::new(&path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+                let p = if ext.is_empty() {
+                    "*".to_string()
+                } else {
+                    format!("*.{ext}")
+                };
+                ("apply_patch".to_string(), p)
+            }
         }
         "webfetch" => {
             let url = v["url"].as_str().unwrap_or("");
@@ -458,5 +518,59 @@ mod tests {
         assert_eq!(allowed_edit.check("edit", r#"{"path":"src/lib.rs"}"#), Perm::Allow);
         // relative reads stay internal
         assert_eq!(cfg.check("list_files", r#"{"path":"."}"#), Perm::Allow);
+    }
+
+    #[test]
+    fn external_dir_scoping_and_bash_workdir() {
+        let tmp = std::env::temp_dir();
+
+        // external bash workdir asks even when bash itself is allowed
+        let allow_bash = PermCfg {
+            bash: Some("allow".into()),
+            ..Default::default()
+        };
+        let ext_wd = format!(r#"{{"command":"ls","workdir":"{}"}}"#, tmp.display());
+        assert_eq!(allow_bash.check("bash", &ext_wd), Perm::Ask);
+        assert_eq!(
+            allow_bash.check("bash", r#"{"command":"ls","workdir":"."}"#),
+            Perm::Allow
+        );
+        // no workdir at all keeps the configured permission
+        assert_eq!(allow_bash.check("bash", r#"{"command":"ls"}"#), Perm::Allow);
+
+        // always-allow on an external file grants that directory, not a
+        // global extension wildcard
+        let a = tmp.join("hi-derola-scope-a.txt");
+        let r = derive_rule("edit", &format!(r#"{{"path":"{}"}}"#, a.display())).unwrap();
+        assert_ne!(r.pattern.as_deref(), Some("*.txt"), "{:?}", r.pattern);
+        assert!(
+            r.pattern.as_deref().unwrap_or("").ends_with("/**"),
+            "{:?}",
+            r.pattern
+        );
+        let cfg = PermCfg {
+            rules: vec![r],
+            ..Default::default()
+        };
+        // a sibling file in the same external directory is covered
+        let b = tmp.join("hi-derola-scope-b.txt");
+        assert_eq!(
+            cfg.check("edit", &format!(r#"{{"path":"{}"}}"#, b.display())),
+            Perm::Allow
+        );
+        // files outside that directory are not
+        assert_eq!(cfg.check("edit", r#"{"path":"src/x.rs"}"#), Perm::Ask);
+
+        // external read_file gets a directory rule too, internal stays "*"
+        let r = derive_rule("read_file", &format!(r#"{{"path":"{}"}}"#, a.display())).unwrap();
+        assert!(r.pattern.as_deref().unwrap_or("").ends_with("/**"), "{:?}", r.pattern);
+        let r = derive_rule("read_file", r#"{"path":"src/main.rs"}"#).unwrap();
+        assert_eq!(r.pattern.as_deref(), Some("*"));
+
+        // apply_patch: the first external path scopes the rule
+        let patch = format!("*** Begin Patch\n*** Update File: {}\n@@\n-x\n+y\n", a.display());
+        let args = serde_json::json!({ "patch": patch }).to_string();
+        let r = derive_rule("apply_patch", &args).unwrap();
+        assert!(r.pattern.as_deref().unwrap_or("").ends_with("/**"), "{:?}", r.pattern);
     }
 }

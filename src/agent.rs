@@ -1333,7 +1333,7 @@ mod tests {
         assert!(first.content.split_once(SUMMARY_MARKER).unwrap().0 == "fix the parser");
 
         // a merged first message keeps compact_split happy: role stays User
-        let mut msgs: Vec<Message> = std::iter::once(first)
+        let msgs: Vec<Message> = std::iter::once(first)
             .chain((0..12).map(|_| m(Role::Assistant, &"x".repeat(40))))
             .collect();
         assert!(compact_split(&msgs, 50).is_some());
