@@ -722,6 +722,7 @@ impl App {
                     parent_sid: Some(self.sid.clone()),
                     depth: 0,
                     max_depth: self.cfg.agent.subagent_depth,
+                    compaction: self.cfg.agent.compaction.clone(),
                 },
                 self.allow_all.clone(),
                 self.mcp.clone(),
@@ -816,6 +817,7 @@ impl App {
             parent_sid: Some(self.sid.clone()),
             depth: 0,
             max_depth: self.cfg.agent.subagent_depth,
+            compaction: self.cfg.agent.compaction.clone(),
         };
         let mut req = ChatRequest {
             system: self.session.system.clone(),
@@ -1051,10 +1053,11 @@ impl App {
                 };
                 let provider = self.provider.clone();
                 let tx = self.tx.clone();
+                let keep = self.cfg.agent.compaction.keep;
                 self.info("compacting context...");
                 tokio::spawn(async move {
                     let mut msgs = req.messages.clone();
-                    if agent::compact_session(provider, &req, &mut msgs, &tx).await {
+                    if agent::compact_session(provider, &req, &mut msgs, &tx, keep).await {
                         let _ = tx.send(ApiEvent::Done {
                             text: "context compacted".into(),
                             messages: msgs,

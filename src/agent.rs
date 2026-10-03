@@ -8,6 +8,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 use crate::chat::{Message, Role};
+use crate::config::CompactionCfg;
 use crate::mcp::McpSlot;
 use crate::provider::{ApiEvent, ChatRequest, Provider};
 use crate::tools;
@@ -24,6 +25,7 @@ pub struct AgentCfg {
     pub parent_sid: Option<String>,
     pub depth: usize,
     pub max_depth: usize,
+    pub compaction: CompactionCfg,
 }
 
 impl Default for AgentCfg {
@@ -39,6 +41,7 @@ impl Default for AgentCfg {
             parent_sid: None,
             depth: 0,
             max_depth: 1,
+            compaction: Default::default(),
         }
     }
 }
@@ -65,6 +68,34 @@ fn effective_limit(cfg: &AgentCfg, model: &str) -> u64 {
         mi.window / 10 * 9
     } else {
         0
+    }
+}
+
+/// headroom kept from the context window before proactive compaction:
+/// the configured absolute buffer, or a quarter of the window (legacy default)
+fn compact_headroom(cfg: &CompactionCfg, ctx_limit: u64) -> u64 {
+    if cfg.buffer > 0 {
+        cfg.buffer as u64
+    } else {
+        ctx_limit / 4
+    }
+}
+
+/// proactive compaction trigger; overflow recovery and manual /compact
+/// are gated separately and stay available when this returns false
+fn auto_compact_due(cfg: &CompactionCfg, ctx_limit: u64, used: u64, est: u64) -> bool {
+    if !cfg.auto || ctx_limit == 0 {
+        return false;
+    }
+    used.max(est) > ctx_limit.saturating_sub(compact_headroom(cfg, ctx_limit))
+}
+
+/// keep budget for compact_split: configured value, or the built-in default
+fn effective_keep(keep: usize) -> usize {
+    if keep == 0 {
+        COMPACT_KEEP_TOKENS
+    } else {
+        keep
     }
 }
 
@@ -130,8 +161,8 @@ pub async fn run(
             return wrap_up(provider, &mut req, &mut msgs, &tx, cfg.max_rounds).await;
         }
         let est = est_tokens(&msgs) as u64;
-        if ctx_limit > 0 && used.max(est) * 4 > ctx_limit * 3 {
-            if compact(&provider, &req, &mut msgs, &tx).await {
+        if auto_compact_due(&cfg.compaction, ctx_limit, used, est) {
+            if compact(&provider, &req, &mut msgs, &tx, cfg.compaction.keep).await {
                 used = 0;
                 req.messages = msgs.clone();
             }
@@ -170,7 +201,7 @@ pub async fn run(
                     let _ = tx.send(ApiEvent::Note(format!(
                         "context overflow, compacting and retrying ({overflow_retries}/{OVERFLOW_RETRIES})"
                     )));
-                    if compact(&provider, &req, &mut msgs, &tx).await {
+                    if compact(&provider, &req, &mut msgs, &tx, cfg.compaction.keep).await {
                         req.messages = msgs.clone();
                         round -= 1;
                         continue;
@@ -1026,13 +1057,15 @@ fn transcript(msgs: &[Message]) -> String {
 }
 
 /// Manual compaction entry point for /compact in the UIs.
+/// `keep` = [agent.compaction].keep (0 falls back to the default).
 pub async fn compact_session(
     provider: Arc<dyn Provider>,
     req: &ChatRequest,
     msgs: &mut Vec<Message>,
     tx: &UnboundedSender<ApiEvent>,
+    keep: usize,
 ) -> bool {
-    compact(&provider, req, msgs, tx).await
+    compact(&provider, req, msgs, tx, keep).await
 }
 
 async fn compact(
@@ -1040,8 +1073,9 @@ async fn compact(
     req: &ChatRequest,
     msgs: &mut Vec<Message>,
     tx: &UnboundedSender<ApiEvent>,
+    keep_tokens: usize,
 ) -> bool {
-    let Some(cut) = compact_split(msgs, COMPACT_KEEP_TOKENS) else {
+    let Some(cut) = compact_split(msgs, effective_keep(keep_tokens)) else {
         return false;
     };
     let text = transcript(&msgs[1..cut]);
@@ -1216,6 +1250,34 @@ mod tests {
         let e = anyhow::anyhow!("400 Bad Request: prompt is too long: 200000 tokens > 180000 maximum");
         assert!(is_overflow(&e));
         assert!(!is_overflow(&anyhow::anyhow!("401 unauthorized")));
+    }
+
+    #[test]
+    fn compaction_knobs() {
+        let mut c = CompactionCfg::default();
+        assert!(c.auto);
+        assert_eq!(c.keep, 15_000);
+        // buffer=0 -> a quarter of the window (legacy 75% trigger)
+        assert_eq!(compact_headroom(&c, 200_000), 50_000);
+        assert!(!auto_compact_due(&c, 200_000, 150_000, 0));
+        assert!(auto_compact_due(&c, 200_000, 150_001, 0));
+        // the estimate counts too when no usage was observed yet
+        assert!(!auto_compact_due(&c, 200_000, 0, 150_000));
+        assert!(auto_compact_due(&c, 200_000, 0, 150_001));
+        // auto off -> never proactive (overflow recovery / /compact still work)
+        c.auto = false;
+        assert!(!auto_compact_due(&c, 200_000, 500_000, 0));
+        c.auto = true;
+        // unknown window -> no proactive compaction
+        assert!(!auto_compact_due(&c, 0, 500_000, 0));
+        // absolute buffer overrides the quarter
+        c.buffer = 20_000;
+        assert_eq!(compact_headroom(&c, 200_000), 20_000);
+        assert!(!auto_compact_due(&c, 200_000, 180_000, 0));
+        assert!(auto_compact_due(&c, 200_000, 180_001, 0));
+        // keep=0 falls back to the built-in default
+        assert_eq!(effective_keep(0), 15_000);
+        assert_eq!(effective_keep(30_000), 30_000);
     }
 
     #[test]

@@ -46,6 +46,8 @@ pub struct AgentConfig {
     pub output_budget: usize,
     #[serde(default = "default_subagent_depth")]
     pub subagent_depth: usize,
+    #[serde(default)]
+    pub compaction: CompactionCfg,
 }
 
 impl Default for AgentConfig {
@@ -55,8 +57,39 @@ impl Default for AgentConfig {
             max_rounds: default_max_rounds(),
             output_budget: default_output_budget(),
             subagent_depth: default_subagent_depth(),
+            compaction: Default::default(),
         }
     }
+}
+
+/// context compaction tuning: [agent.compaction] in config.toml
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompactionCfg {
+    /// proactive compaction when the conversation approaches the context window;
+    /// overflow recovery and manual /compact work regardless of this switch
+    #[serde(default = "default_true")]
+    pub auto: bool,
+    /// headroom kept from the context window before proactive compaction
+    /// triggers, in tokens; 0 = a quarter of the context window
+    #[serde(default)]
+    pub buffer: usize,
+    /// tokens of the most recent messages kept verbatim when compacting
+    #[serde(default = "default_keep_tokens")]
+    pub keep: usize,
+}
+
+impl Default for CompactionCfg {
+    fn default() -> Self {
+        Self {
+            auto: true,
+            buffer: 0,
+            keep: default_keep_tokens(),
+        }
+    }
+}
+
+fn default_keep_tokens() -> usize {
+    15_000
 }
 
 fn default_subagent_depth() -> usize {
@@ -139,6 +172,40 @@ pub fn config_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
         .join("hi-derola")
         .join("config.toml")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MINIMAL: &str = "[provider]\ntype = \"openai\"\nmodel = \"m\"\n\n";
+
+    #[test]
+    fn compaction_defaults_without_section() {
+        let cfg: Config = toml::from_str(&format!("{MINIMAL}[agent]\nmax_rounds = 5\n")).unwrap();
+        assert_eq!(cfg.agent.max_rounds, 5);
+        let c = &cfg.agent.compaction;
+        assert!(c.auto);
+        assert_eq!(c.buffer, 0);
+        assert_eq!(c.keep, 15_000);
+    }
+
+    #[test]
+    fn compaction_overrides_and_partial_section() {
+        let raw = format!(
+            "{MINIMAL}[agent.compaction]\nauto = false\nbuffer = 20000\n"
+        );
+        let cfg: Config = toml::from_str(&raw).unwrap();
+        let c = &cfg.agent.compaction;
+        assert!(!c.auto);
+        assert_eq!(c.buffer, 20_000);
+        assert_eq!(c.keep, 15_000, "unset keep keeps the default");
+        // round-trips through save/load without losing the section
+        let raw = toml::to_string_pretty(&cfg).unwrap();
+        let back: Config = toml::from_str(&raw).unwrap();
+        assert!(!back.agent.compaction.auto);
+        assert_eq!(back.agent.compaction.buffer, 20_000);
+    }
 }
 
 impl Config {

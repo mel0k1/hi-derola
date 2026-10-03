@@ -152,6 +152,7 @@ fn launch(sh: &Arc<Shared>) -> Result<(), String> {
         parent_sid: Some(sh.sid.lock().unwrap().clone()),
         depth: 0,
         max_depth: cfg.agent.subagent_depth,
+        compaction: cfg.agent.compaction.clone(),
     };
     let sh2 = sh.clone();
     let handle = tauri::async_runtime::spawn(async move {
@@ -946,9 +947,10 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
                 tools: Vec::new(),
             };
             let tx = sh.tx.clone();
+            let keep = cfg.agent.compaction.keep;
             tauri::async_runtime::spawn(async move {
                 let mut msgs = req.messages.clone();
-                if agent::compact_session(provider, &req, &mut msgs, &tx).await {
+                if agent::compact_session(provider, &req, &mut msgs, &tx, keep).await {
                     let _ = tx.send(ApiEvent::Done {
                         text: "context compacted".into(),
                         messages: msgs,
@@ -1062,6 +1064,7 @@ async fn send(sh: State<'_, Arc<Shared>>, app: AppHandle, text: String) -> Resul
                 parent_sid: Some(parent_sid),
                 depth: 0,
                 max_depth: cfg.agent.subagent_depth,
+                compaction: cfg.agent.compaction.clone(),
             },
             sh.allow_all.clone(),
             sh.mcp.clone(),

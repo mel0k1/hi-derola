@@ -70,6 +70,17 @@ output_budget = 32768
 # how many levels of subagent-in-subagent are allowed (1 = the main agent can spawn subagents)
 subagent_depth = 1
 
+# context compaction tuning
+# [agent.compaction]
+# proactive compaction when the conversation approaches the window
+# (overflow recovery and manual /compact always stay available)
+# auto = true
+# headroom before proactive compaction triggers, in tokens
+# 0 = a quarter of the context window (compaction at ~75%)
+# buffer = 0
+# tokens of the most recent messages kept verbatim when compacting
+# keep = 15000
+
 # language server diagnostics fed back after write_file/edit
 # auto-detected on PATH: rust-analyzer, pyright/basedpyright/pylsp, typescript-language-server, gopls, clangd
 [lsp]
