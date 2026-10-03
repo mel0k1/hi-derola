@@ -1,8 +1,9 @@
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{anyhow, bail, Result};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
@@ -144,6 +145,7 @@ pub async fn run(
             specs.retain(|s| {
                 s.name != "write_file" && s.name != "edit" && s.name != "apply_patch"
             });
+            specs.extend(tools::plan_specs());
         }
         if let Some(m) = &mcp_now {
             specs.extend(m.specs().await);
@@ -308,6 +310,21 @@ pub async fn run(
             let out = if call.name == "question" {
                 match ask_user(&call.args, &tx).await {
                     Ok(a) => a,
+                    Err(e) => format!("error: {e:#}"),
+                }
+            } else if call.name == "plan_write" {
+                match plan_write(&call.args) {
+                    Ok(m) => m,
+                    Err(e) => format!("error: {e:#}"),
+                }
+            } else if call.name == "plan_exit" {
+                match plan_exit(&tx).await {
+                    Ok((m, off)) => {
+                        if off {
+                            cfg.plan = false;
+                        }
+                        m
+                    }
                     Err(e) => format!("error: {e:#}"),
                 }
             } else if call.name == "todowrite" {
@@ -590,26 +607,106 @@ async fn pump_bg<R: tokio::io::AsyncRead + Unpin>(
     }
 }
 
-async fn ask_user(args: &str, tx: &UnboundedSender<ApiEvent>) -> Result<String> {
-    let v: Value = serde_json::from_str(args).unwrap_or(Value::Null);
-    let qs = v["questions"].as_array().cloned().unwrap_or_default();
-    if qs.is_empty() {
-        bail!("question: no questions given");
-    }
+async fn ask_raw(name: &str, args: &str, tx: &UnboundedSender<ApiEvent>) -> Result<String> {
     let (otx, orx) = oneshot::channel();
     tx.send(ApiEvent::Ask {
-        name: "question".into(),
+        name: name.to_string(),
         args: args.to_string(),
         rx: otx,
     })
     .map_err(|_| anyhow!("closed"))?;
-    let answer = orx.await.unwrap_or_default();
+    Ok(orx.await.unwrap_or_default())
+}
+
+async fn ask_user(args: &str, tx: &UnboundedSender<ApiEvent>) -> Result<String> {
+    let answer = ask_raw("question", args, tx).await?;
     if answer.trim().is_empty() {
         return Ok("The user dismissed this question.".into());
     }
     Ok(format!(
         "User has answered your questions: {}. You can now continue with the user's answers in mind.",
         answer.trim()
+    ))
+}
+
+/// the plan file lives in the project: <cwd>/.hi-derola/plan.md
+fn plan_path_in(root: &Path) -> PathBuf {
+    root.join(".hi-derola").join("plan.md")
+}
+
+fn plan_write(args: &str) -> Result<String> {
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    plan_write_in(&root, args)
+}
+
+fn plan_write_in(root: &Path, args: &str) -> Result<String> {
+    let v: Value = serde_json::from_str(args).unwrap_or(Value::Null);
+    let plan = v["plan"].as_str().unwrap_or("").trim();
+    if plan.is_empty() {
+        bail!("plan_write: empty plan");
+    }
+    let p = plan_path_in(root);
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    std::fs::write(&p, format!("{plan}\n"))?;
+    Ok(format!(
+        "Plan saved to .hi-derola/plan.md ({} lines). Call plan_exit when the plan is ready for the user.",
+        plan.lines().count()
+    ))
+}
+
+async fn plan_exit(tx: &UnboundedSender<ApiEvent>) -> Result<(String, bool)> {
+    let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    plan_exit_in(&root, tx).await
+}
+
+/// ask the user to approve leaving plan mode; returns (tool result, plan turned off)
+async fn plan_exit_in(root: &Path, tx: &UnboundedSender<ApiEvent>) -> Result<(String, bool)> {
+    let args = json!({
+        "questions": [{
+            "question": "Exit plan mode and start building?",
+            "header": "Plan",
+            "multiple": false,
+            "options": [
+                {"label": "Start building", "description": "Leave plan mode and implement the plan saved in .hi-derola/plan.md"},
+                {"label": "Keep planning", "description": "Stay in plan mode: keep researching or refining the plan"}
+            ]
+        }]
+    })
+    .to_string();
+    let answer = ask_raw("plan_exit", &args, tx).await?;
+    let a = answer.trim();
+    if a.is_empty() {
+        return Ok((
+            "The user dismissed the prompt. Keep planning; call plan_exit again when the plan is ready.".into(),
+            false,
+        ));
+    }
+    let low = a.to_lowercase();
+    if low.contains("start building") {
+        if !plan_path_in(root).exists() {
+            return Ok((
+                "The user approved leaving plan mode, but no plan file exists yet: save the plan with plan_write first, then call plan_exit again.".into(),
+                false,
+            ));
+        }
+        return Ok((
+            "The user approved. Plan mode is now OFF: the full toolset (write_file, edit, apply_patch, bash) is restored. Implement the plan saved in .hi-derola/plan.md, starting now.".into(),
+            true,
+        ));
+    }
+    if low.contains("keep planning") {
+        return Ok((
+            "The user chose to keep planning. Continue researching or refine the plan (rewrite .hi-derola/plan.md with plan_write); call plan_exit again when ready.".into(),
+            false,
+        ));
+    }
+    Ok((
+        format!(
+            "The user did not approve leaving plan mode and said: {a}\nAdjust the plan accordingly (save with plan_write), then call plan_exit again."
+        ),
+        false,
     ))
 }
 
@@ -1212,6 +1309,71 @@ mod tests {
 
     fn m(role: Role, text: &str) -> Message {
         Message::new(role, text)
+    }
+
+    #[test]
+    fn plan_write_roundtrip() {
+        let tmp = std::env::temp_dir().join(format!("hiderola-plan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        // an empty plan is rejected
+        assert!(plan_write_in(&tmp, r#"{"plan": "  "}"#).is_err());
+        let out = plan_write_in(&tmp, "{\"plan\": \"# goal\\n- step 1\\n- step 2\"}").unwrap();
+        assert!(out.contains("3 lines"), "{out}");
+        let saved = std::fs::read_to_string(plan_path_in(&tmp)).unwrap();
+        assert!(saved.contains("step 1"));
+        // a second call overwrites the file
+        plan_write_in(&tmp, "{\"plan\": \"# v2\"}").unwrap();
+        assert!(std::fs::read_to_string(plan_path_in(&tmp))
+            .unwrap()
+            .contains("v2"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn plan_exit_answers() {
+        let tmp = std::env::temp_dir().join(format!("hiderola-plan-exit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        async fn run(root: PathBuf, answer: &'static str) -> (String, bool) {
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let h = tokio::spawn(async move { plan_exit_in(&root, &tx).await });
+            let ev = rx.recv().await.unwrap();
+            let ApiEvent::Ask { rx: ans, .. } = ev else {
+                panic!("expected Ask event");
+            };
+            ans.send(answer.to_string()).unwrap();
+            h.await.unwrap().unwrap()
+        }
+
+        // approved but nothing saved yet -> stays in plan mode
+        let (msg, off) = run(tmp.clone(), "Start building").await;
+        assert!(!off);
+        assert!(msg.contains("no plan file"), "{msg}");
+
+        // with a plan file -> plan mode off
+        std::fs::create_dir_all(tmp.join(".hi-derola")).unwrap();
+        std::fs::write(tmp.join(".hi-derola").join("plan.md"), "# plan\n").unwrap();
+        let (msg, off) = run(tmp.clone(), "Start building").await;
+        assert!(off, "{msg}");
+        assert!(msg.contains("now OFF"));
+
+        // keep planning
+        let (msg, off) = run(tmp.clone(), "Keep planning").await;
+        assert!(!off);
+        assert!(msg.contains("keep planning"), "{msg}");
+
+        // free-text feedback reaches the model
+        let (msg, off) = run(tmp.clone(), "also cover the migration path").await;
+        assert!(!off);
+        assert!(msg.contains("migration path"), "{msg}");
+
+        // dismissed
+        let (_, off) = run(tmp.clone(), "").await;
+        assert!(!off);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

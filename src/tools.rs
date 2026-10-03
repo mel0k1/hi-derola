@@ -269,6 +269,28 @@ pub fn specs() -> Vec<ToolSpec> {
     specs
 }
 
+/// plan-mode-only tools: saving the plan file and asking to leave plan mode
+pub fn plan_specs() -> Vec<ToolSpec> {
+    vec![
+        ToolSpec {
+            name: "plan_write".into(),
+            description: "Save or update the plan file (.hi-derola/plan.md). Plan mode only. Rewrite the complete plan on every update: goal, step-by-step changes, files to touch, risks. The user reads this file when approving.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "plan": {"type": "string", "description": "The full plan in markdown"}
+                },
+                "required": ["plan"]
+            }),
+        },
+        ToolSpec {
+            name: "plan_exit".into(),
+            description: "Ask the user to approve leaving plan mode and starting implementation. Call after the plan is saved with plan_write; the user can approve, keep planning, or reply with free-form feedback.".into(),
+            parameters: json!({"type": "object", "properties": {}}),
+        },
+    ]
+}
+
 pub fn specs_nested(allow_subagent: bool) -> Vec<ToolSpec> {
     specs()
         .into_iter()

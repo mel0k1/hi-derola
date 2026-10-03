@@ -96,7 +96,7 @@ fn clip_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
-const PLAN_PROMPT: &str = "PLAN MODE is active: research the codebase (read_file, glob, grep, read-only bash commands) and design an approach. File modifications are disabled (write_file and edit are removed) and mutating commands must be avoided. When you have enough context, present a concrete step-by-step plan and stop.";
+const PLAN_PROMPT: &str = "PLAN MODE is active: research the codebase (read_file, glob, grep, read-only bash commands) and design an approach. File modifications are disabled. Save the full plan to .hi-derola/plan.md with plan_write (rewrite the whole file on every update), then call plan_exit to ask the user to approve leaving plan mode.";
 
 fn launch(sh: &Arc<Shared>) -> Result<(), String> {
     let Some(provider) = sh.provider.lock().unwrap().clone() else {
@@ -334,6 +334,11 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     emit_sessions(&app, &sh);
                     resume = true;
                     json!({"t": "done", "text": text})
+                }
+                ApiEvent::Plan(on) => {
+                    sh.plan.store(on, Ordering::Relaxed);
+                    let _ = app.emit("ev", json!({"t": "plan", "on": on}));
+                    json!({"t": "plan", "on": on})
                 }
                 ApiEvent::Failed(e) => {
                     *sh.inflight.lock().unwrap() = None;
