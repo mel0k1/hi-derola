@@ -54,7 +54,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "edit".into(),
-            description: "Perform string replacement in an existing file. Tries an exact match first, then tolerates line ending (CRLF/LF), BOM and trailing whitespace differences. Must be unique unless replace_all is true. Read the file first.".into(),
+            description: "Perform string replacement in an existing file. Tries an exact match first, then tolerates line ending (CRLF/LF), BOM, trailing whitespace and lookalike unicode (smart quotes, nbsp) differences, and as a last resort a fuzzy line match (at least 2 lines, >=85% similarity) whose replacement is re-indented to the matched block. Must be unique unless replace_all is true. Read the file first.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -114,7 +114,7 @@ pub fn specs() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "bash".into(),
-            description: "Run a shell command (sh on unix, cmd on Windows) and return stdout/stderr combined. Long output keeps only the tail. Exit code is added on failure. Set background=true for dev servers and long-running builds: the tool returns a task id immediately and the output arrives as a new message when the command finishes; do not poll task_status for completion.".into(),
+            description: "Run a shell command (sh on unix, cmd on Windows) and return stdout/stderr combined. Long output keeps only the tail. Exit code is added on failure. A foreground timeout kills the whole process tree (process group on unix, job object on Windows) and returns 'command timed out (Ns)'. Set background=true for dev servers and long-running builds: the tool returns a task id immediately and the output arrives as a new message when the command finishes; do not poll task_status for completion.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -591,6 +591,9 @@ pub async fn bash_run(cmd: &str, workdir: Option<&str>, timeout: Option<u64>) ->
     let mut command = tokio::process::Command::new(prog);
     command.arg(flag).arg(cmd);
     command.kill_on_drop(true);
+    command.stdin(std::process::Stdio::null());
+    command.stdout(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::piped());
     command.env("AGENT", "1");
     command.env("HI_DEROLA", "1");
     if let Some(w) = workdir.map(str::trim).filter(|s| !s.is_empty()) {
@@ -599,14 +602,40 @@ pub async fn bash_run(cmd: &str, workdir: Option<&str>, timeout: Option<u64>) ->
         }
         command.current_dir(w);
     }
-    let wait = command.output();
+    // the shell gets its own process group so a timeout can reap the whole
+    // tree (children, servers it spawned), not just the shell itself
+    #[cfg(unix)]
+    command.process_group(0);
+
+    let child = command.spawn()?;
+    #[cfg(unix)]
+    let pgid = child.id();
+    #[cfg(windows)]
+    let job = child.raw_handle().and_then(crate::winjob::Job::attach);
+
+    let wait = child.wait_with_output();
     let res = match timeout {
-        Some(t) => match tokio::time::timeout(std::time::Duration::from_secs(t.max(1)), wait).await {
-            Err(_) => return Ok(format!("command timed out ({t}s)")),
+        Some(t) => match tokio::time::timeout(std::time::Duration::from_secs(t.max(1)), wait).await
+        {
+            Err(_) => {
+                // kill the direct child (kill_on_drop fires when the dropped
+                // future unwinds) plus everything it spawned
+                #[cfg(unix)]
+                if let Some(pid) = pgid {
+                    unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
+                }
+                #[cfg(windows)]
+                if let Some(j) = &job {
+                    j.terminate();
+                }
+                return Ok(format!("command timed out ({t}s)"));
+            }
             Ok(res) => res?,
         },
         None => wait.await?,
     };
+    #[cfg(windows)]
+    drop(job);
     let mut text = String::from_utf8_lossy(&res.stdout).to_string();
     let err = String::from_utf8_lossy(&res.stderr);
     if !err.trim().is_empty() {
@@ -719,6 +748,180 @@ fn unicode_edit(
     Ok(Some((out.into_iter().collect(), n)))
 }
 
+const FUZZY_MIN: f64 = 0.85;
+const FUZZY_HINT: f64 = 0.6;
+
+/// char-level Levenshtein distance (two-row DP; edit lines are short)
+fn lev(a: &[char], b: &[char]) -> usize {
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    let mut cur = vec![0usize; b.len() + 1];
+    for i in 1..=a.len() {
+        cur[0] = i;
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut cur);
+    }
+    prev[b.len()]
+}
+
+/// similarity of two lines ignoring surrounding whitespace, 0.0..=1.0
+fn line_sim(a: &str, b: &str) -> f64 {
+    let a: Vec<char> = a.trim().chars().collect();
+    let b: Vec<char> = b.trim().chars().collect();
+    if a == b {
+        return 1.0;
+    }
+    let m = a.len().max(b.len());
+    if m == 0 {
+        return 1.0;
+    }
+    // the distance is at least the length gap; skip the DP when the
+    // threshold is already unreachable
+    if (a.len() as f64 - b.len() as f64).abs() / m as f64 >= 1.0 - FUZZY_MIN {
+        return 0.0;
+    }
+    (1.0 - lev(&a, &b) as f64 / m as f64).max(0.0)
+}
+
+enum Shift {
+    None,
+    Add(String),
+    Sub(usize),
+}
+
+/// the uniform indentation difference between the old block and where it
+/// actually matched in the file (the model often writes the block at column
+/// 0 while the file has it nested); applied to the replacement lines
+fn indent_shift(c_lines: &[&str], at: usize, o_lines: &[&str]) -> Shift {
+    for (j, o) in o_lines.iter().enumerate() {
+        if o.trim().is_empty() {
+            continue;
+        }
+        let oc = indent_of(c_lines[at + j]);
+        let oo = indent_of(o);
+        if oc.starts_with(oo) && oc.len() > oo.len() {
+            return Shift::Add(oc[oo.len()..].to_string());
+        }
+        if oo.starts_with(oc) && oo.len() > oc.len() {
+            return Shift::Sub(oo.len() - oc.len());
+        }
+        return Shift::None;
+    }
+    Shift::None
+}
+
+fn indent_of(line: &str) -> &str {
+    let t = line.trim_start();
+    &line[..line.len() - t.len()]
+}
+
+fn apply_shift(line: &str, shift: &Shift) -> String {
+    match shift {
+        Shift::None => line.to_string(),
+        Shift::Add(p) => {
+            if line.trim().is_empty() {
+                line.to_string()
+            } else {
+                format!("{p}{line}")
+            }
+        }
+        Shift::Sub(n) => {
+            if line.trim().is_empty() {
+                return line.to_string();
+            }
+            let mut removed = 0usize;
+            let mut cut = line.len();
+            for (idx, c) in line.char_indices() {
+                if removed >= *n || !c.is_whitespace() {
+                    cut = idx;
+                    break;
+                }
+                removed += 1;
+            }
+            line[cut..].to_string()
+        }
+    }
+}
+
+/// last-resort match for old_str that no longer matches the file letter for
+/// letter (the model misremembers a token or two). Slides the old block over
+/// the file line by line and accepts windows whose average per-line
+/// similarity (ignoring surrounding whitespace) is >= FUZZY_MIN. Single-line
+/// olds are never fuzzy-matched ("x = 1" vs "x = 2" is already 90% similar).
+/// The replacement is spliced with the matched block's indentation shift.
+fn fuzzy_edit(
+    content: &str,
+    old: &str,
+    new: &str,
+    replace_all: bool,
+) -> anyhow::Result<Option<(String, usize)>> {
+    let c_lines: Vec<&str> = content.lines().collect();
+    let o_lines: Vec<&str> = old.lines().collect();
+    if o_lines.len() < 2 || c_lines.len() < o_lines.len() {
+        return Ok(None);
+    }
+    if o_lines.iter().all(|l| l.trim().is_empty()) {
+        return Ok(None);
+    }
+    let n_lines: Vec<String> = new.lines().map(|s| s.to_string()).collect();
+    let olen = o_lines.len();
+    let mut hits: Vec<usize> = Vec::new();
+    for i in 0..=c_lines.len() - olen {
+        let mut sum = 0.0f64;
+        for (j, o) in o_lines.iter().enumerate() {
+            sum += line_sim(c_lines[i + j], o);
+        }
+        if sum / olen as f64 >= FUZZY_MIN {
+            hits.push(i);
+        }
+    }
+    if hits.is_empty() {
+        return Ok(None);
+    }
+    if hits.len() > 1 && !replace_all {
+        bail!(
+            "old_str is close to {} different places, add context or set replace_all",
+            hits.len()
+        );
+    }
+    let count = hits.len();
+    let mut lines: Vec<String> = c_lines.iter().map(|s| s.to_string()).collect();
+    for i in hits.into_iter().rev() {
+        let shift = indent_shift(&c_lines, i, &o_lines);
+        let repl: Vec<String> = n_lines.iter().map(|l| apply_shift(l, &shift)).collect();
+        lines.splice(i..i + olen, repl);
+    }
+    let mut joined = lines.join("\n");
+    if content.ends_with('\n') && !joined.is_empty() {
+        joined.push('\n');
+    }
+    Ok(Some((joined, count)))
+}
+
+/// best near-miss block, used only for the "not found" error hint
+fn fuzzy_best(content: &str, old: &str) -> Option<(usize, f64)> {
+    let c_lines: Vec<&str> = content.lines().collect();
+    let o_lines: Vec<&str> = old.lines().collect();
+    if o_lines.len() < 2 || c_lines.len() < o_lines.len() {
+        return None;
+    }
+    let olen = o_lines.len();
+    let mut best: Option<(usize, f64)> = None;
+    for i in 0..=c_lines.len() - olen {
+        let mut sum = 0.0f64;
+        for (j, o) in o_lines.iter().enumerate() {
+            sum += line_sim(c_lines[i + j], o);
+        }
+        let avg = sum / olen as f64;
+        if best.map(|(_, b)| avg > b).unwrap_or(true) {
+            best = Some((i + 1, avg));
+        }
+    }
+    best
+}
+
 fn try_edit(content: &str, old: &str, new: &str, replace_all: bool) -> Option<(String, usize)> {
     let n = content.matches(old).count();
     if n == 0 || (n > 1 && !replace_all) {
@@ -793,8 +996,19 @@ pub fn apply_edit(content: &str, old: &str, new: &str, replace_all: bool) -> Res
         Ok(None) => {}
         Err(_) => multi = true,
     }
+    match fuzzy_edit(&norm, &old_n, &new_n, replace_all) {
+        Ok(Some((out, n))) => return Ok((with_bom(&restore_eol(&out, crlf), bom), n)),
+        Ok(None) => {}
+        Err(_) => multi = true,
+    }
     if multi || (!old_n.is_empty() && norm.matches(&old_n).count() > 1) {
         bail!("old_str matches multiple times, add context or set replace_all");
+    }
+    if let Some((line_no, score)) = fuzzy_best(&norm, &old_n).filter(|(_, s)| *s >= FUZZY_HINT) {
+        bail!(
+            "old_str not found; the closest block is at line {line_no} ({:.0}% similar) - read the file again and copy it exactly",
+            score * 100.0
+        );
     }
     bail!("old_str not found");
 }
@@ -960,6 +1174,90 @@ mod tests {
         let (out, n) = apply_edit("keep\nold line\nend\n", "old line", "new line", false).unwrap();
         assert_eq!(n, 1);
         assert_eq!(out, "keep\nnew line\nend\n");
+    }
+
+    #[test]
+    fn fuzzy_last_resort_edit() {
+        // one misremembered token in a multi-line block still lands
+        let content = "fn main() {\n    let length = 10;\n    let width = 3;\n    let area = length * width;\n}\n";
+        let old = "fn main() {\n    let lenght = 10;\n    let width = 3;\n    let area = length * width;\n}";
+        let (out, n) = apply_edit(
+            content,
+            old,
+            "fn main() {\n    let length = 10;\n    let width = 3;\n    let area = length * width;\n    println!(\"{area}\");\n}",
+            false,
+        )
+        .unwrap();
+        assert_eq!(n, 1);
+        assert!(out.contains("println!(\"{area}\");"), "{out}");
+
+        // indentation-only mismatch: the block is nested in the file while
+        // old_str sits at column 0; the replacement is re-indented
+        let content = "fn f() {\n    if ok {\n        go();\n    }\n}\n";
+        let (out, n) = apply_edit(content, "if ok {\n    go();\n}", "if ok {\n    go_fast();\n}", false).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(out, "fn f() {\n    if ok {\n        go_fast();\n    }\n}\n");
+
+        // too different -> plain not found, no misleading hint
+        let err = apply_edit("one\ntwo\nthree\n", "one\ntotally different\nfive", "x", false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("old_str not found") && !err.contains("% similar"), "{err}");
+
+        // close but under the threshold -> hint pointing at the best block
+        let err = apply_edit("alpha one\nbeta two\n", "alpha ona\nbeta xy", "x", false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("% similar"), "{err}");
+
+        // single-line old never fuzzy-matches, even at 90% similarity
+        assert!(apply_edit("let x = 1;\n", "let x = 2;", "let x = 3;", false).is_err());
+
+        // ambiguous near-matches error without replace_all ...
+        let dup = "alpha one\nbeta two\nalpha one\nbeta two\n";
+        let err = apply_edit(dup, "alpha one\nbeta too", "REPL", false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("matches multiple times"), "{err}");
+        // ... and with replace_all every near-miss is replaced
+        let (out, n) = apply_edit(dup, "alpha one\nbeta too", "ALPHA\nBETA", true).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(out, "ALPHA\nBETA\nALPHA\nBETA\n");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_timeout_kills_tree() {
+        let dir = std::env::temp_dir().join(format!("hiderola-kill-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("alive");
+        // the grandchild `sleep 2` would touch the marker at t=2.3s if it
+        // survived; the timeout fires at t=1s and must reap the whole tree
+        let cmd = format!("sleep 0.3 && sleep 2 && touch {}", marker.display());
+        let t0 = std::time::Instant::now();
+        let out = bash_run(&cmd, None, Some(1)).await.unwrap();
+        assert!(out.contains("timed out"), "{out}");
+        assert!(
+            t0.elapsed() < std::time::Duration::from_secs(4),
+            "timeout must fire early, not wait for the command"
+        );
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        assert!(!marker.exists(), "grandchild survived the timeout kill");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_run_captures_output_and_code() {
+        let out = bash_run("echo hello >&2; echo hi; exit 3", None, Some(30))
+            .await
+            .unwrap();
+        assert!(out.contains("hi"));
+        assert!(out.contains("hello"));
+        assert!(out.contains("exit code: 3"), "{out}");
+        let out = bash_run("echo ok", None, None).await.unwrap();
+        assert_eq!(out.trim(), "ok");
     }
 
     #[test]

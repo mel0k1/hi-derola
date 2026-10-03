@@ -1450,6 +1450,7 @@ dependencies = [
  "crossterm",
  "dirs 5.0.1",
  "ignore",
+ "libc",
  "pulldown-cmark",
  "ratatui",
  "regex",
@@ -1458,6 +1459,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "toml 0.8.23",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
