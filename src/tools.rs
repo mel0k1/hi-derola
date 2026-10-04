@@ -268,6 +268,19 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "codesearch".into(),
+            description: "Search and get relevant context for any programming task using the Exa Code API: high-quality, fresh code examples, documentation and API references for libraries, SDKs and APIs. Use for ANY question about frameworks, libraries, APIs or programming patterns; complements websearch (general web results) and webfetch (read a known URL). Lower tokensNum for focused questions, higher for comprehensive documentation.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query, e.g. 'React useState hook examples', 'Python pandas dataframe filtering', 'Express.js middleware'"},
+                    "tokensNum": {"type": "integer", "description": "Context budget in tokens (1000-50000), default 5000"},
+                    "timeout": {"type": "integer", "description": "Timeout in seconds, default 30, max 120"}
+                },
+                "required": ["query"]
+            }),
+        },
+        ToolSpec {
             name: "question".into(),
             description: "Ask the user questions during execution: gather preferences, clarify ambiguous instructions, get decisions on implementation choices. A free-form answer is always available. If you recommend an option, put it first and add \"(Recommended)\" at the end of the label.".into(),
             parameters: json!({
@@ -461,7 +474,7 @@ pub fn detail(name: &str, args: &str) -> String {
             }
         }
         "webfetch" => v["url"].as_str().unwrap_or("").to_string(),
-        "websearch" => v["query"].as_str().unwrap_or("").to_string(),
+        "websearch" | "codesearch" => v["query"].as_str().unwrap_or("").to_string(),
         "question" => v["questions"][0]["question"]
             .as_str()
             .unwrap_or("")
@@ -741,6 +754,14 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
             let timeout = v["timeout"].as_u64().unwrap_or(15).clamp(5, 60);
             crate::web::websearch(query, timeout).await
         }
+        "codesearch" => {
+            let Some(query) = v["query"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                bail!("codesearch: query required");
+            };
+            let tokens = v["tokensNum"].as_u64().unwrap_or(5_000);
+            let timeout = v["timeout"].as_u64().unwrap_or(30);
+            crate::exa::codesearch(query, tokens, timeout).await
+        }
         "task_status" => {
             let id = v["id"].as_str().filter(|s| !s.trim().is_empty());
             Ok(crate::bg::status(id))
@@ -795,6 +816,7 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
             let timeout = v["timeout"].as_u64().unwrap_or(120).clamp(1, 600);
             bash_run(cmd, v["workdir"].as_str(), Some(timeout)).await
         }
+        _ if crate::jstools::has(name) => crate::jstools::run_tool(name, args).await,
         _ => bail!("unknown tool: {name}"),
     }
 }

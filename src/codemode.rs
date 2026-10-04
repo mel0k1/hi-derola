@@ -373,7 +373,10 @@ fn settle_text(promise: JsValue, ctx: &mut Context) -> Result<String, String> {
     Ok(js_value_text(promise, ctx))
 }
 
-fn js_value_text(v: JsValue, ctx: &mut Context) -> String {
+pub(crate) fn js_value_text(v: JsValue, ctx: &mut Context) -> String {
+    if v.is_undefined() {
+        return "undefined".into();
+    }
     if let Some(s) = v.as_string() {
         return s.to_std_string_escaped();
     }
@@ -386,7 +389,7 @@ fn js_value_text(v: JsValue, ctx: &mut Context) -> String {
     }
 }
 
-fn js_error_text(v: &JsValue, ctx: &mut Context) -> String {
+pub(crate) fn js_error_text(v: &JsValue, ctx: &mut Context) -> String {
     v.to_string(ctx)
         .map(|s| s.to_std_string_escaped())
         .unwrap_or_else(|_| "script error".into())
@@ -419,7 +422,7 @@ pub fn default_timeout() -> Duration {
     DEFAULT_TIMEOUT
 }
 
-fn sanitize(name: &str) -> String {
+pub(crate) fn sanitize(name: &str) -> String {
     let mut s: String = name
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })

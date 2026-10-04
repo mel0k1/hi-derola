@@ -107,8 +107,14 @@ enabled = true
 [formatters]
 enabled = true
 
+# custom JS tools: drop .js files into .hi-derola/tools/ (this project)
+# or ~/.config/hi-derola/tools/ (global); each file exports
+#   module.exports = { name, description, parameters, execute(input) }
+# and becomes a regular tool the model can call; runs in the confined
+# boa sandbox (no fs/network/process access), list with /jstools
+
 # tool permissions: allow | ask | deny
-# missing tool defaults to: write_file/edit/bash/mcp ask, read-only tools (incl. webfetch/subagent) allow
+# missing tool defaults to: write_file/edit/bash/mcp ask, read-only tools (incl. webfetch/codesearch/subagent) allow
 # built-in protections (overridable by rules below):
 #   read_file on secret files (.env, .env.local, prod.env; *.env.example stays allowed) -> ask
 #   read/edit/list outside the working directory -> ask
@@ -118,6 +124,7 @@ enabled = true
 # bash = "ask"
 # mcp = "ask"
 # webfetch = "ask"
+# codesearch = "ask"
 # subagent = "ask"
 
 # wildcard rules, first match wins

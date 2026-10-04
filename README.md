@@ -14,7 +14,8 @@ A high-performance, lightweight chat and autonomous coding assistant written in 
 - streaming responses and reasoning in a separate collapsible thinking block (GUI)
 - api key, endpoint and model are editable right in the GUI settings; the model dropdown is filled from the provider's `/models` endpoint
 - configurable hotkeys (`[keys]` in config or capture fields in GUI settings)
-- tool calling: read_file (line numbers, offset/limit, images come back as native image parts), write_file, edit (tolerant to CRLF/LF, BOM, trailing whitespace; a third pass normalizes smart quotes/dashes for unicode-mangled files; a final fuzzy pass salvages near-miss blocks — at least 2 lines, >=85% line similarity — and re-indents the replacement to the matched block), apply_patch (multi-file V4A patches — nothing is written unless every hunk matches), list_files, glob, grep, bash (workdir, timeout, tail output, background tasks), webfetch (http/https, html converted to markdown/text), websearch (DuckDuckGo, no key needed) + MCP servers
+- tool calling: read_file (line numbers, offset/limit, images come back as native image parts), write_file, edit (tolerant to CRLF/LF, BOM, trailing whitespace; a third pass normalizes smart quotes/dashes for unicode-mangled files; a final fuzzy pass salvages near-miss blocks — at least 2 lines, >=85% line similarity — and re-indents the replacement to the matched block), apply_patch (multi-file V4A patches — nothing is written unless every hunk matches), list_files, glob, grep, bash (workdir, timeout, tail output, background tasks), webfetch (http/https, html converted to markdown/text), websearch (DuckDuckGo, no key needed), codesearch (Exa code/docs search, no key needed) + MCP servers
+- custom JS tools: drop `.js` files into `.hi-derola/tools/` (project) or `~/.config/hi-derola/tools/` (global) — each exports `{ name, description, parameters, execute(input) }` and runs in the same confined boa sandbox as the code tool (no fs/network/process access, console.log captured, 30s budget); list them with `/jstools`
 - bash hygiene: `AGENT=1` and `HI_DEROLA=1` are exported to every shell (scripts can detect the agent); a foreground timeout asks the tree to exit (SIGTERM) and then kills the whole process tree, not just the shell — own process group + `killpg` with a short TERM→SIGKILL grace on unix, a private kill-on-close Job Object on Windows (`kill_on_drop` stays as the last-resort net)
 - lsp diagnostics after write_file/edit: edits are pushed to a language server (rust-analyzer, pyright, typescript-language-server, gopls, clangd — auto-detected on PATH) and errors/warnings come back to the model in the tool result, so it fixes its own mistakes immediately
 - formatters after write_file/edit: rustfmt, gofmt, prettier (from node_modules/.bin or PATH), ruff/black (py), clang-format (c/c++), shfmt (sh), ktlint (kotlin) run on the touched file automatically
@@ -70,6 +71,7 @@ src/
                    list_models, retry with jitter
   tools.rs         tool specs, dispatch, detail/preview/paths, bash, bg tasks
   codemode.rs      code tool: boa_engine JS sandbox orchestrating MCP tools
+  jstools.rs       user-defined JS tools (.hi-derola/tools/*.js) in the boa sandbox
   bg.rs            background task registry (bash + subagents), live output
   perm.rs          permission resolution (allow/ask/deny + wildcard rules)
   sessions.rs      persisted sessions (json per session) + ChangeRec for review
@@ -87,6 +89,7 @@ src/
   commands.rs      custom /commands + /init + /export
   agents.rs        custom agent profiles, @-mentions
   web.rs           webfetch + websearch (duckduckgo)
+  exa.rs           codesearch: Exa code/docs search (JSON-RPC over SSE, no key)
   search.rs        glob/grep/list_files with gitignore support
   config.rs        config.toml model + persistence
   md.rs, ui.rs     markdown + shared UI helpers
