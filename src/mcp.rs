@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -158,6 +158,20 @@ pub struct SampleOut {
 pub type SampleFut = Pin<Box<dyn Future<Output = Result<SampleOut>> + Send>>;
 pub type Sampler = Arc<dyn Fn(SampleReq) -> SampleFut + Send + Sync>;
 
+/// one notifications/message entry from an mcp server
+#[derive(Clone)]
+pub struct McpLogEntry {
+    pub server: String,
+    pub level: String,
+    pub logger: String,
+    pub data: String,
+}
+
+/// ring buffer size for mcp log messages across all servers
+pub const MAX_LOGS: usize = 500;
+
+pub type McpLogBuf = Arc<std::sync::Mutex<VecDeque<McpLogEntry>>>;
+
 /// one notifications/resources/updated subscriber set lives on Shared; this is
 /// the note sink shared with every connected server (resource updates land in
 /// the chat)
@@ -166,6 +180,8 @@ pub struct McpHooks {
     pub roots: Arc<RwLock<Vec<String>>>,
     pub sampler: Option<Sampler>,
     pub notes: Option<tokio::sync::mpsc::UnboundedSender<crate::provider::ApiEvent>>,
+    /// notifications/message ring buffer shared by every server
+    pub logs: McpLogBuf,
 }
 
 impl McpHooks {
@@ -177,6 +193,7 @@ impl McpHooks {
             roots: Arc::new(RwLock::new(if s.is_empty() { Vec::new() } else { vec![s] })),
             sampler: None,
             notes: None,
+            logs: Default::default(),
         }
     }
 
@@ -276,6 +293,22 @@ fn root_name(dir: &str) -> String {
         .to_string()
 }
 
+/// syslog-style severity used by notifications/message; debug is the least
+/// severe, emergency the most
+fn log_level_rank(level: &str) -> Option<u8> {
+    match level {
+        "debug" => Some(0),
+        "info" => Some(1),
+        "notice" => Some(2),
+        "warning" => Some(3),
+        "error" => Some(4),
+        "critical" => Some(5),
+        "alert" => Some(6),
+        "emergency" => Some(7),
+        _ => None,
+    }
+}
+
 // ---------- transport ----------
 
 struct HttpCtx {
@@ -308,6 +341,10 @@ struct Shared {
     res_sub: AtomicBool,
     /// uris this client subscribed to (resources/subscribe)
     subs: std::sync::Mutex<Vec<String>>,
+    /// server advertised logging
+    logging: AtomicBool,
+    /// logging = false drops notifications/message from this server
+    logging_on: bool,
 }
 
 type Pending = Arc<Mutex<BTreeMap<u64, tokio::sync::oneshot::Sender<Result<Value>>>>>;
@@ -502,6 +539,50 @@ fn handle_notification(shared: &Arc<Shared>, pending: &Pending, method: &str, pa
                     )));
                 }
             });
+        }
+        "notifications/message" => {
+            if !shared.logging_on {
+                return;
+            }
+            let level = params["level"].as_str().unwrap_or("info").to_string();
+            let logger = params["logger"].as_str().unwrap_or("").to_string();
+            let data = match params["data"].as_str() {
+                Some(s) => s.to_string(),
+                None => params["data"].to_string(),
+            };
+            {
+                let mut g = shared
+                    .hooks
+                    .logs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                g.push_back(McpLogEntry {
+                    server: shared.name.clone(),
+                    level: level.clone(),
+                    logger: logger.clone(),
+                    data: data.clone(),
+                });
+                while g.len() > MAX_LOGS {
+                    g.pop_front();
+                }
+            }
+            // warning and above also pop into the chat
+            if log_level_rank(&level).unwrap_or(1) >= 3 {
+                if let Some(tx) = &shared.hooks.notes {
+                    let head = if logger.is_empty() {
+                        String::new()
+                    } else {
+                        format!("{logger}: ")
+                    };
+                    let _ = tx.send(crate::provider::ApiEvent::Note(format!(
+                        "mcp {} [{}]: {}{}",
+                        shared.name,
+                        level,
+                        head,
+                        crate::provider::truncate(&data).trim_end()
+                    )));
+                }
+            }
         }
         _ => {}
     }
@@ -934,6 +1015,8 @@ impl McpServer {
                     closed: AtomicBool::new(false),
                     res_sub: AtomicBool::new(false),
                     subs: std::sync::Mutex::new(Vec::new()),
+                    logging: AtomicBool::new(false),
+                    logging_on: cfg.logging != Some(false),
                 }),
                 Arc::new(Mutex::new(BTreeMap::new())),
                 None,
@@ -969,6 +1052,8 @@ impl McpServer {
                     closed: AtomicBool::new(false),
                     res_sub: AtomicBool::new(false),
                     subs: std::sync::Mutex::new(Vec::new()),
+                    logging: AtomicBool::new(false),
+                    logging_on: cfg.logging != Some(false),
                 }),
                 Arc::new(Mutex::new(BTreeMap::new())),
                 Some(child),
@@ -1022,6 +1107,9 @@ impl McpServer {
                 || caps["resources"]["subscribe"].as_bool() == Some(true),
             Ordering::Relaxed,
         );
+        s.shared
+            .logging
+            .store(has_cap(&caps, "logging"), Ordering::Relaxed);
         s.notify_t("notifications/initialized").await?;
         // tools: strict when the server declares the capability (keeps the oauth 401
         // hints), tolerated otherwise so tools-less servers still connect
@@ -1292,6 +1380,59 @@ impl McpClient {
         }
         out
     }
+
+    /// set the minimum log level (logging/setLevel); empty server name applies
+    /// to every logging-capable server; returns one status line per server
+    pub async fn set_log_level(&self, server: &str, level: &str) -> Vec<String> {
+        if log_level_rank(level).is_none() {
+            return vec![format!(
+                "unknown log level: {level} (debug, info, notice, warning, error, critical, alert, emergency)"
+            )];
+        }
+        let servers = self.servers.lock().await;
+        let mut out = Vec::new();
+        let mut matched = false;
+        for s in servers.iter() {
+            if !server.is_empty() && s.shared.name != server {
+                continue;
+            }
+            matched = true;
+            if !s.shared.logging.load(Ordering::Relaxed) {
+                out.push(format!(
+                    "mcp {}: server does not support logging",
+                    s.shared.name
+                ));
+                continue;
+            }
+            match request(
+                &s.shared,
+                &s.pending,
+                REQUEST_TIMEOUT,
+                "logging/setLevel",
+                json!({"level": level}),
+            )
+            .await
+            {
+                Ok(_) => out.push(format!("mcp {}: log level set to {level}", s.shared.name)),
+                Err(e) => out.push(format!("mcp {}: {e:#}", s.shared.name)),
+            }
+        }
+        if !matched {
+            out.push(format!("mcp server not found: {server}"));
+        }
+        out
+    }
+
+    /// recent notifications/message entries, oldest first
+    pub fn logs(&self) -> Vec<McpLogEntry> {
+        self.hooks
+            .logs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect()
+    }
 }
 
 pub struct McpResourceInfo {
@@ -1409,6 +1550,8 @@ mod tests {
                             "messages": [{"role": "user", "content": {"type": "text", "text": "say hi"}}],
                             "maxTokens": 64
                         }}),
+                        json!({"jsonrpc": "2.0", "method": "notifications/message",
+                            "params": {"level": "error", "logger": "db", "data": "boom"}}),
                     ];
                     for r in reqs {
                         writeln!(out, "{r}").unwrap();
@@ -1441,7 +1584,7 @@ mod tests {
                     if mode == "min" {
                         json!({"capabilities": {}})
                     } else {
-                        json!({"capabilities": {"tools": {}, "resources": {"subscribe": true}, "prompts": {}}})
+                        json!({"capabilities": {"tools": {}, "resources": {"subscribe": true}, "prompts": {}, "logging": {}}})
                     }
                 }
                 "tools/list" => {
@@ -1499,6 +1642,7 @@ mod tests {
                     json!({})
                 }
                 "resources/unsubscribe" => json!({}),
+                "logging/setLevel" => json!({}),
                 _ => json!({}),
             };
             let resp = json!({"jsonrpc": "2.0", "id": id, "result": result});
@@ -1508,10 +1652,14 @@ mod tests {
     }
 
     fn child_cfg(mode: &str) -> McpConfig {
-        child_cfg_sampling(mode, None)
+        child_cfg_opts(mode, None, None)
     }
 
     fn child_cfg_sampling(mode: &str, sampling: Option<bool>) -> McpConfig {
+        child_cfg_opts(mode, sampling, None)
+    }
+
+    fn child_cfg_opts(mode: &str, sampling: Option<bool>, logging: Option<bool>) -> McpConfig {
         let exe = std::env::current_exe().unwrap();
         let mut env = BTreeMap::new();
         env.insert("HI_DEROLA_FAKE_MCP".to_string(), mode.to_string());
@@ -1529,6 +1677,7 @@ mod tests {
             headers: BTreeMap::new(),
             oauth: None,
             sampling,
+            logging,
         }
     }
 
@@ -1681,5 +1830,62 @@ mod tests {
 
         client.unsubscribe("t", "mem://stats").await.unwrap();
         assert!(client.subscriptions().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn log_messages_buffer_and_note() {
+        let (ntx, mut nrx) = tokio::sync::mpsc::unbounded_channel();
+        let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws"))).with_notes(ntx);
+        let cfg = child_cfg("1");
+        let s = McpServer::connect(&cfg, &hooks).await.unwrap();
+        let client = McpClient {
+            servers: Mutex::new(vec![s]),
+            hooks: hooks.clone(),
+        };
+
+        // the initialize-phase notifications/message is buffered, oldest first
+        let logs = hooks.logs.lock().unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].server, "t");
+        assert_eq!(logs[0].level, "error");
+        assert_eq!(logs[0].logger, "db");
+        assert_eq!(logs[0].data, "boom");
+        drop(logs);
+        assert_eq!(client.logs().len(), 1);
+
+        // error rank also surfaces as a chat note
+        let mut saw_log_note = false;
+        for _ in 0..10 {
+            match tokio::time::timeout(Duration::from_secs(2), nrx.recv()).await {
+                Ok(Some(crate::provider::ApiEvent::Note(n))) => {
+                    if n.contains("mcp t [error]: db: boom") {
+                        saw_log_note = true;
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert!(saw_log_note, "error log note missing");
+
+        assert_eq!(
+            client.set_log_level("t", "debug").await,
+            vec!["mcp t: log level set to debug".to_string()]
+        );
+        let bad = client.set_log_level("t", "nope").await;
+        assert!(bad[0].starts_with("unknown log level"), "{}", bad[0]);
+    }
+
+    #[tokio::test]
+    async fn logging_opt_out_drops_messages() {
+        let (ntx, mut nrx) = tokio::sync::mpsc::unbounded_channel();
+        let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws"))).with_notes(ntx);
+        let cfg = child_cfg_opts("1", None, Some(false));
+        let _s = McpServer::connect(&cfg, &hooks).await.unwrap();
+        assert!(
+            hooks.logs.lock().unwrap().is_empty(),
+            "logging = false drops notifications/message"
+        );
+        assert!(nrx.try_recv().is_err(), "no notes when logging is off");
     }
 }

@@ -46,6 +46,10 @@ stream = true
 # sampling = false refuses sampling/createMessage from this server
 # (by default a sampling request runs a one-shot completion on your
 # provider with the configured model; each request is noted in the chat)
+# logging = false drops notifications/message log entries from this server
+# (everything lands in a 500-entry ring buffer — /mcplog shows the recent
+# tail, warning and above also pop into the chat; /mcplog set <server|all>
+# <level> sets the minimum level via logging/setLevel)
 
 # gui hotkeys, combos: enter, escape, tab, ctrl+x, shift+enter, alt+f, comma...
 # set to "none" to disable, unknown keys fall back to defaults

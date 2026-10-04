@@ -214,6 +214,9 @@ pub struct McpConfig {
     /// sampling = false refuses sampling/createMessage from this server
     #[serde(default)]
     pub sampling: Option<bool>,
+    /// logging = false drops notifications/message log entries from this server
+    #[serde(default)]
+    pub logging: Option<bool>,
 }
 
 impl McpConfig {
