@@ -540,7 +540,8 @@ async fn stop(sh: State<'_, Arc<Shared>>, app: AppHandle) -> Result<(), String> 
 
 /// client hooks for mcp: workspace root (cwd) + sampling via our provider
 fn mcp_hooks(cfg: &Config, tx: mpsc::UnboundedSender<ApiEvent>) -> hi_derola::mcp::McpHooks {
-    let hooks = hi_derola::mcp::McpHooks::workspace(std::env::current_dir().ok());
+    let hooks = hi_derola::mcp::McpHooks::workspace(std::env::current_dir().ok())
+        .with_notes(tx.clone());
     match cfg.api_key() {
         Some(k) => match provider::build(&cfg.provider.kind, cfg.provider.base_url.clone(), k) {
             Ok(p) => hooks.with_sampler(hi_derola::mcp::default_sampler(
@@ -600,6 +601,22 @@ async fn mcp_read_resource(sh: State<'_, Arc<Shared>>, server: String, uri: Stri
         Ok(text) => Ok(json!({"text": text})),
         Err(e) => Err(format!("{e:#}")),
     }
+}
+
+#[tauri::command]
+async fn mcp_subscribe(sh: State<'_, Arc<Shared>>, server: String, uri: String) -> Result<(), String> {
+    let Some(c) = sh.mcp.lock().unwrap().clone() else {
+        return Err("mcp is not configured".into());
+    };
+    c.subscribe(&server, &uri).await.map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn mcp_unsubscribe(sh: State<'_, Arc<Shared>>, server: String, uri: String) -> Result<(), String> {
+    let Some(c) = sh.mcp.lock().unwrap().clone() else {
+        return Err("mcp is not configured".into());
+    };
+    c.unsubscribe(&server, &uri).await.map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -934,7 +951,7 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
         .unwrap_or((line, ""));
     match cmd {
         "/help" | "/h" => note(
-            "commands: /file <path> · /model <name> · /models · /plan · /undo · /redo · /init · /compact · /export [path] · /mcpres [server] · /mcpread <server> <uri> · /mcpprompt [server] <name> [k=v] · /clear · /help\n\
+            "commands: /file <path> · /model <name> · /models · /plan · /undo · /redo · /init · /compact · /export [path] · /mcpres [server] · /mcpread <server> <uri> · /mcpsub <server> <uri> · /mcpunsub <server> <uri> · /mcpprompt [server] <name> [k=v] · /clear · /help\n\
              mutations (write/edit/bash/mcp) ask for confirmation, allow all skips further asks\n\
              custom commands: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)",
         ),
@@ -1441,7 +1458,7 @@ pub fn run() -> Result<()> {
         })
         .invoke_handler(tauri::generate_handler![
             init, save, send, confirm, answer, allow_all, stop, list_models, mcp_reconnect,
-            mcp_auth, mcp_resources, mcp_read_resource, mcp_prompts, mcp_get_prompt, undo,
+            mcp_auth, mcp_resources, mcp_read_resource, mcp_subscribe, mcp_unsubscribe, mcp_prompts, mcp_get_prompt, undo,
             redo, list_sessions, new_session, open_session, delete_session, list_dir, attach_path,
             detach, set_theme, list_project_files, set_plan, task_kill, list_agents
         ])

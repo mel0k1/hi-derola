@@ -158,12 +158,14 @@ pub struct SampleOut {
 pub type SampleFut = Pin<Box<dyn Future<Output = Result<SampleOut>> + Send>>;
 pub type Sampler = Arc<dyn Fn(SampleReq) -> SampleFut + Send + Sync>;
 
-/// client-side hooks shared with every connected server: workspace roots
-/// (served on roots/list) and the sampling callback (sampling/createMessage)
+/// one notifications/resources/updated subscriber set lives on Shared; this is
+/// the note sink shared with every connected server (resource updates land in
+/// the chat)
 #[derive(Clone, Default)]
 pub struct McpHooks {
     pub roots: Arc<RwLock<Vec<String>>>,
     pub sampler: Option<Sampler>,
+    pub notes: Option<tokio::sync::mpsc::UnboundedSender<crate::provider::ApiEvent>>,
 }
 
 impl McpHooks {
@@ -174,11 +176,20 @@ impl McpHooks {
         Self {
             roots: Arc::new(RwLock::new(if s.is_empty() { Vec::new() } else { vec![s] })),
             sampler: None,
+            notes: None,
         }
     }
 
     pub fn with_sampler(mut self, sampler: Sampler) -> Self {
         self.sampler = Some(sampler);
+        self
+    }
+
+    pub fn with_notes(
+        mut self,
+        tx: tokio::sync::mpsc::UnboundedSender<crate::provider::ApiEvent>,
+    ) -> Self {
+        self.notes = Some(tx);
         self
     }
 }
@@ -293,6 +304,10 @@ struct Shared {
     stale_resources: AtomicBool,
     stale_prompts: AtomicBool,
     closed: AtomicBool,
+    /// server advertised resources.subscribe
+    res_sub: AtomicBool,
+    /// uris this client subscribed to (resources/subscribe)
+    subs: std::sync::Mutex<Vec<String>>,
 }
 
 type Pending = Arc<Mutex<BTreeMap<u64, tokio::sync::oneshot::Sender<Result<Value>>>>>;
@@ -427,7 +442,10 @@ async fn dispatch_incoming(shared: &Arc<Shared>, pending: &Pending, v: Value) {
             handle_server_request(shared, id, &method, v.get("params").cloned().unwrap_or(json!({})))
                 .await;
         }
-        (Some(method), None) => handle_notification(shared, &method),
+        (Some(method), None) => {
+            let params = v.get("params").cloned().unwrap_or(json!({}));
+            handle_notification(shared, pending, &method, &params);
+        }
         (None, Some(id)) => {
             if let Some(n) = id.as_u64() {
                 if let Some(tx) = pending.lock().await.remove(&n) {
@@ -439,7 +457,7 @@ async fn dispatch_incoming(shared: &Arc<Shared>, pending: &Pending, v: Value) {
     }
 }
 
-fn handle_notification(shared: &Arc<Shared>, method: &str) {
+fn handle_notification(shared: &Arc<Shared>, pending: &Pending, method: &str, params: &Value) {
     match method {
         "notifications/tools/list_changed" => {
             shared.stale_tools.store(true, Ordering::Relaxed);
@@ -449,6 +467,41 @@ fn handle_notification(shared: &Arc<Shared>, method: &str) {
         }
         "notifications/prompts/list_changed" => {
             shared.stale_prompts.store(true, Ordering::Relaxed);
+        }
+        "notifications/resources/updated" => {
+            let uri = params["uri"].as_str().unwrap_or("").to_string();
+            let subscribed = shared
+                .subs
+                .lock()
+                .map(|g| g.iter().any(|u| *u == uri))
+                .unwrap_or(false);
+            if uri.is_empty() || !subscribed {
+                return;
+            }
+            // re-read in the background, surface the fresh content as a note
+            let shared = shared.clone();
+            let pending = pending.clone();
+            tokio::spawn(async move {
+                let text = match request(
+                    &shared,
+                    &pending,
+                    CALL_TIMEOUT,
+                    "resources/read",
+                    json!({"uri": uri}),
+                )
+                .await
+                {
+                    Ok(v) => render_resource_contents(&v),
+                    Err(e) => format!("(read failed: {e:#})"),
+                };
+                if let Some(tx) = &shared.hooks.notes {
+                    let _ = tx.send(crate::provider::ApiEvent::Note(format!(
+                        "mcp {}: resource {uri} updated:\n{}",
+                        shared.name,
+                        crate::provider::truncate(&text).trim_end()
+                    )));
+                }
+            });
         }
         _ => {}
     }
@@ -701,106 +754,158 @@ async fn http_send(
     }
 }
 
-impl McpServer {
-    /// send a request or notification; for http requests the reply is the
-    /// return value, for stdio it arrives via pending
-    async fn send_message(&self, msg: &Value) -> Result<Value> {
-        match &self.shared.reply {
-            Reply::Stdio { stdin } => {
-                let mut w = stdin.lock().await;
-                let mut line = msg.to_string();
-                line.push('\n');
-                w.write_all(line.as_bytes()).await?;
-                w.flush().await?;
-                Ok(json!({}))
-            }
-            Reply::Http(ctx) => self.http_post(ctx, msg).await,
+/// send a request or notification; for http requests the reply is the
+/// return value, for stdio it arrives via pending
+async fn send_msg(shared: &Arc<Shared>, pending: &Pending, msg: &Value) -> Result<Value> {
+    match &shared.reply {
+        Reply::Stdio { stdin } => {
+            let mut w = stdin.lock().await;
+            let mut line = msg.to_string();
+            line.push('\n');
+            w.write_all(line.as_bytes()).await?;
+            w.flush().await?;
+            Ok(json!({}))
         }
+        Reply::Http(ctx) => http_post(shared, ctx, pending, msg).await,
     }
+}
 
-    async fn http_post(&self, ctx: &HttpCtx, body: &Value) -> Result<Value> {
-        let Some(id) = body.get("id").and_then(|x| x.as_u64()) else {
-            // notification: best effort
-            let _ = http_send(ctx, &self.shared.name, body, false).await;
-            return Ok(json!({}));
-        };
-        let method = body["method"].as_str().unwrap_or("").to_string();
-        let mut resp = None;
-        for attempt in 0..2 {
-            let r = http_send(ctx, &self.shared.name, body, attempt > 0).await?;
-            if r.status().as_u16() == 401 && attempt == 0 {
-                continue;
-            }
-            if r.status().as_u16() == 401 {
-                let hint = if ctx.oauth.is_some() {
-                    format!(" — run /mcpauth {}", self.shared.name)
-                } else {
-                    String::new()
-                };
-                bail!("mcp {}: 401 unauthorized{hint}", self.shared.name);
-            }
-            resp = Some(r);
-            break;
+async fn http_post(
+    shared: &Arc<Shared>,
+    ctx: &HttpCtx,
+    pending: &Pending,
+    body: &Value,
+) -> Result<Value> {
+    let name = &shared.name;
+    let Some(id) = body.get("id").and_then(|x| x.as_u64()) else {
+        // notification: best effort
+        let _ = http_send(ctx, name, body, false).await;
+        return Ok(json!({}));
+    };
+    let method = body["method"].as_str().unwrap_or("").to_string();
+    let mut resp = None;
+    for attempt in 0..2 {
+        let r = http_send(ctx, name, body, attempt > 0).await?;
+        if r.status().as_u16() == 401 && attempt == 0 {
+            continue;
         }
-        let resp = resp.context("mcp: no response")?;
-        let status = resp.status();
-        if !status.is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            bail!(
-                "mcp {}: {} {}",
-                self.shared.name,
-                status,
-                crate::provider::truncate(&text).trim()
-            );
+        if r.status().as_u16() == 401 {
+            let hint = if ctx.oauth.is_some() {
+                format!(" — run /mcpauth {name}")
+            } else {
+                String::new()
+            };
+            bail!("mcp {name}: 401 unauthorized{hint}");
         }
-        if method == "initialize" {
-            if let Some(sid) = resp
-                .headers()
-                .get("mcp-session-id")
-                .and_then(|v| v.to_str().ok())
-            {
-                *ctx.session.lock().unwrap() = Some(sid.to_string());
-            }
-        }
-        let ctype = resp
+        resp = Some(r);
+        break;
+    }
+    let resp = resp.context("mcp: no response")?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        bail!("mcp {name}: {} {}", status, crate::provider::truncate(&text).trim());
+    }
+    if method == "initialize" {
+        if let Some(sid) = resp
             .headers()
-            .get("content-type")
+            .get("mcp-session-id")
             .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_string();
-        if ctype.contains("text/event-stream") {
-            route_sse(resp, &self.shared, &self.pending, Some(id)).await
-        } else {
-            let text = resp.text().await?;
-            let v: Value = serde_json::from_str(&text)
-                .map_err(|e| anyhow::anyhow!("mcp {}: bad json: {e}", self.shared.name))?;
-            extract_result(v, &self.shared.name)
+        {
+            *ctx.session.lock().unwrap() = Some(sid.to_string());
         }
     }
+    let ctype = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    if ctype.contains("text/event-stream") {
+        route_sse(resp, shared, pending, Some(id)).await
+    } else {
+        let text = resp.text().await?;
+        let v: Value = serde_json::from_str(&text)
+            .map_err(|e| anyhow::anyhow!("mcp {name}: bad json: {e}"))?;
+        extract_result(v, name)
+    }
+}
 
+/// one request/response round trip; shared between McpServer and the
+/// notification-driven re-reads
+async fn request(
+    shared: &Arc<Shared>,
+    pending: &Pending,
+    timeout: Duration,
+    method: &str,
+    params: Value,
+) -> Result<Value> {
+    let id = shared.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    pending.lock().await.insert(id, tx);
+    let msg = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+    let sent = send_msg(shared, pending, &msg).await;
+    let res = match sent {
+        Err(e) => Err(e),
+        // http replies come back inline; stdio replies arrive via pending
+        Ok(v) if matches!(shared.reply, Reply::Http(_)) => Ok(v),
+        Ok(_) => match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => bail!("mcp {}: server closed", shared.name),
+            Err(_) => bail!("mcp {}: {method} timeout", shared.name),
+        },
+    };
+    pending.lock().await.remove(&id);
+    res
+}
+
+impl McpServer {
     async fn request_t(&self, timeout: Duration, method: &str, params: Value) -> Result<Value> {
-        let id = self.shared.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
-        let msg = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
-        let sent = self.send_message(&msg).await;
-        let res = match sent {
-            Err(e) => Err(e),
-            // http replies come back inline; stdio replies arrive via pending
-            Ok(v) if matches!(self.shared.reply, Reply::Http(_)) => Ok(v),
-            Ok(_) => match tokio::time::timeout(timeout, rx).await {
-                Ok(Ok(r)) => r,
-                Ok(Err(_)) => bail!("mcp {}: server closed", self.shared.name),
-                Err(_) => bail!("mcp {}: {method} timeout", self.shared.name),
-            },
-        };
-        self.pending.lock().await.remove(&id);
-        res
+        request(&self.shared, &self.pending, timeout, method, params).await
     }
 
     async fn notify_t(&self, method: &str) -> Result<()> {
         let msg = json!({"jsonrpc": "2.0", "method": method});
-        self.send_message(&msg).await.map(|_| ())
+        send_msg(&self.shared, &self.pending, &msg).await.map(|_| ())
+    }
+
+    /// subscribe to resource updates; the uri registers before the request so
+    /// an update pushed right after the answer is not missed
+    async fn subscribe(&self, uri: &str) -> Result<()> {
+        if !self.shared.res_sub.load(Ordering::Relaxed) {
+            bail!(
+                "mcp {}: server does not support resource subscriptions",
+                self.shared.name
+            );
+        }
+        if let Ok(mut g) = self.shared.subs.lock() {
+            if !g.iter().any(|u| u == uri) {
+                g.push(uri.to_string());
+            }
+        }
+        match self
+            .request_t(REQUEST_TIMEOUT, "resources/subscribe", json!({"uri": uri}))
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                if let Ok(mut g) = self.shared.subs.lock() {
+                    g.retain(|u| u != uri);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// best-effort: local state wins, a failed unsubscribe request is tolerated
+    async fn unsubscribe(&self, uri: &str) -> Result<()> {
+        if let Ok(mut g) = self.shared.subs.lock() {
+            g.retain(|u| u != uri);
+        }
+        let _ = self
+            .request_t(REQUEST_TIMEOUT, "resources/unsubscribe", json!({"uri": uri}))
+            .await;
+        Ok(())
     }
 
     async fn connect(cfg: &McpConfig, hooks: &McpHooks) -> Result<Self> {
@@ -827,6 +932,8 @@ impl McpServer {
                     stale_resources: AtomicBool::new(false),
                     stale_prompts: AtomicBool::new(false),
                     closed: AtomicBool::new(false),
+                    res_sub: AtomicBool::new(false),
+                    subs: std::sync::Mutex::new(Vec::new()),
                 }),
                 Arc::new(Mutex::new(BTreeMap::new())),
                 None,
@@ -860,6 +967,8 @@ impl McpServer {
                     stale_resources: AtomicBool::new(false),
                     stale_prompts: AtomicBool::new(false),
                     closed: AtomicBool::new(false),
+                    res_sub: AtomicBool::new(false),
+                    subs: std::sync::Mutex::new(Vec::new()),
                 }),
                 Arc::new(Mutex::new(BTreeMap::new())),
                 Some(child),
@@ -908,6 +1017,11 @@ impl McpServer {
             )
             .await?;
         let caps = init["capabilities"].clone();
+        s.shared.res_sub.store(
+            caps["resources"]["subscribe"].is_object()
+                || caps["resources"]["subscribe"].as_bool() == Some(true),
+            Ordering::Relaxed,
+        );
         s.notify_t("notifications/initialized").await?;
         // tools: strict when the server declares the capability (keeps the oauth 401
         // hints), tolerated otherwise so tools-less servers still connect
@@ -1146,6 +1260,38 @@ impl McpClient {
             let _ = s.notify_t("notifications/roots/list_changed").await;
         }
     }
+
+    /// subscribe to a resource so updates arrive as chat notes
+    pub async fn subscribe(&self, server: &str, uri: &str) -> Result<()> {
+        let servers = self.servers.lock().await;
+        let Some(s) = servers.iter().find(|s| s.shared.name == server) else {
+            bail!("mcp server not found: {server}");
+        };
+        s.subscribe(uri).await
+    }
+
+    /// stop the subscription; best-effort
+    pub async fn unsubscribe(&self, server: &str, uri: &str) -> Result<()> {
+        let servers = self.servers.lock().await;
+        let Some(s) = servers.iter().find(|s| s.shared.name == server) else {
+            bail!("mcp server not found: {server}");
+        };
+        s.unsubscribe(uri).await
+    }
+
+    /// (server, uri) pairs currently subscribed
+    pub async fn subscriptions(&self) -> Vec<(String, String)> {
+        let servers = self.servers.lock().await;
+        let mut out = Vec::new();
+        for s in servers.iter() {
+            if let Ok(g) = s.shared.subs.lock() {
+                for u in g.iter() {
+                    out.push((s.shared.name.clone(), u.clone()));
+                }
+            }
+        }
+        out
+    }
 }
 
 pub struct McpResourceInfo {
@@ -1295,7 +1441,7 @@ mod tests {
                     if mode == "min" {
                         json!({"capabilities": {}})
                     } else {
-                        json!({"capabilities": {"tools": {}, "resources": {}, "prompts": {}}})
+                        json!({"capabilities": {"tools": {}, "resources": {"subscribe": true}, "prompts": {}}})
                     }
                 }
                 "tools/list" => {
@@ -1344,6 +1490,15 @@ mod tests {
                 "prompts/get" => json!({"messages": [
                     {"role": "user", "content": {"type": "text", "text": "review the code in lang"}}
                 ]}),
+                "resources/subscribe" => {
+                    // update pushed before the answer: the client must not miss it
+                    let n = json!({"jsonrpc": "2.0", "method": "notifications/resources/updated",
+                        "params": {"uri": v["params"]["uri"]}});
+                    writeln!(out, "{n}").unwrap();
+                    out.flush().unwrap();
+                    json!({})
+                }
+                "resources/unsubscribe" => json!({}),
                 _ => json!({}),
             };
             let resp = json!({"jsonrpc": "2.0", "id": id, "result": result});
@@ -1481,5 +1636,50 @@ mod tests {
         assert!(s.resources.is_empty());
         assert!(s.prompts.is_empty());
         assert_eq!(s.summary(), "0 tools");
+        let err = s
+            .subscribe("mem://x")
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not support resource subscriptions"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn resource_subscriptions_push_updates() {
+        let (ntx, mut nrx) = tokio::sync::mpsc::unbounded_channel();
+        let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws"))).with_notes(ntx);
+        let cfg = child_cfg("1");
+        let s = McpServer::connect(&cfg, &hooks).await.unwrap();
+        let client = McpClient {
+            servers: Mutex::new(vec![s]),
+            hooks: hooks.clone(),
+        };
+
+        client.subscribe("t", "mem://stats").await.unwrap();
+        assert_eq!(
+            client.subscriptions().await,
+            vec![("t".to_string(), "mem://stats".to_string())]
+        );
+
+        // the fake server pushed notifications/resources/updated right after the
+        // subscribe answer: the client re-reads and notes the fresh content
+        let mut saw_update = false;
+        for _ in 0..10 {
+            match tokio::time::timeout(Duration::from_secs(2), nrx.recv()).await {
+                Ok(Some(crate::provider::ApiEvent::Note(n))) => {
+                    if n.contains("resource mem://stats updated")
+                        && n.contains("hello resource")
+                    {
+                        saw_update = true;
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        assert!(saw_update, "resource update note missing");
+
+        client.unsubscribe("t", "mem://stats").await.unwrap();
+        assert!(client.subscriptions().await.is_empty());
     }
 }

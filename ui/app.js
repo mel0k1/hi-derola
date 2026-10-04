@@ -1378,11 +1378,13 @@ async function toggleMcpRes(m, btn, row) {
     det.style.cssText = "margin:2px 0 4px 16px;display:flex;flex-direction:column;gap:2px;align-items:flex-start";
     det.append(el("span", "", { text: `resources (${rl.length})` }));
     for (const r of rl) {
+      const rowEl = el("div");
+      rowEl.style.cssText = "display:flex;gap:4px;align-items:center;max-width:100%";
       const b = el("button", "ghost", {
         text: r.name || r.uri,
         title: (r.description ? r.description + " — " : "") + r.uri + (r.mime ? " (" + r.mime + ")" : "")
       });
-      b.style.cssText = itemStyle;
+      b.style.cssText = itemStyle + ";flex:1;min-width:0";
       b.onclick = async () => {
         b.disabled = true;
         try {
@@ -1399,7 +1401,26 @@ async function toggleMcpRes(m, btn, row) {
           b.disabled = false;
         }
       };
-      det.append(b);
+      const sb = el("button", "ghost", { text: "sub", title: "toggle subscription — resource updates land in the chat" });
+      sb.style.cssText = "padding:0 8px;font-size:11px;flex:none";
+      sb.onclick = async () => {
+        sb.disabled = true;
+        try {
+          if (sb.textContent === "sub") {
+            await invoke("mcp_subscribe", { server: r.server, uri: r.uri });
+            sb.textContent = "unsub";
+          } else {
+            await invoke("mcp_unsubscribe", { server: r.server, uri: r.uri });
+            sb.textContent = "sub";
+          }
+        } catch (e) {
+          note(String(e));
+        } finally {
+          sb.disabled = false;
+        }
+      };
+      rowEl.append(b, sb);
+      det.append(rowEl);
     }
     if (!rl.length) det.append(el("span", "", { text: "  none" }));
     det.append(el("span", "", { text: `prompts (${pl.length})` }));
