@@ -281,6 +281,18 @@ pub fn specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "mcp_resource".into(),
+            description: "Read a resource exposed by an MCP server: file contents, database rows, docs, live data — anything the server lists under its resources. Returns the resource text; binary data is summarized. Use /mcpres (or ask the user) to discover available uris.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "server": {"type": "string", "description": "MCP server name; optional when the uri is unique across servers"},
+                    "uri": {"type": "string", "description": "Resource uri, e.g. file:///path or mem://key"}
+                },
+                "required": ["uri"]
+            }),
+        },
+        ToolSpec {
             name: "question".into(),
             description: "Ask the user questions during execution: gather preferences, clarify ambiguous instructions, get decisions on implementation choices. A free-form answer is always available. If you recommend an option, put it first and add \"(Recommended)\" at the end of the label.".into(),
             parameters: json!({
@@ -475,6 +487,15 @@ pub fn detail(name: &str, args: &str) -> String {
         }
         "webfetch" => v["url"].as_str().unwrap_or("").to_string(),
         "websearch" | "codesearch" => v["query"].as_str().unwrap_or("").to_string(),
+        "mcp_resource" => {
+            let s = v["server"].as_str().unwrap_or("");
+            let u = v["uri"].as_str().unwrap_or("");
+            if s.is_empty() {
+                u.to_string()
+            } else {
+                format!("{s} {u}")
+            }
+        }
         "question" => v["questions"][0]["question"]
             .as_str()
             .unwrap_or("")
@@ -761,6 +782,15 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
             let tokens = v["tokensNum"].as_u64().unwrap_or(5_000);
             let timeout = v["timeout"].as_u64().unwrap_or(30);
             crate::exa::codesearch(query, tokens, timeout).await
+        }
+        "mcp_resource" => {
+            let Some(c) = mcp else {
+                bail!("mcp is not configured");
+            };
+            let Some(uri) = v["uri"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
+                bail!("mcp_resource: uri required");
+            };
+            c.read_resource(v["server"].as_str().unwrap_or(""), uri).await
         }
         "task_status" => {
             let id = v["id"].as_str().filter(|s| !s.trim().is_empty());

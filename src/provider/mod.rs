@@ -38,6 +38,8 @@ pub enum ApiEvent {
     Done { text: String, messages: Vec<Message> },
     Failed(String),
     Wake,
+    /// submit text as a user message and start a run (e.g. an mcp prompt)
+    Submit(String),
 }
 
 #[derive(Debug, Clone, Default)]

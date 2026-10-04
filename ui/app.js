@@ -1351,9 +1351,86 @@ function fillMcpList() {
       };
       row.append(btn);
     }
+    const resBtn = el("button", "ghost", { text: "res" });
+    resBtn.title = "browse resources & prompts";
+    resBtn.style.cssText = "margin-left:8px;padding:0 8px;font-size:11px";
+    resBtn.onclick = () => toggleMcpRes(m, resBtn, row);
+    row.append(resBtn);
     box.append(row);
   }
   box.style.whiteSpace = "";
+}
+
+async function toggleMcpRes(m, btn, row) {
+  let det = row.nextElementSibling;
+  if (det && det.classList.contains("mcpres")) {
+    det.style.display = det.style.display === "none" ? "" : "none";
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = "...";
+  const itemStyle = "padding:0 8px;font-size:11px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
+  try {
+    const [res, prm] = await Promise.all([invoke("mcp_resources"), invoke("mcp_prompts")]);
+    const rl = res.filter((r) => r.server === m.name);
+    const pl = prm.filter((p) => p.server === m.name);
+    det = el("div", "mcpres");
+    det.style.cssText = "margin:2px 0 4px 16px;display:flex;flex-direction:column;gap:2px;align-items:flex-start";
+    det.append(el("span", "", { text: `resources (${rl.length})` }));
+    for (const r of rl) {
+      const b = el("button", "ghost", {
+        text: r.name || r.uri,
+        title: (r.description ? r.description + " — " : "") + r.uri + (r.mime ? " (" + r.mime + ")" : "")
+      });
+      b.style.cssText = itemStyle;
+      b.onclick = async () => {
+        b.disabled = true;
+        try {
+          const out = await invoke("mcp_read_resource", { server: r.server, uri: r.uri });
+          if (out.text.length > 100000) {
+            note(`resource too big for the input (${out.text.length} chars) — ask the agent to read ${r.uri} via mcp_resource`);
+          } else {
+            $("input").value = out.text;
+            $("input").focus();
+          }
+        } catch (e) {
+          note(String(e));
+        } finally {
+          b.disabled = false;
+        }
+      };
+      det.append(b);
+    }
+    if (!rl.length) det.append(el("span", "", { text: "  none" }));
+    det.append(el("span", "", { text: `prompts (${pl.length})` }));
+    for (const p of pl) {
+      const b = el("button", "ghost", { text: p.name, title: p.description || p.name });
+      b.style.cssText = itemStyle;
+      b.onclick = async () => {
+        b.disabled = true;
+        try {
+          const msgs = await invoke("mcp_get_prompt", { server: p.server, name: p.name, args: {} });
+          const text = msgs
+            .map((x) => (x.role !== "user" ? "[" + x.role + "]\n" : "") + x.text)
+            .join("\n\n");
+          $("input").value = text;
+          $("input").focus();
+        } catch (e) {
+          note(String(e));
+        } finally {
+          b.disabled = false;
+        }
+      };
+      det.append(b);
+    }
+    if (!pl.length) det.append(el("span", "", { text: "  none" }));
+    row.after(det);
+  } catch (e) {
+    note(String(e));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "res";
+  }
 }
 
 function fillPermList() {

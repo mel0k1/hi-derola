@@ -19,6 +19,109 @@ struct McpTool {
     schema: Value,
 }
 
+struct McpResource {
+    uri: String,
+    name: String,
+    description: String,
+    mime: Option<String>,
+}
+
+struct McpPromptArg {
+    name: String,
+    description: String,
+    required: bool,
+}
+
+struct McpPrompt {
+    name: String,
+    description: String,
+    arguments: Vec<McpPromptArg>,
+}
+
+fn has_cap(caps: &Value, key: &str) -> bool {
+    let c = &caps[key];
+    c.is_object() || c.as_bool() == Some(true)
+}
+
+fn parse_resources(items: &[Value]) -> Vec<McpResource> {
+    items
+        .iter()
+        .map(|r| McpResource {
+            uri: r["uri"].as_str().unwrap_or("").to_string(),
+            name: r["name"].as_str().unwrap_or("").to_string(),
+            description: r["description"].as_str().unwrap_or("").to_string(),
+            mime: r["mimeType"].as_str().map(|s| s.to_string()),
+        })
+        .filter(|r| !r.uri.is_empty())
+        .collect()
+}
+
+fn parse_prompts(items: &[Value]) -> Vec<McpPrompt> {
+    items
+        .iter()
+        .map(|p| McpPrompt {
+            name: p["name"].as_str().unwrap_or("").to_string(),
+            description: p["description"].as_str().unwrap_or("").to_string(),
+            arguments: p["arguments"]
+                .as_array()
+                .map(|args| {
+                    args.iter()
+                        .map(|a| McpPromptArg {
+                            name: a["name"].as_str().unwrap_or("").to_string(),
+                            description: a["description"].as_str().unwrap_or("").to_string(),
+                            required: a["required"].as_bool().unwrap_or(false),
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+        .filter(|p| !p.name.is_empty())
+        .collect()
+}
+
+fn render_resource_contents(res: &Value) -> String {
+    let mut out = String::new();
+    for c in res["contents"].as_array().into_iter().flatten() {
+        let uri = c["uri"].as_str().unwrap_or("");
+        if let Some(t) = c["text"].as_str() {
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
+            out.push_str(t);
+        } else if let Some(b) = c["blob"].as_str() {
+            if !out.is_empty() {
+                out.push_str("\n\n");
+            }
+            out.push_str(&format!("[binary resource {uri}, ~{} bytes]", b.len() * 3 / 4));
+        }
+    }
+    if out.is_empty() {
+        out.push_str("(empty resource)");
+    }
+    out
+}
+
+fn parse_prompt_messages(res: &Value) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for m in res["messages"].as_array().into_iter().flatten() {
+        let role = m["role"].as_str().unwrap_or("user").to_string();
+        if m["content"]["type"].as_str() == Some("text") {
+            if let Some(t) = m["content"]["text"].as_str() {
+                out.push((role, t.to_string()));
+            }
+        }
+    }
+    out
+}
+
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 {
+        format!("{n} {word}")
+    } else {
+        format!("{n} {word}s")
+    }
+}
+
 enum Transport {
     Stdio {
         child: Child,
@@ -39,7 +142,62 @@ struct McpServer {
     name: String,
     transport: Transport,
     tools: Vec<McpTool>,
+    resources: Vec<McpResource>,
+    prompts: Vec<McpPrompt>,
     oauth: Option<crate::config::McpOAuthCfg>,
+}
+
+impl McpServer {
+    fn summary(&self) -> String {
+        let mut parts = vec![plural(self.tools.len(), "tool")];
+        if !self.resources.is_empty() {
+            parts.push(plural(self.resources.len(), "resource"));
+        }
+        if !self.prompts.is_empty() {
+            parts.push(plural(self.prompts.len(), "prompt"));
+        }
+        parts.join(", ")
+    }
+
+    /// fetch a paginated list method (tools/list, resources/list, prompts/list)
+    async fn list_page(&mut self, method: &str, key: &str) -> Result<Vec<Value>> {
+        let mut out = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut params = json!({});
+            if let Some(c) = &cursor {
+                params["cursor"] = json!(c);
+            }
+            let res = self.request_t(REQUEST_TIMEOUT, method, params).await?;
+            if let Some(arr) = res[key].as_array() {
+                out.extend(arr.clone());
+            }
+            cursor = res["nextCursor"].as_str().map(|s| s.to_string());
+            if cursor.is_none() || out.len() > 1000 {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    async fn read_resource(&mut self, uri: &str) -> Result<String> {
+        let res = self
+            .request_t(CALL_TIMEOUT, "resources/read", json!({"uri": uri}))
+            .await?;
+        Ok(render_resource_contents(&res))
+    }
+
+    /// returns prompt messages as (role, text) pairs
+    async fn get_prompt(&mut self, name: &str, args: &Value) -> Result<Vec<(String, String)>> {
+        let res = self
+            .request_t(
+                CALL_TIMEOUT,
+                "prompts/get",
+                json!({"name": name, "arguments": args}),
+            )
+            .await?;
+        Ok(parse_prompt_messages(&res))
+    }
 }
 
 impl Drop for McpServer {
@@ -125,6 +283,8 @@ impl McpServer {
                 },
                 oauth: cfg.oauth_cfg(),
                 tools: Vec::new(),
+                resources: Vec::new(),
+                prompts: Vec::new(),
             }
         } else {
             let mut cmd = tokio::process::Command::new(&cfg.command);
@@ -151,30 +311,57 @@ impl McpServer {
                 },
                 oauth: None,
                 tools: Vec::new(),
+                resources: Vec::new(),
+                prompts: Vec::new(),
             }
         };
         let proto = match s.transport {
             Transport::Http { .. } => "2025-03-26",
             Transport::Stdio { .. } => "2024-11-05",
         };
-        s.request_t(
-            REQUEST_TIMEOUT,
-            "initialize",
-            json!({
-                "protocolVersion": proto,
-                "capabilities": {},
-                "clientInfo": {"name": "hi-derola", "version": "0.1.0"}
-            }),
-        )
-        .await?;
+        let init = s
+            .request_t(
+                REQUEST_TIMEOUT,
+                "initialize",
+                json!({
+                    "protocolVersion": proto,
+                    "capabilities": {},
+                    "clientInfo": {"name": "hi-derola", "version": "0.1.0"}
+                }),
+            )
+            .await?;
+        let caps = init["capabilities"].clone();
         s.notify_t("notifications/initialized").await?;
-        let res = s.request_t(REQUEST_TIMEOUT, "tools/list", json!({})).await?;
-        for t in res["tools"].as_array().into_iter().flatten() {
-            s.tools.push(McpTool {
-                name: t["name"].as_str().unwrap_or("").to_string(),
-                description: t["description"].as_str().unwrap_or("").to_string(),
-                schema: t["inputSchema"].clone(),
-            });
+        // tools: strict when the server declares the capability (keeps the oauth 401
+        // hints), tolerated otherwise so tools-less servers still connect
+        let tools_cap = has_cap(&caps, "tools");
+        match s.list_page("tools/list", "tools").await {
+            Ok(items) => {
+                for t in &items {
+                    s.tools.push(McpTool {
+                        name: t["name"].as_str().unwrap_or("").to_string(),
+                        description: t["description"].as_str().unwrap_or("").to_string(),
+                        schema: t["inputSchema"].clone(),
+                    });
+                }
+            }
+            Err(e) => {
+                if tools_cap {
+                    return Err(e);
+                }
+            }
+        }
+        // resources and prompts never fail the connect: older servers may
+        // answer with method-not-found even after advertising the capability
+        if has_cap(&caps, "resources") {
+            if let Ok(items) = s.list_page("resources/list", "resources").await {
+                s.resources = parse_resources(&items);
+            }
+        }
+        if has_cap(&caps, "prompts") {
+            if let Ok(items) = s.list_page("prompts/list", "prompts").await {
+                s.prompts = parse_prompts(&items);
+            }
         }
         Ok(s)
     }
@@ -328,7 +515,7 @@ pub async fn connect_all(cfgs: &[McpConfig]) -> (Option<std::sync::Arc<McpClient
     for c in cfgs {
         match tokio::time::timeout(CONNECT_TIMEOUT, McpServer::connect(c)).await {
             Ok(Ok(s)) => {
-                logs.push(format!("mcp {}: connected ({} tools)", c.name, s.tools.len()));
+                logs.push(format!("mcp {}: connected ({})", c.name, s.summary()));
                 servers.push(s);
             }
             Ok(Err(e)) => logs.push(format!("mcp {}: {e:#}", c.name)),
@@ -353,7 +540,7 @@ pub async fn reconnect_one(slot: &McpSlot, cfgs: &[McpConfig], name: &str) -> Ve
     if let Some(client) = existing {
         let mut logs = Vec::new();
         match tokio::time::timeout(CONNECT_TIMEOUT, client.replace(cfg)).await {
-            Ok(Ok(n)) => logs.push(format!("mcp {name}: connected ({n} tools)")),
+            Ok(Ok(sum)) => logs.push(format!("mcp {name}: connected ({sum})")),
             Ok(Err(e)) => logs.push(format!("mcp {name}: {e:#}")),
             Err(_) => logs.push(format!("mcp {name}: connect timeout")),
         }
@@ -366,13 +553,13 @@ pub async fn reconnect_one(slot: &McpSlot, cfgs: &[McpConfig], name: &str) -> Ve
 }
 
 impl McpClient {
-    async fn replace(&self, cfg: &McpConfig) -> Result<usize> {
+    async fn replace(&self, cfg: &McpConfig) -> Result<String> {
         let mut servers = self.servers.lock().await;
         servers.retain(|s| s.name != cfg.name);
         let s = McpServer::connect(cfg).await?;
-        let n = s.tools.len();
+        let sum = s.summary();
         servers.push(s);
-        Ok(n)
+        Ok(sum)
     }
 
     pub async fn specs(&self) -> Vec<ToolSpec> {
@@ -424,5 +611,261 @@ impl McpClient {
             text = "(empty result)".into();
         }
         Ok(text)
+    }
+
+    /// all resources across servers, in connect order
+    pub async fn resources(&self) -> Vec<McpResourceInfo> {
+        let servers = self.servers.lock().await;
+        let mut out = Vec::new();
+        for s in servers.iter() {
+            for r in &s.resources {
+                out.push(McpResourceInfo {
+                    server: s.name.clone(),
+                    uri: r.uri.clone(),
+                    name: r.name.clone(),
+                    description: r.description.clone(),
+                    mime: r.mime.clone(),
+                });
+            }
+        }
+        out
+    }
+
+    /// read one resource; empty server name auto-resolves when the uri is unique
+    pub async fn read_resource(&self, server: &str, uri: &str) -> Result<String> {
+        let mut servers = self.servers.lock().await;
+        if server.is_empty() {
+            let owners: Vec<&mut McpServer> = servers
+                .iter_mut()
+                .filter(|s| s.resources.iter().any(|r| r.uri == uri))
+                .collect();
+            return match owners.len() {
+                0 => bail!("mcp resource not found: {uri} (run /mcpres to list)"),
+                1 => owners.into_iter().next().unwrap().read_resource(uri).await,
+                _ => bail!("uri is exposed by multiple mcp servers, pass the server name"),
+            };
+        }
+        let Some(s) = servers.iter_mut().find(|s| s.name == server) else {
+            bail!("mcp server not found: {server}");
+        };
+        s.read_resource(uri).await
+    }
+
+    /// all prompts across servers, in connect order
+    pub async fn prompts(&self) -> Vec<McpPromptInfo> {
+        let servers = self.servers.lock().await;
+        let mut out = Vec::new();
+        for s in servers.iter() {
+            for p in &s.prompts {
+                out.push(McpPromptInfo {
+                    server: s.name.clone(),
+                    name: p.name.clone(),
+                    description: p.description.clone(),
+                    arguments: p
+                        .arguments
+                        .iter()
+                        .map(|a| McpPromptArgInfo {
+                            name: a.name.clone(),
+                            description: a.description.clone(),
+                            required: a.required,
+                        })
+                        .collect(),
+                });
+            }
+        }
+        out
+    }
+
+    /// fetch prompt messages as (role, text) pairs
+    pub async fn get_prompt(&self, server: &str, name: &str, args: &Value) -> Result<Vec<(String, String)>> {
+        let mut servers = self.servers.lock().await;
+        let Some(s) = servers.iter_mut().find(|s| s.name == server) else {
+            bail!("mcp server not found: {server}");
+        };
+        s.get_prompt(name, args).await
+    }
+}
+
+pub struct McpResourceInfo {
+    pub server: String,
+    pub uri: String,
+    pub name: String,
+    pub description: String,
+    pub mime: Option<String>,
+}
+
+pub struct McpPromptArgInfo {
+    pub name: String,
+    pub description: String,
+    pub required: bool,
+}
+
+pub struct McpPromptInfo {
+    pub server: String,
+    pub name: String,
+    pub description: String,
+    pub arguments: Vec<McpPromptArgInfo>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_helpers() {
+        let res = parse_resources(&[
+            json!({"uri": "file:///a", "name": "a", "description": "d", "mimeType": "text/plain"}),
+            json!({"name": "no uri"}),
+        ]);
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].uri, "file:///a");
+        assert_eq!(res[0].mime.as_deref(), Some("text/plain"));
+
+        let prm = parse_prompts(&[json!({
+            "name": "review", "description": "review code",
+            "arguments": [{"name": "lang", "description": "language", "required": true}]
+        })]);
+        assert_eq!(prm.len(), 1);
+        assert_eq!(prm[0].arguments[0].required, true);
+
+        let contents = render_resource_contents(&json!({"contents": [
+            {"uri": "u1", "text": "one"},
+            {"uri": "u2", "blob": "aGVsbG8="}
+        ]}));
+        assert_eq!(contents, "one\n\n[binary resource u2, ~6 bytes]");
+        assert_eq!(render_resource_contents(&json!({"contents": []})), "(empty resource)");
+
+        let msgs = parse_prompt_messages(&json!({"messages": [
+            {"role": "user", "content": {"type": "text", "text": "hi"}},
+            {"role": "assistant", "content": {"type": "image"}}
+        ]}));
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0], ("user".to_string(), "hi".to_string()));
+    }
+
+    #[test]
+    fn capability_detection() {
+        assert!(has_cap(&json!({"resources": {}}), "resources"));
+        assert!(has_cap(&json!({"resources": {"subscribe": true}}), "resources"));
+        assert!(has_cap(&json!({"prompts": true}), "prompts"));
+        assert!(!has_cap(&json!({}), "tools"));
+        assert!(!has_cap(&json!({"tools": false}), "tools"));
+    }
+
+    /// spawned as a child process by resources_and_prompts_roundtrip; acts as a
+    /// fake stdio mcp server. plain test run: no-op.
+    #[test]
+    fn fake_mcp_child() {
+        if std::env::var("HI_DEROLA_FAKE_MCP").is_err() {
+            return;
+        }
+        let mode = std::env::var("HI_DEROLA_FAKE_MCP").unwrap_or_default();
+        use std::io::{BufRead, Write};
+        let stdin = std::io::stdin();
+        let mut out = std::io::stdout().lock();
+        for line in stdin.lock().lines() {
+            let Ok(line) = line else { break };
+            let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            let Some(id) = v.get("id").and_then(|x| x.as_u64()) else {
+                continue;
+            };
+            let method = v["method"].as_str().unwrap_or("");
+            let result = match method {
+                "initialize" => {
+                    if mode == "min" {
+                        json!({"capabilities": {}})
+                    } else {
+                        json!({"capabilities": {"tools": {}, "resources": {}, "prompts": {}}})
+                    }
+                }
+                "tools/list" => {
+                    if mode == "min" {
+                        // answered as an error: tolerated because no tools cap
+                        let e = json!({"code": -32601, "message": "method not found"});
+                        let resp = json!({"jsonrpc": "2.0", "id": id, "error": e});
+                        writeln!(out, "{resp}").unwrap();
+                        out.flush().unwrap();
+                        continue;
+                    }
+                    json!({"tools": [{"name": "ping", "description": "d", "inputSchema": {"type": "object"}}]})
+                }
+                "resources/list" => {
+                    if v["params"]["cursor"].as_str().is_none() {
+                        json!({"resources": [{"uri": "file:///a.txt", "name": "a", "description": "file a", "mimeType": "text/plain"}], "nextCursor": "p2"})
+                    } else {
+                        json!({"resources": [{"uri": "mem://stats", "name": "stats", "description": "live stats"}]})
+                    }
+                }
+                "resources/read" => json!({"contents": [
+                    {"uri": v["params"]["uri"], "mimeType": "text/plain", "text": "hello resource"}
+                ]}),
+                "prompts/list" => json!({"prompts": [{"name": "review", "description": "review code",
+                    "arguments": [{"name": "lang", "description": "language", "required": true}]}]}),
+                "prompts/get" => json!({"messages": [
+                    {"role": "user", "content": {"type": "text", "text": "review the code in lang"}}
+                ]}),
+                _ => json!({}),
+            };
+            let resp = json!({"jsonrpc": "2.0", "id": id, "result": result});
+            writeln!(out, "{resp}").unwrap();
+            out.flush().unwrap();
+        }
+    }
+
+    fn child_cfg(mode: &str) -> McpConfig {
+        let exe = std::env::current_exe().unwrap();
+        let mut env = BTreeMap::new();
+        env.insert("HI_DEROLA_FAKE_MCP".to_string(), mode.to_string());
+        McpConfig {
+            name: "t".to_string(),
+            r#type: None,
+            command: exe.display().to_string(),
+            args: vec![
+                "mcp::tests::fake_mcp_child".to_string(),
+                "--exact".to_string(),
+                "--nocapture".to_string(),
+            ],
+            env,
+            url: None,
+            headers: BTreeMap::new(),
+            oauth: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn resources_and_prompts_roundtrip() {
+        let cfg = child_cfg("1");
+        let mut s = McpServer::connect(&cfg).await.unwrap();
+        assert_eq!(s.tools.len(), 1);
+        assert_eq!(s.resources.len(), 2, "pagination follows nextCursor");
+        assert_eq!(s.resources[0].uri, "file:///a.txt");
+        assert_eq!(s.resources[1].uri, "mem://stats");
+        assert_eq!(s.prompts.len(), 1);
+        assert_eq!(s.prompts[0].arguments[0].name, "lang");
+
+        let text = s.read_resource("mem://stats").await.unwrap();
+        assert_eq!(text, "hello resource");
+
+        let msgs = s
+            .get_prompt("review", &json!({"lang": "rust"}))
+            .await
+            .unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].0, "user");
+        assert_eq!(msgs[0].1, "review the code in lang");
+
+        assert_eq!(s.summary(), "1 tool, 2 resources, 1 prompt");
+    }
+
+    #[tokio::test]
+    async fn server_without_caps_still_connects() {
+        let cfg = child_cfg("min");
+        let s = McpServer::connect(&cfg).await.unwrap();
+        assert!(s.tools.is_empty(), "tools/list error tolerated without cap");
+        assert!(s.resources.is_empty());
+        assert!(s.prompts.is_empty());
+        assert_eq!(s.summary(), "0 tools");
     }
 }

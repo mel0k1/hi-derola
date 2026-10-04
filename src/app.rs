@@ -81,7 +81,7 @@ pub struct App {
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
-const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /sessions      list saved sessions\n  /resume [id]   switch to a saved session (latest by default)\n  /mcpauth [name] mcp OAuth status, or authorize a remote server in browser\n  /jstools [reload] list user JS tools (.hi-derola/tools/), optional rescan\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
+const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /sessions      list saved sessions\n  /resume [id]   switch to a saved session (latest by default)\n  /mcpauth [name] mcp OAuth status, or authorize a remote server in browser\n  /mcpres [server]  list mcp resources\n  /mcpread <server> <uri> read an mcp resource into the chat\n  /mcpprompt [server] <name> [k=v] use an mcp prompt (no args lists prompts)\n  /jstools [reload] list user JS tools (.hi-derola/tools/), optional rescan\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch/mcp_resource + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
 
 pub fn help_text() -> &'static str {
     HELP
@@ -323,6 +323,10 @@ impl App {
                 crate::snapshot::end_turn();
             }
             ApiEvent::Wake => {}
+            ApiEvent::Submit(text) => {
+                // normally intercepted by the main loop; from inside a run it steers
+                self.queue.lock().unwrap().push(text);
+            }
         }
         self.status = self.status_line();
     }
@@ -777,6 +781,25 @@ impl App {
         self.start_run(inflight);
     }
 
+    /// submit text as a user message and start a run (mcp prompts, Submit events)
+    pub fn submit_text(&mut self, text: String, inflight: &mut Option<tokio::task::JoinHandle<()>>) {
+        if text.trim().is_empty() {
+            return;
+        }
+        if !matches!(self.phase, Phase::Idle) {
+            self.queue.lock().unwrap().push(text);
+            self.info("queued: will steer the current run");
+            return;
+        }
+        self.entries.push(Entry {
+            kind: Kind::You,
+            text: text.clone(),
+        });
+        self.session.push(Role::User, text);
+        self.scroll_up = 0;
+        self.start_run(inflight);
+    }
+
     fn start_run(&mut self, inflight: &mut Option<tokio::task::JoinHandle<()>>) {
         self.phase = Phase::Waiting;
         self.status = self.status_line();
@@ -1002,6 +1025,150 @@ impl App {
                     });
                 }
             }
+            "/mcpres" => {
+                let mcp = self.mcp.lock().unwrap().clone();
+                let filter = arg.trim().to_string();
+                let tx = self.tx.clone();
+                self.info("listing mcp resources...");
+                tokio::spawn(async move {
+                    let Some(m) = mcp else {
+                        let _ = tx.send(ApiEvent::Note("mcp is not configured".into()));
+                        return;
+                    };
+                    let list: Vec<_> = m
+                        .resources()
+                        .await
+                        .into_iter()
+                        .filter(|r| filter.is_empty() || r.server == filter)
+                        .collect();
+                    if list.is_empty() {
+                        let _ = tx.send(ApiEvent::Note(format!(
+                            "no mcp resources{}",
+                            if filter.is_empty() { String::new() } else { format!(" on {filter}") }
+                        )));
+                        return;
+                    }
+                    let mut out = format!("mcp resources ({}):", list.len());
+                    for r in list {
+                        out.push_str(&format!("\n  {}  {}", r.server, r.uri));
+                        if !r.name.is_empty() && r.name != r.uri {
+                            out.push_str(&format!(" ({})", r.name));
+                        }
+                        if !r.description.is_empty() {
+                            out.push_str(&format!(" — {}", r.description));
+                        }
+                    }
+                    let _ = tx.send(ApiEvent::Note(out));
+                });
+            }
+            "/mcpread" => {
+                let Some((server, uri)) = arg.trim().split_once(char::is_whitespace) else {
+                    self.info("usage: /mcpread <server> <uri> — run /mcpres to list resources");
+                    return;
+                };
+                let server = server.trim().to_string();
+                let uri = uri.trim().to_string();
+                let mcp = self.mcp.lock().unwrap().clone();
+                let tx = self.tx.clone();
+                self.info(format!("reading {server} {uri}..."));
+                tokio::spawn(async move {
+                    let Some(m) = mcp else {
+                        let _ = tx.send(ApiEvent::Note("mcp is not configured".into()));
+                        return;
+                    };
+                    match m.read_resource(&server, &uri).await {
+                        Ok(text) => {
+                            let _ = tx.send(ApiEvent::Note(
+                                crate::provider::truncate(&text).trim().to_string(),
+                            ));
+                        }
+                        Err(e) => {
+                            let _ = tx.send(ApiEvent::Note(format!("error: {e:#}")));
+                        }
+                    }
+                });
+            }
+            "/mcpprompt" => {
+                let parts: Vec<String> = arg.split_whitespace().map(|s| s.to_string()).collect();
+                let mcp = self.mcp.lock().unwrap().clone();
+                let tx = self.tx.clone();
+                if parts.is_empty() {
+                    self.info("listing mcp prompts...");
+                    tokio::spawn(async move {
+                        let Some(m) = mcp else {
+                            let _ = tx.send(ApiEvent::Note("mcp is not configured".into()));
+                            return;
+                        };
+                        let list = m.prompts().await;
+                        if list.is_empty() {
+                            let _ = tx.send(ApiEvent::Note("no mcp prompts".into()));
+                            return;
+                        }
+                        let mut out = format!("mcp prompts ({}):", list.len());
+                        for p in list {
+                            out.push_str(&format!("\n  {}  {}", p.server, p.name));
+                            if !p.description.is_empty() {
+                                out.push_str(&format!(" — {}", p.description));
+                            }
+                            if !p.arguments.is_empty() {
+                                let names: Vec<String> = p
+                                    .arguments
+                                    .iter()
+                                    .map(|a| {
+                                        if a.required {
+                                            format!("{}*", a.name)
+                                        } else {
+                                            a.name.clone()
+                                        }
+                                    })
+                                    .collect();
+                                out.push_str(&format!(" (args: {})", names.join(", ")));
+                            }
+                        }
+                        out.push_str("\n\nusage: /mcpprompt <server> <name> [key=value ...]");
+                        let _ = tx.send(ApiEvent::Note(out));
+                    });
+                } else if parts.len() < 2 {
+                    self.info("usage: /mcpprompt <server> <name> [key=value ...]");
+                } else {
+                    let server = parts[0].clone();
+                    let name = parts[1].clone();
+                    let mut a = serde_json::Map::new();
+                    for p in &parts[2..] {
+                        if let Some((k, v)) = p.split_once('=') {
+                            a.insert(k.to_string(), serde_json::Value::String(v.to_string()));
+                        } else {
+                            self.info(format!("ignoring bad arg {p} (expected key=value)"));
+                        }
+                    }
+                    self.info(format!("fetching prompt {server}/{name}..."));
+                    tokio::spawn(async move {
+                        let Some(m) = mcp else {
+                            let _ = tx.send(ApiEvent::Note("mcp is not configured".into()));
+                            return;
+                        };
+                        match m.get_prompt(&server, &name, &serde_json::Value::Object(a)).await {
+                            Ok(msgs) if msgs.is_empty() => {
+                                let _ = tx.send(ApiEvent::Note("prompt returned no messages".into()));
+                            }
+                            Ok(msgs) => {
+                                let mut text = String::new();
+                                for (role, t) in &msgs {
+                                    if role != "user" {
+                                        text.push_str(&format!("[{role}]\n"));
+                                    }
+                                    text.push_str(t);
+                                    text.push_str("\n\n");
+                                }
+                                let _ = tx.send(ApiEvent::Submit(text.trim().to_string()));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(ApiEvent::Note(format!("error: {e:#}")));
+                            }
+                        }
+                    });
+                }
+            }
             "/jstools" => {
                 if arg.trim() == "reload" {
                     crate::jstools::reload();
@@ -1160,7 +1327,10 @@ pub async fn run(
     let res = loop {
         terminal.draw(|f| ui::draw(f, &app))?;
         while let Ok(ev) = rx.try_recv() {
-            app.on_api(ev);
+            match ev {
+                ApiEvent::Submit(text) => app.submit_text(text, &mut inflight),
+                other => app.on_api(other),
+            }
         }
         app.resume_queued(&mut inflight);
         if app.should_quit {

@@ -235,7 +235,7 @@ pub async fn run(
             specs.retain(|s| {
                 matches!(
                     s.name.as_str(),
-                    "read_file" | "list_files" | "glob" | "grep" | "lsp" | "task_status" | "todoread" | "skill"
+                    "read_file" | "list_files" | "glob" | "grep" | "lsp" | "mcp_resource" | "task_status" | "todoread" | "skill"
                 ) || crate::jstools::has(&s.name)
             });
         }

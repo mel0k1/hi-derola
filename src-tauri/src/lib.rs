@@ -351,6 +351,10 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     resume = sh.inflight.lock().unwrap().is_none();
                     json!({"t": "wake"})
                 }
+                ApiEvent::Submit(s) => {
+                    dispatch_prompt(&sh, &app, s);
+                    json!({"t": "wake"})
+                }
             };
             if payload.get("t").and_then(|t| t.as_str()) == Some("note") {
                 if payload.get("s").and_then(|s| s.as_str()) == Some("") {
@@ -551,6 +555,73 @@ async fn mcp_auth(sh: State<'_, Arc<Shared>>, name: String) -> Result<Vec<String
     }];
     logs.extend(mcp::reconnect_one(&sh.mcp, &cfgs, &name).await);
     Ok(logs)
+}
+
+#[tauri::command]
+async fn mcp_resources(sh: State<'_, Arc<Shared>>) -> Result<Vec<Value>, String> {
+    let Some(c) = sh.mcp.lock().unwrap().clone() else {
+        return Ok(vec![]);
+    };
+    Ok(c.resources()
+        .await
+        .into_iter()
+        .map(|r| {
+            json!({"server": r.server, "uri": r.uri, "name": r.name, "description": r.description, "mime": r.mime})
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn mcp_read_resource(sh: State<'_, Arc<Shared>>, server: String, uri: String) -> Result<Value, String> {
+    let Some(c) = sh.mcp.lock().unwrap().clone() else {
+        return Err("mcp is not configured".into());
+    };
+    match c.read_resource(&server, &uri).await {
+        Ok(text) => Ok(json!({"text": text})),
+        Err(e) => Err(format!("{e:#}")),
+    }
+}
+
+#[tauri::command]
+async fn mcp_prompts(sh: State<'_, Arc<Shared>>) -> Result<Vec<Value>, String> {
+    let Some(c) = sh.mcp.lock().unwrap().clone() else {
+        return Ok(vec![]);
+    };
+    Ok(c.prompts()
+        .await
+        .into_iter()
+        .map(|p| {
+            json!({
+                "server": p.server, "name": p.name, "description": p.description,
+                "arguments": p.arguments.iter().map(|a| json!({
+                    "name": a.name, "description": a.description, "required": a.required
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn mcp_get_prompt(
+    sh: State<'_, Arc<Shared>>,
+    server: String,
+    name: String,
+    args: std::collections::HashMap<String, String>,
+) -> Result<Vec<Value>, String> {
+    let Some(c) = sh.mcp.lock().unwrap().clone() else {
+        return Err("mcp is not configured".into());
+    };
+    let mut a = serde_json::Map::new();
+    for (k, v) in args {
+        a.insert(k, json!(v));
+    }
+    match c.get_prompt(&server, &name, &Value::Object(a)).await {
+        Ok(msgs) => Ok(msgs
+            .into_iter()
+            .map(|(role, text)| json!({"role": role, "text": text}))
+            .collect()),
+        Err(e) => Err(format!("{e:#}")),
+    }
 }
 
 #[tauri::command]
@@ -843,7 +914,7 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
         .unwrap_or((line, ""));
     match cmd {
         "/help" | "/h" => note(
-            "commands: /file <path> · /model <name> · /models · /plan · /undo · /redo · /init · /compact · /export [path] · /clear · /help\n\
+            "commands: /file <path> · /model <name> · /models · /plan · /undo · /redo · /init · /compact · /export [path] · /mcpres [server] · /mcpread <server> <uri> · /mcpprompt [server] <name> [k=v] · /clear · /help\n\
              mutations (write/edit/bash/mcp) ask for confirmation, allow all skips further asks\n\
              custom commands: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)",
         ),
@@ -885,6 +956,141 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
                 let _ = tx.send(ApiEvent::Note(msg));
             });
             note("fetching models...")
+        }
+        "/mcpres" => {
+            let mcp = sh.mcp.lock().unwrap().clone();
+            let filter = arg.trim().to_string();
+            let tx = sh.tx.clone();
+            tauri::async_runtime::spawn(async move {
+                let Some(c) = mcp else {
+                    let _ = tx.send(ApiEvent::Note("mcp is not configured".into()));
+                    return;
+                };
+                let list: Vec<_> = c
+                    .resources()
+                    .await
+                    .into_iter()
+                    .filter(|r| filter.is_empty() || r.server == filter)
+                    .collect();
+                let msg = if list.is_empty() {
+                    format!(
+                        "no mcp resources{}",
+                        if filter.is_empty() { String::new() } else { format!(" on {filter}") }
+                    )
+                } else {
+                    let mut out = format!("mcp resources ({}):", list.len());
+                    for r in list {
+                        out.push_str(&format!("\n  {}  {}", r.server, r.uri));
+                        if !r.name.is_empty() && r.name != r.uri {
+                            out.push_str(&format!(" ({})", r.name));
+                        }
+                        if !r.description.is_empty() {
+                            out.push_str(&format!(" — {}", r.description));
+                        }
+                    }
+                    out
+                };
+                let _ = tx.send(ApiEvent::Note(msg));
+            });
+            note("listing mcp resources...")
+        }
+        "/mcpread" => {
+            let Some((server, uri)) = arg.trim().split_once(char::is_whitespace) else {
+                return note("usage: /mcpread <server> <uri> — run /mcpres to list resources");
+            };
+            let server = server.trim().to_string();
+            let uri = uri.trim().to_string();
+            let mcp = sh.mcp.lock().unwrap().clone();
+            let tx = sh.tx.clone();
+            tauri::async_runtime::spawn(async move {
+                let Some(c) = mcp else {
+                    let _ = tx.send(ApiEvent::Note("mcp is not configured".into()));
+                    return;
+                };
+                let msg = match c.read_resource(&server, &uri).await {
+                    Ok(text) => hi_derola::provider::truncate(&text).trim().to_string(),
+                    Err(e) => format!("error: {e:#}"),
+                };
+                let _ = tx.send(ApiEvent::Note(msg));
+            });
+            note(format!("reading {server} {uri}..."))
+        }
+        "/mcpprompt" => {
+            let parts: Vec<String> = arg.split_whitespace().map(|s| s.to_string()).collect();
+            if parts.is_empty() {
+                let mcp = sh.mcp.lock().unwrap().clone();
+                let tx = sh.tx.clone();
+                tauri::async_runtime::spawn(async move {
+                    let Some(c) = mcp else {
+                        let _ = tx.send(ApiEvent::Note("mcp is not configured".into()));
+                        return;
+                    };
+                    let list = c.prompts().await;
+                    if list.is_empty() {
+                        let _ = tx.send(ApiEvent::Note("no mcp prompts".into()));
+                        return;
+                    }
+                    let mut out = format!("mcp prompts ({}):", list.len());
+                    for p in list {
+                        out.push_str(&format!("\n  {}  {}", p.server, p.name));
+                        if !p.description.is_empty() {
+                            out.push_str(&format!(" — {}", p.description));
+                        }
+                        if !p.arguments.is_empty() {
+                            let names: Vec<String> = p
+                                .arguments
+                                .iter()
+                                .map(|a| if a.required { format!("{}*", a.name) } else { a.name.clone() })
+                                .collect();
+                            out.push_str(&format!(" (args: {})", names.join(", ")));
+                        }
+                    }
+                    out.push_str("\n\nusage: /mcpprompt <server> <name> [key=value ...]");
+                    let _ = tx.send(ApiEvent::Note(out));
+                });
+                note("listing mcp prompts...")
+            } else if parts.len() < 2 {
+                note("usage: /mcpprompt <server> <name> [key=value ...]")
+            } else {
+                let mcp = sh.mcp.lock().unwrap().clone();
+                let tx = sh.tx.clone();
+                let sh2 = sh.clone();
+                let app2 = app.clone();
+                let server = parts[0].clone();
+                let name = parts[1].clone();
+                let mut a = serde_json::Map::new();
+                for p in &parts[2..] {
+                    if let Some((k, v)) = p.split_once('=') {
+                        a.insert(k.to_string(), json!(v));
+                    }
+                }
+                tauri::async_runtime::spawn(async move {
+                    let Some(c) = mcp else {
+                        let _ = tx.send(ApiEvent::Note("mcp is not configured".into()));
+                        return;
+                    };
+                    match c.get_prompt(&server, &name, &Value::Object(a)).await {
+                        Ok(msgs) if msgs.is_empty() => {
+                            let _ = tx.send(ApiEvent::Note("prompt returned no messages".into()));
+                        }
+                        Ok(msgs) => {
+                            let mut text = String::new();
+                            for (role, t) in &msgs {
+                                if role != "user" {
+                                    text.push_str(&format!("[{role}]\n"));
+                                }
+                                text.push_str(t);
+                                text.push_str("\n\n");
+                            }
+                            dispatch_prompt(&sh2, &app2, text.trim().to_string());
+                        }
+                        Err(e) => {
+                            let _ = tx.send(ApiEvent::Note(format!("error: {e:#}")));
+                        }
+                    }
+                });
+                note(format!("fetching prompt {server}/{name}..."))
+            }
         }
         "/file" => {
             if arg.is_empty() {
@@ -1213,7 +1419,7 @@ pub fn run() -> Result<()> {
         })
         .invoke_handler(tauri::generate_handler![
             init, save, send, confirm, answer, allow_all, stop, list_models, mcp_reconnect,
-            mcp_auth, undo,
+            mcp_auth, mcp_resources, mcp_read_resource, mcp_prompts, mcp_get_prompt, undo,
             redo, list_sessions, new_session, open_session, delete_session, list_dir, attach_path,
             detach, set_theme, list_project_files, set_plan, task_kill, list_agents
         ])
