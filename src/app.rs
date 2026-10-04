@@ -158,9 +158,20 @@ impl App {
         }
     }
 
+    /// client hooks for mcp: workspace root (cwd) + sampling via our provider
+    fn mcp_hooks(&self) -> mcp::McpHooks {
+        mcp::McpHooks::workspace(std::env::current_dir().ok()).with_sampler(mcp::default_sampler(
+            self.provider.clone(),
+            self.model.clone(),
+            self.cfg.provider.temperature,
+            self.tx.clone(),
+        ))
+    }
+
     pub async fn connect_mcp(&mut self) {
         let cfgs = self.cfg.mcp.clone();
-        let (client, logs) = mcp::connect_all(&cfgs).await;
+        let hooks = self.mcp_hooks();
+        let (client, logs) = mcp::connect_all(&cfgs, &hooks).await;
         for l in logs {
             self.info(l);
         }
@@ -1007,6 +1018,7 @@ impl App {
                 } else {
                     let name = arg.to_string();
                     let cfgs = self.cfg.mcp.clone();
+                    let hooks = self.mcp_hooks();
                     let tx = self.tx.clone();
                     let mcp_slot = self.mcp.clone();
                     self.info(format!("starting OAuth for {name} — check your browser"));
@@ -1014,7 +1026,7 @@ impl App {
                         match crate::mcpauth::authorize_flow(&name, &cfgs).await {
                             Ok(msg) => {
                                 let _ = tx.send(ApiEvent::Note(msg));
-                                for l in mcp::reconnect_one(&mcp_slot, &cfgs, &name).await {
+                                for l in mcp::reconnect_one(&mcp_slot, &cfgs, &hooks, &name).await {
                                     let _ = tx.send(ApiEvent::Note(l));
                                 }
                             }

@@ -43,6 +43,9 @@ stream = true
 # [mcp.oauth]
 # client_id = "hi-derola"
 # scope = "read write"
+# sampling = false refuses sampling/createMessage from this server
+# (by default a sampling request runs a one-shot completion on your
+# provider with the configured model; each request is noted in the chat)
 
 # gui hotkeys, combos: enter, escape, tab, ctrl+x, shift+enter, alt+f, comma...
 # set to "none" to disable, unknown keys fall back to defaults

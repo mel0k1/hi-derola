@@ -211,6 +211,9 @@ pub struct McpConfig {
     pub headers: BTreeMap<String, String>,
     #[serde(default)]
     pub oauth: Option<McpOAuthOpt>,
+    /// sampling = false refuses sampling/createMessage from this server
+    #[serde(default)]
+    pub sampling: Option<bool>,
 }
 
 impl McpConfig {
@@ -279,6 +282,16 @@ mod tests {
         assert!(!back.agent.compaction.prune);
         assert_eq!(back.agent.compaction.prune_protect, 10_000);
         assert_eq!(back.agent.compaction.prune_min, 5_000);
+    }
+
+    #[test]
+    fn mcp_sampling_flag() {
+        let raw = format!(
+            "{MINIMAL}[[mcp]]\nname = \"a\"\ncommand = \"x\"\nsampling = false\n\n[[mcp]]\nname = \"b\"\ncommand = \"y\"\n"
+        );
+        let cfg: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(cfg.mcp[0].sampling, Some(false));
+        assert_eq!(cfg.mcp[1].sampling, None, "absent keeps the default (enabled)");
     }
 
     #[test]

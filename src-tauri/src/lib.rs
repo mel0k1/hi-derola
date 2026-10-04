@@ -538,22 +538,42 @@ async fn stop(sh: State<'_, Arc<Shared>>, app: AppHandle) -> Result<(), String> 
     Ok(())
 }
 
+/// client hooks for mcp: workspace root (cwd) + sampling via our provider
+fn mcp_hooks(cfg: &Config, tx: mpsc::UnboundedSender<ApiEvent>) -> hi_derola::mcp::McpHooks {
+    let hooks = hi_derola::mcp::McpHooks::workspace(std::env::current_dir().ok());
+    match cfg.api_key() {
+        Some(k) => match provider::build(&cfg.provider.kind, cfg.provider.base_url.clone(), k) {
+            Ok(p) => hooks.with_sampler(hi_derola::mcp::default_sampler(
+                p,
+                cfg.provider.model.clone(),
+                cfg.provider.temperature,
+                tx,
+            )),
+            Err(_) => hooks,
+        },
+        None => hooks,
+    }
+}
+
 #[tauri::command]
 async fn mcp_reconnect(sh: State<'_, Arc<Shared>>) -> Result<Vec<String>, String> {
-    let cfgs = sh.cfg.lock().unwrap().mcp.clone();
-    let (client, logs) = mcp::connect_all(&cfgs).await;
+    let cfg = sh.cfg.lock().unwrap().clone();
+    let hooks = mcp_hooks(&cfg, sh.tx.clone());
+    let (client, logs) = mcp::connect_all(&cfg.mcp, &hooks).await;
     *sh.mcp.lock().unwrap() = client;
     Ok(logs)
 }
 
 #[tauri::command]
 async fn mcp_auth(sh: State<'_, Arc<Shared>>, name: String) -> Result<Vec<String>, String> {
-    let cfgs = sh.cfg.lock().unwrap().mcp.clone();
+    let cfg = sh.cfg.lock().unwrap().clone();
+    let hooks = mcp_hooks(&cfg, sh.tx.clone());
+    let cfgs = cfg.mcp;
     let mut logs = vec![match mcpauth::authorize_flow(&name, &cfgs).await {
         Ok(m) => m,
         Err(e) => return Err(format!("{e:#}")),
     }];
-    logs.extend(mcp::reconnect_one(&sh.mcp, &cfgs, &name).await);
+    logs.extend(mcp::reconnect_one(&sh.mcp, &cfgs, &hooks, &name).await);
     Ok(logs)
 }
 
@@ -1405,9 +1425,11 @@ pub fn run() -> Result<()> {
                 hi_derola::todo::set_list(restored_todos);
             }
             let mcp_slot = sh.mcp.clone();
-            let mcp_cfgs = sh.cfg.lock().unwrap().mcp.clone();
+            let mcp_cfg = sh.cfg.lock().unwrap().clone();
+            let mcp_hooks = mcp_hooks(&mcp_cfg, tx.clone());
+            let mcp_cfgs = mcp_cfg.mcp;
             tauri::async_runtime::spawn(async move {
-                let (client, logs) = mcp::connect_all(&mcp_cfgs).await;
+                let (client, logs) = mcp::connect_all(&mcp_cfgs, &mcp_hooks).await;
                 *mcp_slot.lock().unwrap() = client;
                 for l in logs {
                     let _ = tx2.send(ApiEvent::Note(l));
