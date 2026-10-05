@@ -528,11 +528,24 @@ struct HttpCtx {
     session: std::sync::Mutex<Option<String>>,
 }
 
+/// legacy http + server-sent-events transport: one long GET stream carries
+/// every server message, outgoing messages go to the endpoint the server
+/// announces with an `endpoint` event
+struct SseCtx {
+    url: String,
+    http: reqwest::Client,
+    headers: BTreeMap<String, String>,
+    oauth: Option<crate::config::McpOAuthCfg>,
+    /// message endpoint announced via the `endpoint` event
+    endpoint: std::sync::Mutex<Option<String>>,
+}
+
 /// how outgoing messages are delivered and how replies to server->client
 /// requests are sent back
 enum Reply {
     Stdio { stdin: Arc<Mutex<ChildStdin>> },
     Http(Arc<HttpCtx>),
+    Sse(Arc<SseCtx>),
 }
 
 /// state shared between the request path and the background reader task
@@ -579,6 +592,36 @@ fn cfg_connect_timeout(cfg: &McpConfig) -> Duration {
 }
 
 type Pending = Arc<Mutex<BTreeMap<u64, tokio::sync::oneshot::Sender<Result<Value>>>>>;
+
+/// build the per-server shared state for one transport choice
+fn shared_for(
+    cfg: &McpConfig,
+    hooks: &McpHooks,
+    sampling: bool,
+    elicitation: bool,
+    reply: Reply,
+) -> (Arc<Shared>, Pending) {
+    let shared = Arc::new(Shared {
+        name: cfg.name.clone(),
+        reply,
+        hooks: hooks.clone(),
+        sampling,
+        elicitation,
+        next_id: AtomicU64::new(0),
+        stale_tools: AtomicBool::new(false),
+        stale_resources: AtomicBool::new(false),
+        stale_prompts: AtomicBool::new(false),
+        closed: AtomicBool::new(false),
+        res_sub: AtomicBool::new(false),
+        subs: std::sync::Mutex::new(Vec::new()),
+        logging: AtomicBool::new(false),
+        logging_on: cfg.logging != Some(false),
+        progress: std::sync::Mutex::new(BTreeMap::new()),
+        alive: AtomicBool::new(true),
+        timeout: cfg.timeout.map(Duration::from_secs),
+    });
+    (shared, Arc::new(Mutex::new(BTreeMap::new())))
+}
 
 struct McpServer {
     shared: Arc<Shared>,
@@ -1005,6 +1048,14 @@ async fn reply_message(shared: &Arc<Shared>, msg: Value) {
         Reply::Http(ctx) => {
             let _ = http_send(ctx, &shared.name, &msg, false).await;
         }
+        Reply::Sse(ctx) => {
+            // answers ride the endpoint announced on the stream; if it is
+            // still unknown there is nowhere to send
+            let ep = ctx.endpoint.lock().unwrap().clone();
+            if let Some(ep) = ep {
+                let _ = sse_post(ctx, &shared.name, &ep, &msg).await;
+            }
+        }
     }
 }
 
@@ -1129,6 +1180,215 @@ async fn http_live(shared: Arc<Shared>, pending: Pending) {
     }
 }
 
+/// connect a remote server: streamable http first, the legacy http + sse
+/// transport as fallback (opencode-style). initialize rides the transport
+/// selection — a success pins it. auth failures (401) are not transport
+/// mismatches, so they surface without a fallback attempt.
+async fn connect_remote(
+    cfg: &McpConfig,
+    hooks: &McpHooks,
+    sampling: bool,
+    elicitation: bool,
+) -> Result<(Arc<Shared>, Pending, Value, Vec<tokio::task::JoinHandle<()>>)> {
+    let url = cfg.url.clone().context("mcp: url required")?;
+    let http = reqwest::Client::builder().user_agent("hi-derola").build()?;
+    let mut caps = json!({"roots": {"listChanged": true}});
+    if sampling {
+        caps["sampling"] = json!({});
+    }
+    if elicitation {
+        caps["elicitation"] = json!({});
+    }
+    let init_params = json!({
+        "protocolVersion": "2025-03-26",
+        "capabilities": caps,
+        "clientInfo": {"name": "hi-derola", "version": "0.1.0"}
+    });
+
+    // --- streamable http attempt ---
+    let (http_shared, pending) = shared_for(
+        cfg,
+        hooks,
+        sampling,
+        elicitation,
+        Reply::Http(Arc::new(HttpCtx {
+            url: url.clone(),
+            http: http.clone(),
+            headers: cfg.headers.clone(),
+            oauth: cfg.oauth_cfg(),
+            session: std::sync::Mutex::new(None),
+        })),
+    );
+    let to = req_to(&http_shared);
+    let first_err = match request(&http_shared, &pending, to, "initialize", init_params.clone()).await {
+        Ok(v) => return Ok((http_shared, pending, v, Vec::new())),
+        Err(e) => e,
+    };
+    if format!("{first_err:#}").contains("401 unauthorized") {
+        return Err(first_err);
+    }
+
+    // --- legacy http + sse attempt; on failure the original error is the
+    // meaningful one for every common case (dead server, real jsonrpc error)
+    let (sse_shared, sse_pending) = shared_for(
+        cfg,
+        hooks,
+        sampling,
+        elicitation,
+        Reply::Sse(Arc::new(SseCtx {
+            url: url.clone(),
+            http,
+            headers: cfg.headers.clone(),
+            oauth: cfg.oauth_cfg(),
+            endpoint: std::sync::Mutex::new(None),
+        })),
+    );
+    let mut tasks = Vec::new();
+    tasks.push(tokio::spawn(sse_live(sse_shared.clone(), sse_pending.clone())));
+    match request(&sse_shared, &sse_pending, to, "initialize", init_params).await {
+        Ok(v) => Ok((sse_shared, sse_pending, v, tasks)),
+        Err(_) => Err(first_err),
+    }
+}
+
+/// background reader for the legacy sse transport: opens the event stream,
+/// learns the message endpoint from the `endpoint` event, routes every json
+/// event through pending/dispatch; reconnects with backoff until closed
+async fn sse_live(shared: Arc<Shared>, pending: Pending) {
+    let Reply::Sse(ctx) = &shared.reply else {
+        return;
+    };
+    let mut backoff = 1u64;
+    loop {
+        if shared.closed.load(Ordering::Relaxed) {
+            return;
+        }
+        match sse_get_stream(ctx, &shared.name).await {
+            Ok(r) if r.status().is_success() => {
+                backoff = 1;
+                let _ = sse_consume(r, ctx, &shared, &pending).await;
+            }
+            _ => {}
+        }
+        if shared.closed.load(Ordering::Relaxed) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_secs(backoff)).await;
+        backoff = (backoff * 2).min(30);
+    }
+}
+
+async fn sse_get_stream(ctx: &SseCtx, name: &str) -> Result<reqwest::Response> {
+    let token = crate::mcpauth::bearer(name, &ctx.url, ctx.oauth.as_ref(), &ctx.http, false)
+        .await
+        .unwrap_or(None);
+    let mut req = ctx
+        .http
+        .get(ctx.url.as_str())
+        .header("Accept", "text/event-stream");
+    if let Some(t) = &token {
+        req = req.header("Authorization", format!("Bearer {t}"));
+    }
+    for (k, v) in ctx.headers.iter() {
+        req = req.header(k.as_str(), v.as_str());
+    }
+    Ok(req.send().await?)
+}
+
+/// resolve a possibly relative endpoint announcement against the server url
+fn absolute_url(base: &str, target: &str) -> String {
+    if target.starts_with("http://") || target.starts_with("https://") {
+        return target.to_string();
+    }
+    match reqwest::Url::parse(base).and_then(|u| u.join(target)) {
+        Ok(u) => u.to_string(),
+        Err(_) => target.to_string(),
+    }
+}
+
+/// POST one message to the announced endpoint
+async fn sse_post(ctx: &SseCtx, name: &str, ep: &str, body: &Value) -> Result<()> {
+    let token = crate::mcpauth::bearer(name, &ctx.url, ctx.oauth.as_ref(), &ctx.http, false)
+        .await
+        .unwrap_or(None);
+    let mut req = ctx.http.post(ep).header("Content-Type", "application/json");
+    if let Some(t) = &token {
+        req = req.header("Authorization", format!("Bearer {t}"));
+    }
+    for (k, v) in ctx.headers.iter() {
+        req = req.header(k.as_str(), v.as_str());
+    }
+    let fut = req.body(body.to_string()).send();
+    match tokio::time::timeout(REQUEST_TIMEOUT, fut).await {
+        Err(_) => bail!("mcp {name}: sse post timeout"),
+        Ok(r) => {
+            let r = r?;
+            if !r.status().is_success() {
+                bail!("mcp {name}: sse post {}", r.status());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// wait until the server announces its message endpoint (sent immediately
+/// after the stream opens; the cap keeps a wrong-transport fallback fast)
+async fn sse_wait_endpoint(ctx: &SseCtx, timeout: Duration) -> Result<String> {
+    let deadline = tokio::time::Instant::now() + timeout.min(Duration::from_secs(2));
+    loop {
+        if let Some(ep) = ctx.endpoint.lock().unwrap().clone() {
+            return Ok(ep);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!("mcp: sse endpoint was not announced");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// consume the legacy sse stream: `endpoint` events pin the message endpoint,
+/// `message` events carry the jsonrpc traffic
+async fn sse_consume(
+    mut resp: reqwest::Response,
+    ctx: &Arc<SseCtx>,
+    shared: &Arc<Shared>,
+    pending: &Pending,
+) {
+    let mut event = String::new();
+    let mut buf = String::new();
+    loop {
+        let Ok(Some(bytes)) = resp.chunk().await else {
+            break;
+        };
+        buf.push_str(&String::from_utf8_lossy(&bytes));
+        while let Some(pos) = buf.find('\n') {
+            let line: String = buf.drain(..pos + 1).collect();
+            let line = line.trim_end();
+            if let Some(e) = line.strip_prefix("event:") {
+                event = e.trim().to_string();
+                continue;
+            }
+            let Some(data) = line.strip_prefix("data:") else {
+                continue;
+            };
+            let data = data.trim();
+            if event == "endpoint" {
+                *ctx.endpoint.lock().unwrap() = Some(absolute_url(&ctx.url, data));
+                event.clear();
+                continue;
+            }
+            event.clear();
+            if data.is_empty() {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<Value>(data) else {
+                continue;
+            };
+            dispatch_incoming(shared, pending, v).await;
+        }
+    }
+}
+
 async fn http_get_stream(ctx: &HttpCtx, name: &str) -> Result<reqwest::Response> {
     let token = crate::mcpauth::bearer(name, &ctx.url, ctx.oauth.as_ref(), &ctx.http, false)
         .await
@@ -1232,6 +1492,12 @@ async fn send_msg(shared: &Arc<Shared>, pending: &Pending, msg: &Value) -> Resul
             Ok(json!({}))
         }
         Reply::Http(ctx) => http_post(shared, ctx, pending, msg).await,
+        Reply::Sse(ctx) => {
+            // the reply arrives on the event stream, routed through pending
+            let ep = sse_wait_endpoint(ctx, req_to(shared)).await?;
+            sse_post(ctx, &shared.name, &ep, msg).await?;
+            Ok(json!({}))
+        }
     }
 }
 
@@ -1378,40 +1644,9 @@ impl McpServer {
             || (cfg.command.is_empty() && cfg.url.is_some());
         let sampling = hooks.sampler.is_some() && cfg.sampling != Some(false);
         let elicitation = hooks.eliciter.is_some() && cfg.elicitation != Some(false);
-        let (shared, pending, child, reader, stderr) = if remote {
-            let url = cfg.url.clone().context("mcp: url required")?;
-            let http = reqwest::Client::builder().user_agent("hi-derola").build()?;
-            (
-                Arc::new(Shared {
-                    name: cfg.name.clone(),
-                    reply: Reply::Http(Arc::new(HttpCtx {
-                        url,
-                        http,
-                        headers: cfg.headers.clone(),
-                        oauth: cfg.oauth_cfg(),
-                        session: std::sync::Mutex::new(None),
-                    })),
-                    hooks: hooks.clone(),
-                    sampling,
-                    elicitation,
-                    next_id: AtomicU64::new(0),
-                    stale_tools: AtomicBool::new(false),
-                    stale_resources: AtomicBool::new(false),
-                    stale_prompts: AtomicBool::new(false),
-                    closed: AtomicBool::new(false),
-                    res_sub: AtomicBool::new(false),
-                    subs: std::sync::Mutex::new(Vec::new()),
-                    logging: AtomicBool::new(false),
-                    logging_on: cfg.logging != Some(false),
-                    progress: std::sync::Mutex::new(BTreeMap::new()),
-                    alive: AtomicBool::new(true),
-                    timeout: cfg.timeout.map(Duration::from_secs),
-                }),
-                Arc::new(Mutex::new(BTreeMap::new())),
-                None,
-                None,
-                None,
-            )
+        let (shared, pending, child, reader, stderr, pre_tasks, init) = if remote {
+            let (sh, pd, i, tasks) = connect_remote(cfg, hooks, sampling, elicitation).await?;
+            (sh, pd, None, None, None, tasks, Some(i))
         } else {
             let mut cmd = tokio::process::Command::new(&cfg.command);
             cmd.args(&cfg.args).envs(&cfg.env);
@@ -1430,33 +1665,16 @@ impl McpServer {
             let stdin = child.stdin.take().context("mcp: no stdin")?;
             let stdout = child.stdout.take().context("mcp: no stdout")?;
             let stderr = child.stderr.take();
-            (
-                Arc::new(Shared {
-                    name: cfg.name.clone(),
-                    reply: Reply::Stdio {
-                        stdin: Arc::new(Mutex::new(stdin)),
-                    },
-                    hooks: hooks.clone(),
-                    sampling,
-                    elicitation,
-                    next_id: AtomicU64::new(0),
-                    stale_tools: AtomicBool::new(false),
-                    stale_resources: AtomicBool::new(false),
-                    stale_prompts: AtomicBool::new(false),
-                    closed: AtomicBool::new(false),
-                    res_sub: AtomicBool::new(false),
-                    subs: std::sync::Mutex::new(Vec::new()),
-                    logging: AtomicBool::new(false),
-                    logging_on: cfg.logging != Some(false),
-                    progress: std::sync::Mutex::new(BTreeMap::new()),
-                    alive: AtomicBool::new(true),
-                    timeout: cfg.timeout.map(Duration::from_secs),
-                }),
-                Arc::new(Mutex::new(BTreeMap::new())),
-                Some(child),
-                Some(tokio::io::BufReader::new(stdout)),
-                stderr,
-            )
+            let (sh, pd) = shared_for(
+                cfg,
+                hooks,
+                sampling,
+                elicitation,
+                Reply::Stdio {
+                    stdin: Arc::new(Mutex::new(stdin)),
+                },
+            );
+            (sh, pd, Some(child), Some(tokio::io::BufReader::new(stdout)), stderr, Vec::new(), None)
         };
         let mut s = Self {
             shared,
@@ -1476,7 +1694,8 @@ impl McpServer {
             s.tasks
                 .push(tokio::spawn(stderr_drain(err, s.shared.clone())));
         }
-        // background traffic: stdio reader or the http live stream
+        // background traffic: stdio reader or the http live stream (a no-op
+        // for the legacy sse transport, which runs its own stream task)
         if let Some(reader) = reader {
             s.tasks.push(tokio::spawn(stdio_reader(
                 reader,
@@ -1489,6 +1708,7 @@ impl McpServer {
                 s.pending.clone(),
             )));
         }
+        s.tasks.extend(pre_tasks);
         // optional keepalive: periodic pings note alive <-> unresponsive flips
         let ka_secs = cfg.keepalive.unwrap_or(0);
         if ka_secs > 0 {
@@ -1500,7 +1720,7 @@ impl McpServer {
         }
         let proto = match s.shared.reply {
             Reply::Http(_) => "2025-03-26",
-            Reply::Stdio { .. } => "2024-11-05",
+            Reply::Sse(_) | Reply::Stdio { .. } => "2024-11-05",
         };
         let mut client_caps = json!({"roots": {"listChanged": true}});
         if sampling {
@@ -1509,17 +1729,23 @@ impl McpServer {
         if elicitation {
             client_caps["elicitation"] = json!({});
         }
-        let init = s
-            .request_t(
-                req_to(&s.shared),
-                "initialize",
-                json!({
-                    "protocolVersion": proto,
-                    "capabilities": client_caps,
-                    "clientInfo": {"name": "hi-derola", "version": "0.1.0"}
-                }),
-            )
-            .await?;
+        // remote transports already answered initialize during transport
+        // selection; stdio sends it here
+        let init = match init {
+            Some(v) => v,
+            None => {
+                s.request_t(
+                    req_to(&s.shared),
+                    "initialize",
+                    json!({
+                        "protocolVersion": proto,
+                        "capabilities": client_caps,
+                        "clientInfo": {"name": "hi-derola", "version": "0.1.0"}
+                    }),
+                )
+                .await?
+            }
+        };
         let caps = init["capabilities"].clone();
         s.instructions = init["instructions"]
             .as_str()
@@ -2779,5 +3005,146 @@ mod tests {
         assert_eq!(req_to(&s.shared), REQUEST_TIMEOUT);
         assert_eq!(call_to(&s.shared), CALL_TIMEOUT);
         assert_eq!(cfg_connect_timeout(&child_cfg("1")), CONNECT_TIMEOUT);
+    }
+
+    /// read one http request (headers + content-length body) from a raw stream
+    fn read_http_req(s: &mut std::net::TcpStream) -> String {
+        use std::io::Read as _;
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 4096];
+        let head_end = loop {
+            match s.read(&mut tmp) {
+                Ok(0) => break buf.len(),
+                Ok(n) => {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break pos + 4;
+                    }
+                }
+                Err(_) => break buf.len(),
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+        let len: usize = head
+            .lines()
+            .find_map(|l| {
+                let (k, v) = l.split_once(':')?;
+                if k.trim().eq_ignore_ascii_case("content-length") {
+                    v.trim().parse().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
+        while buf.len() < head_end + len {
+            match s.read(&mut tmp) {
+                Ok(0) => break,
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&buf).to_string()
+    }
+
+    #[tokio::test]
+    async fn sse_fallback_connects_legacy_servers() {
+        use std::io::Write as _;
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // writer handle: the post handlers answer over the get stream
+        let writer: Arc<std::sync::Mutex<Option<std::net::TcpStream>>> = Arc::default();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { continue };
+                let w = writer.clone();
+                std::thread::spawn(move || {
+                    let req = read_http_req(&mut s);
+                    let head = req.lines().next().unwrap_or("").to_string();
+                    let mut parts = head.split_whitespace();
+                    let method = parts.next().unwrap_or("").to_string();
+                    let target = parts.next().unwrap_or("/").to_string();
+                    let path = target.split('?').next().unwrap_or("/").to_string();
+                    let body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+                    if method == "POST" && path == "/mcp" {
+                        // streamable http unsupported: a legacy sse-only server
+                        let _ = s.write_all(
+                            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                        return;
+                    }
+                    if method == "GET" && path == "/mcp" {
+                        let _ = s.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n",
+                        );
+                        // share the writer before the announcement: posts may
+                        // arrive as soon as the client sees the endpoint
+                        *w.lock().unwrap() = Some(s.try_clone().unwrap());
+                        let _ = s.write_all(b"event: endpoint\ndata: /messages?sessionId=s1\n\n");
+                        let _ = s.flush();
+                        // hold the stream open; post handlers write the replies
+                        loop {
+                            std::thread::park();
+                        }
+                    }
+                    if method == "POST" && path == "/messages" {
+                        let _ = s.write_all(
+                            b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                        let Ok(v) = serde_json::from_str::<Value>(&body) else {
+                            return;
+                        };
+                        let Some(id) = v.get("id").cloned() else {
+                            return;
+                        };
+                        let result = match v["method"].as_str().unwrap_or("") {
+                            "initialize" => {
+                                json!({"capabilities": {"tools": {}}, "instructions": "via legacy sse"})
+                            }
+                            "tools/list" => json!({"tools": [
+                                {"name": "sse_tool", "description": "d", "inputSchema": {"type": "object"}}
+                            ]}),
+                            _ => json!({}),
+                        };
+                        let reply = json!({"jsonrpc": "2.0", "id": id, "result": result});
+                        let msg = format!("event: message\ndata: {reply}\n\n");
+                        let g = w.lock().unwrap();
+                        if let Some(wr) = g.as_ref() {
+                            let mut wr = wr;
+                            let _ = wr.write_all(msg.as_bytes());
+                            let _ = wr.flush();
+                        }
+                    }
+                });
+            }
+        });
+
+        let cfg = McpConfig {
+            name: "t".to_string(),
+            r#type: Some("remote".to_string()),
+            command: String::new(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            url: Some(format!("http://127.0.0.1:{port}/mcp")),
+            headers: BTreeMap::new(),
+            oauth: None,
+            sampling: None,
+            elicitation: None,
+            logging: None,
+            keepalive: None,
+            timeout: None,
+        };
+        let (client, logs) = connect_all(&[cfg], &McpHooks::workspace(None)).await;
+        let client = client.expect("sse fallback must connect");
+        let specs = client.specs().await;
+        assert_eq!(specs.len(), 1, "tools listed over the sse transport");
+        assert_eq!(specs[0].name, "mcp__t__sse_tool");
+        assert!(logs.iter().any(|l| l.contains("connected")), "{logs:?}");
+        // initialize rode the sse transport: instructions arrived over the stream
+        assert_eq!(
+            client
+                .instructions(&crate::perm::PermCfg::default())
+                .await,
+            vec![("t".to_string(), "via legacy sse".to_string())]
+        );
     }
 }

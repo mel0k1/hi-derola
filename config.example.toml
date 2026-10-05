@@ -32,7 +32,8 @@ stream = true
 # command = "npx"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 
-# remote server over streamable http
+# remote server over streamable http (a legacy http + sse server is
+# detected automatically and used as fallback)
 # [[mcp]]
 # name = "search"
 # type = "remote"
