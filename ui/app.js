@@ -741,6 +741,7 @@ function paletteBuildItems() {
     ["/export", "export session to markdown", "save transcript"],
     ["/models", "list provider models", "fetch"],
     ["/mcpres", "list mcp resources", "resources templates"],
+    ["/mcpstatus", "per-server mcp status", "connected failed auth"],
     ["/mcplog", "recent mcp log messages", "logs diagnostics"],
     ["/jstools", "user JS tools", "list reload sandbox"],
   ];

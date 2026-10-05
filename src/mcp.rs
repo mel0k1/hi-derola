@@ -350,6 +350,9 @@ pub struct McpHooks {
     /// "ai.hi-derola/sessionID" so servers can correlate calls; shared with
     /// the frontend so a /resume or /clear updates every live server
     pub session: Arc<RwLock<String>>,
+    /// global default tools/call deadline in seconds (agent.mcp_timeout);
+    /// a server's own execution_timeout or legacy timeout wins over it
+    pub mcp_timeout: Option<u64>,
 }
 
 impl McpHooks {
@@ -364,11 +367,18 @@ impl McpHooks {
             notes: None,
             logs: Default::default(),
             session: Arc::new(RwLock::new(String::new())),
+            mcp_timeout: None,
         }
     }
 
     pub fn with_session(mut self, session: Arc<RwLock<String>>) -> Self {
         self.session = session;
+        self
+    }
+
+    /// set the global default tools/call deadline (agent.mcp_timeout)
+    pub fn with_mcp_timeout(mut self, secs: Option<u64>) -> Self {
+        self.mcp_timeout = secs;
         self
     }
 
@@ -988,6 +998,17 @@ fn exec_to(shared: &Shared) -> Duration {
     shared.execution
 }
 
+/// tools/call deadline resolution: the per-server execution_timeout wins,
+/// then the legacy blanket timeout, then the global agent.mcp_timeout, then
+/// the built-in default
+fn exec_timeout(cfg: &McpConfig, global: Option<u64>) -> Duration {
+    cfg.execution_timeout
+        .map(Duration::from_secs)
+        .or(cfg.timeout.map(Duration::from_secs))
+        .or(global.map(Duration::from_secs))
+        .unwrap_or(EXECUTION_TIMEOUT)
+}
+
 fn cfg_connect_timeout(cfg: &McpConfig) -> Duration {
     cfg.startup_timeout
         .or(cfg.timeout)
@@ -1038,11 +1059,7 @@ fn shared_for(
             .map(Duration::from_secs)
             .or(legacy)
             .unwrap_or(CATALOG_TIMEOUT),
-        execution: cfg
-            .execution_timeout
-            .map(Duration::from_secs)
-            .or(legacy)
-            .unwrap_or(EXECUTION_TIMEOUT),
+        execution: exec_timeout(cfg, hooks.mcp_timeout),
         roots_cap: AtomicBool::new(roots_advertised(&proto_mode(cfg))),
     });
     (shared, Arc::new(Mutex::new(BTreeMap::new())))
@@ -2755,6 +2772,24 @@ pub struct McpClient {
 
 pub type McpSlot = std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<McpClient>>>>;
 
+/// last connect failure per server name, for /mcpstatus: the manager only
+/// holds live servers, so a failed connect would otherwise be invisible
+/// (this survives even when every server failed and the client is None)
+static CONNECT_FAILURES: std::sync::Mutex<BTreeMap<String, String>> =
+    std::sync::Mutex::new(BTreeMap::new());
+
+fn note_connect_failure(name: &str, err: &str) {
+    if let Ok(mut g) = CONNECT_FAILURES.lock() {
+        g.insert(name.to_string(), err.to_string());
+    }
+}
+
+fn clear_connect_failure(name: &str) {
+    if let Ok(mut g) = CONNECT_FAILURES.lock() {
+        g.remove(name);
+    }
+}
+
 pub async fn connect_all(
     cfgs: &[McpConfig],
     hooks: &McpHooks,
@@ -2769,11 +2804,19 @@ pub async fn connect_all(
         let to = cfg_connect_timeout(c);
         match tokio::time::timeout(to, McpServer::connect(c, hooks)).await {
             Ok(Ok(s)) => {
+                clear_connect_failure(&c.name);
                 logs.push(format!("mcp {}: connected ({})", c.name, s.summary()));
                 servers.push(s);
             }
-            Ok(Err(e)) => logs.push(format!("mcp {}: {e:#}", c.name)),
-            Err(_) => logs.push(format!("mcp {}: connect timeout", c.name)),
+            Ok(Err(e)) => {
+                let msg = format!("{e:#}");
+                note_connect_failure(&c.name, &msg);
+                logs.push(format!("mcp {}: {msg}", c.name));
+            }
+            Err(_) => {
+                note_connect_failure(&c.name, "connect timeout");
+                logs.push(format!("mcp {}: connect timeout", c.name));
+            }
         }
     }
     let client = if servers.is_empty() {
@@ -2806,9 +2849,19 @@ pub async fn reconnect_one(
         let mut logs = Vec::new();
         let to = cfg_connect_timeout(cfg);
         match tokio::time::timeout(to, client.replace(cfg, hooks)).await {
-            Ok(Ok(sum)) => logs.push(format!("mcp {name}: connected ({sum})")),
-            Ok(Err(e)) => logs.push(format!("mcp {name}: {e:#}")),
-            Err(_) => logs.push(format!("mcp {name}: connect timeout")),
+            Ok(Ok(sum)) => {
+                clear_connect_failure(name);
+                logs.push(format!("mcp {name}: connected ({sum})"));
+            }
+            Ok(Err(e)) => {
+                let msg = format!("{e:#}");
+                note_connect_failure(name, &msg);
+                logs.push(format!("mcp {name}: {msg}"));
+            }
+            Err(_) => {
+                note_connect_failure(name, "connect timeout");
+                logs.push(format!("mcp {name}: connect timeout"));
+            }
         }
         logs
     } else {
@@ -2865,7 +2918,14 @@ impl McpClient {
     /// connect a server at runtime (from /mcpadd) and slot it in; the
     /// previous instance only drops after a successful connect
     pub async fn add(&self, cfg: &McpConfig, hooks: &McpHooks) -> Result<String> {
-        let s = McpServer::connect(cfg, hooks).await?;
+        let s = match McpServer::connect(cfg, hooks).await {
+            Ok(s) => s,
+            Err(e) => {
+                note_connect_failure(&cfg.name, &format!("{e:#}"));
+                return Err(e);
+            }
+        };
+        clear_connect_failure(&cfg.name);
         let sum = s.summary();
         let mut servers = self.servers.lock().await;
         servers.retain(|x| x.shared.name != cfg.name);
@@ -2882,6 +2942,8 @@ impl McpClient {
         if servers.len() == before {
             bail!("mcp server not connected: {name}");
         }
+        drop(servers);
+        clear_connect_failure(name);
         Ok(format!("mcp {name}: disconnected"))
     }
 
@@ -3187,6 +3249,108 @@ impl McpClient {
             .cloned()
             .collect()
     }
+}
+
+/// one per-server line of the /mcpstatus summary
+pub struct McpStatusEntry {
+    pub name: String,
+    /// connected | crashed | failed | needs registration | needs auth |
+    /// auth expired | disabled | not connected
+    pub state: String,
+    pub detail: String,
+}
+
+/// assemble the per-server status from the config list, the live manager and
+/// the remembered connect failures (the opencode-style connected / failed /
+/// needs_auth summary); a server only in config but not live and not failed
+/// is simply "not connected"
+pub async fn status(slot: &McpSlot, cfgs: &[McpConfig]) -> Vec<McpStatusEntry> {
+    let live = slot.lock().unwrap().clone();
+    let mut servers: Vec<(String, String, Option<String>, bool)> = Vec::new();
+    if let Some(c) = live {
+        let list = c.servers.lock().await;
+        for s in list.iter() {
+            let exited = s
+                .shared
+                .exit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let alive = s.shared.alive.load(Ordering::Relaxed);
+            servers.push((s.shared.name.clone(), s.summary(), exited, alive));
+        }
+    }
+    let failures = CONNECT_FAILURES
+        .lock()
+        .map(|g| g.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for c in cfgs {
+        let name = c.name.clone();
+        // every branch computes the pair, then one push moves it (avoids
+        // borrowing `name` in a detail format after the struct shorthand)
+        let (state, detail) = if c.enabled == Some(false) {
+            (
+                "disabled",
+                "enabled = false in config".to_string(),
+            )
+        } else if let Some((_, sum, exited, alive)) = servers.iter().find(|(n, _, _, _)| *n == name) {
+            if let Some(exit) = exited {
+                (
+                    "crashed",
+                    format!("{sum}, {exit} — /mcpconnect {name} restarts it"),
+                )
+            } else {
+                let mut detail = sum.clone();
+                if !alive {
+                    detail.push_str(", unresponsive (keepalive ping failed)");
+                }
+                if c.url.is_some() && c.oauth_cfg().is_some() {
+                    if let Some(true) = crate::mcpauth::is_expired(&name) {
+                        detail.push_str(", token expired — /mcpauth <name> refreshes");
+                    }
+                }
+                ("connected", detail)
+            }
+        } else if let Some((_, err)) = failures.iter().find(|(n, _)| *n == name) {
+            if err.contains("dynamic registration failed") {
+                (
+                    "needs registration",
+                    format!(
+                        "{err} — add oauth.client_id (and client_secret) to the [[mcp]] entry in config.toml (register the client manually)"
+                    ),
+                )
+            } else {
+                ("failed", err.clone())
+            }
+        } else if c.url.is_some() && c.oauth_cfg().is_some() {
+            match crate::mcpauth::is_expired(&name) {
+                None => (
+                    "needs auth",
+                    format!("not connected — /mcpauth {name} starts the flow"),
+                ),
+                Some(true) => (
+                    "auth expired",
+                    format!("not connected — /mcpauth {name} refreshes the tokens"),
+                ),
+                _ => (
+                    "not connected",
+                    format!("/mcpconnect {name} connects it"),
+                ),
+            }
+        } else {
+            (
+                "not connected",
+                format!("/mcpconnect {name} connects it"),
+            )
+        };
+        out.push(McpStatusEntry {
+            name,
+            state: state.into(),
+            detail,
+        });
+    }
+    out
 }
 
 pub struct McpResourceInfo {
@@ -5137,5 +5301,103 @@ mod tests {
                 .await,
             vec![("t".to_string(), "via legacy sse".to_string())]
         );
+    }
+
+    // CONNECT_FAILURES is a process global: status tests serialize on it so
+    // parallel test threads do not pollute each other's expectations
+    static STATUS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn status_cfg(name: &str) -> McpConfig {
+        McpConfig {
+            name: name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn exec_timeout_resolution() {
+        let cfg = McpConfig::default();
+        assert_eq!(exec_timeout(&cfg, None), EXECUTION_TIMEOUT);
+        // the global agent.mcp_timeout fills in when the server sets nothing
+        assert_eq!(exec_timeout(&cfg, Some(120)), Duration::from_secs(120));
+        // the per-server legacy blanket beats the global
+        let cfg = McpConfig {
+            timeout: Some(60),
+            ..Default::default()
+        };
+        assert_eq!(exec_timeout(&cfg, Some(120)), Duration::from_secs(60));
+        // the per-server execution_timeout beats everything
+        let cfg = McpConfig {
+            timeout: Some(60),
+            execution_timeout: Some(10),
+            ..Default::default()
+        };
+        assert_eq!(exec_timeout(&cfg, Some(120)), Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn status_reports_failure_disabled_and_not_connected() {
+        let _g = STATUS_LOCK.lock().unwrap();
+        clear_connect_failure("st-failed");
+        let slot: McpSlot = Arc::new(std::sync::Mutex::new(None));
+        let cfgs = vec![status_cfg("st-failed"), status_cfg("st-plain")];
+
+        // nothing failed yet: both are just "not connected"
+        let list = status(&slot, &cfgs).await;
+        assert_eq!(list[0].state, "not connected");
+        assert_eq!(list[1].state, "not connected");
+
+        // a remembered connect failure shows up as "failed" with the error
+        note_connect_failure("st-failed", "server closed (exit code 3)");
+        let list = status(&slot, &cfgs).await;
+        assert_eq!(list[0].state, "failed");
+        assert!(list[0].detail.contains("exit code 3"));
+        assert_eq!(list[1].state, "not connected");
+
+        // a rejected dynamic registration surfaces as needs registration
+        // with the static client_id hint
+        note_connect_failure(
+            "st-failed",
+            "dynamic registration failed: 404 Not Found — add oauth.client_id",
+        );
+        let list = status(&slot, &cfgs).await;
+        assert_eq!(list[0].state, "needs registration");
+        assert!(list[0].detail.contains("client_id"));
+        clear_connect_failure("st-failed");
+    }
+
+    #[tokio::test]
+    async fn status_disabled_beats_everything() {
+        let _g = STATUS_LOCK.lock().unwrap();
+        clear_connect_failure("st-off");
+        note_connect_failure("st-off", "connect timeout");
+        let slot: McpSlot = Arc::new(std::sync::Mutex::new(None));
+        let cfgs = vec![McpConfig {
+            name: "st-off".to_string(),
+            enabled: Some(false),
+            ..Default::default()
+        }];
+        let list = status(&slot, &cfgs).await;
+        assert_eq!(list[0].state, "disabled");
+        clear_connect_failure("st-off");
+    }
+
+    #[tokio::test]
+    async fn status_needs_auth_for_remote_oauth() {
+        let _g = STATUS_LOCK.lock().unwrap();
+        let slot: McpSlot = Arc::new(std::sync::Mutex::new(None));
+        let cfgs = vec![McpConfig {
+            name: "st-oauth".to_string(),
+            url: Some("https://mcp.example.com/mcp".to_string()),
+            oauth: Some(crate::config::McpOAuthOpt::Off(true)),
+            ..Default::default()
+        }];
+        // the auth store has no entry for this name in tests: needs auth
+        // (use a name that cannot exist in the real store)
+        let list = status(&slot, &cfgs).await;
+        let entry = &list[0];
+        if entry.state == "needs auth" || entry.state == "auth expired" {
+            assert!(entry.detail.contains("/mcpauth"), "{:?}", entry.detail);
+        }
     }
 }

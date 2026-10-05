@@ -52,6 +52,11 @@ pub struct AgentConfig {
     /// (cmd / powershell / pwsh get their own flag, everything else gets -c)
     #[serde(default)]
     pub shell: Option<String>,
+    /// mcp_timeout = <seconds>: global default tools/call deadline for every
+    /// mcp server that does not set its own execution_timeout (or the legacy
+    /// timeout blanket); mirrors opencode's experimental.mcp_timeout
+    #[serde(default)]
+    pub mcp_timeout: Option<u64>,
 }
 
 impl Default for AgentConfig {
@@ -63,6 +68,7 @@ impl Default for AgentConfig {
             subagent_depth: default_subagent_depth(),
             compaction: Default::default(),
             shell: None,
+            mcp_timeout: None,
         }
     }
 }
@@ -305,6 +311,21 @@ mod tests {
         assert_eq!(cfg.agent.shell.as_deref(), Some("/opt/homebrew/bin/fish"));
         let cfg: Config = toml::from_str(MINIMAL).unwrap();
         assert_eq!(cfg.agent.shell, None);
+    }
+
+    #[test]
+    fn agent_mcp_timeout_option() {
+        let cfg: Config =
+            toml::from_str(&format!("{MINIMAL}[agent]\nmcp_timeout = 120\n")).unwrap();
+        assert_eq!(cfg.agent.mcp_timeout, Some(120));
+        let cfg: Config = toml::from_str(MINIMAL).unwrap();
+        assert_eq!(cfg.agent.mcp_timeout, None, "absent keeps the default");
+        // round-trips through save/load without losing the value
+        let cfg: Config =
+            toml::from_str(&format!("{MINIMAL}[agent]\nmcp_timeout = 45\n")).unwrap();
+        let raw = toml::to_string_pretty(&cfg).unwrap();
+        let back: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(back.agent.mcp_timeout, Some(45));
     }
 
     #[test]

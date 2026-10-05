@@ -111,6 +111,9 @@ subagent_depth = 1
 # shell used by the bash tool: program name or full path
 # cmd / powershell / pwsh get their own flag, anything else gets -c
 # shell = "C:\\Program Files\\Git\\bin\\bash.exe"
+# global default tools/call deadline in seconds for every mcp server that
+# does not set its own execution_timeout (per-server values win)
+# mcp_timeout = 120
 
 # context compaction tuning
 # [agent.compaction]

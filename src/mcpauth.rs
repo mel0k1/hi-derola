@@ -436,7 +436,9 @@ async fn register_client(
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
-        bail!("dynamic registration failed: {status}");
+        bail!(
+            "dynamic registration failed: {status} — add oauth.client_id (and client_secret) to the [[mcp]] entry in config.toml (register the client manually)"
+        );
     }
     let v: Value = serde_json::from_str(&text)?;
     Ok(ClientInfo {
@@ -795,7 +797,7 @@ pub async fn start_auth(name: &str, cfgs: &[McpConfig]) -> Result<AuthStart> {
                         Some(ci)
                     }
                     None => bail!(
-                        "mcp {name}: server does not support dynamic registration — set client_id in config"
+                        "mcp {name}: server does not support dynamic registration — register a client manually and add oauth.client_id (and client_secret) to the [[mcp]] entry in config.toml"
                     ),
                 },
             }

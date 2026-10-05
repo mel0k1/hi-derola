@@ -552,7 +552,8 @@ fn mcp_hooks(
     let hooks = hi_derola::mcp::McpHooks::workspace(std::env::current_dir().ok())
         .with_notes(tx.clone())
         .with_session(session)
-        .with_eliciter(hi_derola::mcp::default_eliciter(tx.clone()));
+        .with_eliciter(hi_derola::mcp::default_eliciter(tx.clone()))
+        .with_mcp_timeout(cfg.agent.mcp_timeout);
     match cfg.api_key() {
         Some(k) => match provider::build(&cfg.provider.kind, cfg.provider.base_url.clone(), k) {
             Ok(p) => hooks.with_sampler(hi_derola::mcp::default_sampler(
@@ -1000,7 +1001,7 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
         .unwrap_or((line, ""));
     match cmd {
         "/help" | "/h" => note(
-            "commands: /file <path> · /model <name> · /models · /plan · /undo · /redo · /init · /compact · /export [path] · /mcpadd <name> <url|command...> · /mcpconnect <name> · /mcpdisconnect <name> · /mcplogout <name> · /mcpres [server] · /mcpread <server> <uri> · /mcpsub <server> <uri> · /mcpunsub <server> <uri> · /mcpprompt [server] <name> [k=v] · /mcplog [server] (/mcplog set <server|all> <level>) · /jstools [reload] · /clear · /help\n\
+            "commands: /file <path> · /model <name> · /models · /plan · /undo · /redo · /init · /compact · /export [path] · /mcpadd <name> <url|command...> · /mcpconnect <name> · /mcpdisconnect <name> · /mcplogout <name> · /mcpres [server] · /mcpstatus · /mcpread <server> <uri> · /mcpsub <server> <uri> · /mcpunsub <server> <uri> · /mcpprompt [server] <name> [k=v] · /mcplog [server] (/mcplog set <server|all> <level>) · /jstools [reload] · /clear · /help\n\
              mutations (write/edit/bash/mcp) ask for confirmation, allow all skips further asks\n\
              custom commands: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)",
         ),
@@ -1127,6 +1128,26 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
                 format!("mcp {name}: no stored credentials")
             };
             note(msg)
+        }
+        "/mcpstatus" => {
+            let cfgs = sh.cfg.lock().unwrap().mcp.clone();
+            let mcp = sh.mcp.clone();
+            let tx = sh.tx.clone();
+            tauri::async_runtime::spawn(async move {
+                let list = mcp::status(&mcp, &cfgs).await;
+                if list.is_empty() {
+                    let _ = tx.send(ApiEvent::Note(
+                        "no mcp servers configured ([[mcp]] in config.toml)".into(),
+                    ));
+                    return;
+                }
+                let mut out = format!("mcp servers ({}):", list.len());
+                for e in list {
+                    out.push_str(&format!("\n  [{}] {}: {}", e.state, e.name, e.detail));
+                }
+                let _ = tx.send(ApiEvent::Note(out));
+            });
+            note("checking mcp servers...")
         }
         "/mcpres" => {
             let mcp = sh.mcp.lock().unwrap().clone();
