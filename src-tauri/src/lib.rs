@@ -750,6 +750,45 @@ async fn sandbox_action(id: String, action: String) -> Result<Value, String> {
     .map_err(|e| format!("{e:#}"))
 }
 
+/// run one command inside a running sandbox VM over ssh
+#[tauri::command]
+async fn sandbox_ssh_exec(
+    id: String,
+    command: String,
+    timeout_secs: Option<u64>,
+) -> Result<Value, String> {
+    let m = sandbox::SandboxManager::global().clone();
+    tokio::task::spawn_blocking(move || {
+        m.ssh_exec(&id, &command, timeout_secs)
+            .map(|o| json!({"code": o.code, "stdout": o.stdout, "stderr": o.stderr}))
+    })
+    .await
+    .map_err(|e| format!("{e}"))?
+    .map_err(|e| format!("{e:#}"))
+}
+
+/// install (or reinstall) the agent inside the VM: config upload +
+/// rustup + cargo install, progress streamed through sandbox_list
+#[tauri::command]
+async fn sandbox_agent_install(id: String) -> Result<sandbox::SandboxStatus, String> {
+    let m = sandbox::SandboxManager::global().clone();
+    tokio::task::spawn_blocking(move || m.install_agent(&id))
+        .await
+        .map_err(|e| format!("{e}"))?
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// open a new terminal window with an interactive ssh session into the VM
+/// (plain shell, or the agent TUI when agent = true)
+#[tauri::command]
+async fn sandbox_ssh_terminal(id: String, agent: bool) -> Result<(), String> {
+    let m = sandbox::SandboxManager::global().clone();
+    tokio::task::spawn_blocking(move || m.open_terminal(&id, agent))
+        .await
+        .map_err(|e| format!("{e}"))?
+        .map_err(|e| format!("{e:#}"))
+}
+
 #[tauri::command]
 async fn undo(sh: State<'_, Arc<Shared>>) -> Result<Option<String>, String> {
     let _ = &sh;
@@ -1766,7 +1805,8 @@ pub fn run() -> Result<()> {
             init, save, send, confirm, answer, allow_all, stop, list_models, mcp_reconnect,
             mcp_auth, mcp_resources, mcp_read_resource, mcp_subscribe, mcp_unsubscribe, mcp_prompts,
             mcp_templates, mcp_subscriptions, mcp_get_prompt, sandbox_detect, sandbox_list,
-            sandbox_create, sandbox_action, undo,
+            sandbox_create, sandbox_action, sandbox_ssh_exec, sandbox_agent_install,
+            sandbox_ssh_terminal, undo,
             redo, list_sessions, new_session, open_session, delete_session, list_dir, attach_path,
             detach, set_theme, list_project_files, set_plan, task_kill, list_agents
         ])

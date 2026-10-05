@@ -712,6 +712,32 @@ pre.diff .ctx { color: var(--dim); }
   font: 11.5px/1.5 var(--mono); color: var(--del); margin-top: 8px;
   white-space: pre-wrap; word-break: break-word;
 }
+.sbx-ssh-wrap { margin-top: 9px; display: flex; flex-direction: column; gap: 6px; }
+.sbx-ssh {
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  font: 12px var(--mono); border-radius: 9px; padding: 6px 10px;
+  border: 1px solid var(--border); background: var(--panel2);
+  animation: msg-in 0.25s var(--ease);
+}
+.sbx-ssh .hint { font-size: 11px; }
+.sbx-ssh.waiting { color: var(--accent); border-color: var(--accent-dim); }
+.sbx-ssh.waiting .ic { animation: breathe 2.4s ease-in-out infinite; }
+.sbx-ssh.ready { color: var(--add); border-color: rgba(158, 206, 106, 0.4); }
+.sbx-ssh.failed { color: var(--del); border-color: rgba(247, 118, 142, 0.45); }
+.sbx-agent { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--fg); }
+.sbx-agent .ic { color: var(--add); flex: none; }
+.sbx-agent .hint { font-size: 11.5px; }
+.sbx-agent-state {
+  font: 600 11px var(--mono); color: var(--accent); letter-spacing: 0.4px;
+  animation: breathe 2s ease-in-out infinite;
+}
+.sbx-log {
+  font: 11px/1.55 var(--mono); color: var(--dim); background: var(--panel2);
+  border: 1px solid var(--border); border-radius: 9px; padding: 8px 10px;
+  margin: 0; max-height: 150px; overflow-y: auto; white-space: pre-wrap; word-break: break-word;
+  scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+}
+.sbx-log:hover { color: var(--fg); }
 
 /* sandbox wizard */
 #sbx-wizard {

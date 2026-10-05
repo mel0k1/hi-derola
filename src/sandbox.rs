@@ -1,18 +1,28 @@
 //! Local sandbox: disposable QEMU virtual machines so the agent (and the
 //! user's files) can live away from the host machine.
 //!
-//! Phase 1 covers the full lifecycle around the VM itself: QEMU detection,
-//! a creation wizard (image -> resources -> create) with resumable-ish
-//! downloads and progress reporting, and start/stop/delete backed by a
-//! small on-disk store. Booting an agent-ready OS (cloud-init seed images,
-//! SSH key injection) is the next phase.
+//! Phase 1 covered the lifecycle around the VM itself: QEMU detection, a
+//! creation wizard (image -> resources -> create) with resumable downloads
+//! and progress reporting, and start/stop/delete backed by a small on-disk
+//! store.
+//!
+//! Phase 2 makes the VM agent-ready: cloud images get a cloud-init seed
+//! (`seed.rs` — CIDATA volume with the wizard login + a generated ssh key,
+//! sudo per the root flag), the guest sshd is polled through the host ssh
+//! client (`sshx`) and surfaces as a per-card ssh badge, a terminal window
+//! can be opened into the VM, and the agent itself can be installed inside
+//! the guest (config upload + rustup + cargo install, live log) and then
+//! launched there as a TUI — so the agent works on VM files, never on yours.
 //!
 //! Storage layout under `<config dir>/hi-derola/sandboxes/`:
 //! ```text
 //! <id>/sandbox.json   the SandboxSpec the wizard produced
 //! <id>/state.json     { "pid": <u32|null> } — qemu pid for crash recovery
-//! <id>/image.qcow2    downloaded cloud image (debian / nixos kinds)
+//! <id>/image.qcow2    downloaded cloud image (debian / ubuntu kinds)
 //! <id>/disk.qcow2     the VM disk (overlay on top of image.qcow2)
+//! <id>/seed.img       cloud-init CIDATA volume (cloud kinds only)
+//! <id>/id_ed25519(.pub)  the VM ssh keypair baked into the seed
+//! <id>/known_hosts    per-sandbox host keys (accept-new)
 //! <id>/qemu.log       stderr/stdout of the last qemu run (crash tail)
 //! ```
 
@@ -24,13 +34,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Debian 13 "trixie" minimal cloud image (genericcloud — the smallest
 /// variant, built for virtual machines; boots both BIOS and UEFI)
 pub const DEBIAN_TRIXIE_URL: &str =
     "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2";
-/// NixOS minimal qcow2 from the current stable channel
+/// Ubuntu 24.04 LTS *minimal* cloud image — Canonical trims it to boot
+/// smaller and faster than the standard server cloud image (a standard /
+/// minimal switch can come later; the minimal one fits the sandbox story)
+pub const UBUNTU_2404_URL: &str = "https://cloud-images.ubuntu.com/minimal/releases/24.04/release/ubuntu-24.04-minimal-cloudimg-amd64.img";
+/// legacy NixOS entry: kept so old sandbox.json files still load, no longer
+/// offered by the wizard (no cloud-init → no seed/ssh login wiring)
 pub const NIXOS_URL: &str =
     "https://channels.nixos.org/nixos-25.05/latest-nixos-minimal-x86_64-linux.qcow2";
 
@@ -43,10 +58,17 @@ pub const PORT_MIN: u16 = 1024;
 pub const PORT_MAX: u16 = 65_535;
 pub const DEFAULT_PORT: u16 = 2222;
 
+/// how long the ssh-wait thread polls the guest sshd after boot
+pub const SSH_WAIT_SECS: u64 = 600;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ImageKind {
     DebianTrixie,
+    #[serde(rename = "ubuntu-24.04")]
+    Ubuntu2404,
+    /// legacy: not offered by the wizard anymore, but old sandboxes must
+    /// keep loading (see NIXOS_URL)
     Nixos,
     /// user-provided image file: .iso boots as install media (cdrom),
     /// anything else (qcow2/raw/vdi/...) is used as the VM disk directly
@@ -57,6 +79,7 @@ impl ImageKind {
     pub fn label(self) -> &'static str {
         match self {
             ImageKind::DebianTrixie => "Debian 13 (trixie) minimal",
+            ImageKind::Ubuntu2404 => "Ubuntu 24.04 LTS minimal",
             ImageKind::Nixos => "NixOS minimal",
             ImageKind::Custom => "own image",
         }
@@ -65,6 +88,7 @@ impl ImageKind {
     pub fn url(self) -> Option<&'static str> {
         match self {
             ImageKind::DebianTrixie => Some(DEBIAN_TRIXIE_URL),
+            ImageKind::Ubuntu2404 => Some(UBUNTU_2404_URL),
             ImageKind::Nixos => Some(NIXOS_URL),
             ImageKind::Custom => None,
         }
@@ -73,6 +97,12 @@ impl ImageKind {
     pub fn needs_download(self) -> bool {
         self.url().is_some()
     }
+
+    /// kinds that ship cloud-init and therefore get a seed image, an ssh
+    /// keypair and the wait/install tooling
+    pub fn wants_seed(self) -> bool {
+        matches!(self, ImageKind::DebianTrixie | ImageKind::Ubuntu2404)
+    }
 }
 
 /// the VM shape the wizard produces; persisted verbatim as sandbox.json
@@ -80,6 +110,9 @@ impl ImageKind {
 pub struct SandboxSpec {
     pub id: String,
     pub name: String,
+    /// in-VM ssh login the cloud-init seed creates (cloud kinds)
+    #[serde(default = "default_login")]
+    pub login: String,
     pub kind: ImageKind,
     /// absolute path to the user-provided image (kind = custom)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -87,8 +120,8 @@ pub struct SandboxSpec {
     pub disk_gib: u32,
     pub ram_mib: u32,
     pub cpus: u32,
-    /// reserved for the agent profile: whether the in-VM agent may run as
-    /// root (cloud-init wiring arrives in the next phase)
+    /// whether the in-VM agent may run as root: passwordless sudo comes
+    /// from the cloud-init seed when on, no sudo at all when off
     #[serde(default)]
     pub root: bool,
     /// host port forwarded to guest ssh (22)
@@ -96,11 +129,17 @@ pub struct SandboxSpec {
     pub created_at: u64,
 }
 
+fn default_login() -> String {
+    crate::seed::DEFAULT_LOGIN.to_string()
+}
+
 /// wizard request; every resource field is optional and clamped
 #[derive(Debug, Clone, Deserialize)]
 pub struct NewSandbox {
     pub name: String,
     pub kind: ImageKind,
+    #[serde(default)]
+    pub login: Option<String>,
     #[serde(default)]
     pub iso_path: Option<String>,
     #[serde(default)]
@@ -159,8 +198,110 @@ pub struct SandboxStatus {
     pub dir: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub download: Option<DownloadProgress>,
+    /// ssh/agent reachability (seed kinds only, meaningful while running)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh: Option<SshInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+// ------------------------------------------------------------ ssh & agent
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SshState {
+    /// VM not running (or the wait thread was cancelled) — the GUI hides it
+    Idle,
+    /// polling the guest sshd
+    Waiting,
+    Ready,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentState {
+    /// not probed / not installed
+    Unknown,
+    Installing,
+    Installed,
+    Failed,
+}
+
+/// install progress for the in-VM agent; `log` is the tail of the remote
+/// bootstrap output (rustup/cargo lines stream in while it runs)
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentInfo {
+    pub state: AgentState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub log: Vec<String>,
+}
+
+/// the per-sandbox ssh snapshot the GUI polls (state machine owned by the
+/// wait/install threads, guarded by one mutex)
+#[derive(Debug, Clone, Serialize)]
+pub struct SshInfo {
+    pub state: SshState,
+    pub user: String,
+    pub port: u16,
+    /// seconds the last ready-wait took (or is ticking while waiting)
+    pub elapsed_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub agent: AgentInfo,
+}
+
+/// live ssh/agent bookkeeping for one sandbox (in-memory only)
+#[derive(Debug)]
+pub struct SshLive {
+    /// stop() / delete() / a new wait run flip this to interrupt the threads
+    pub cancel: AtomicBool,
+    pub info: Mutex<SshInfo>,
+}
+
+impl SshLive {
+    fn new(login: &str, port: u16) -> Self {
+        Self {
+            cancel: AtomicBool::new(false),
+            info: Mutex::new(SshInfo {
+                state: SshState::Idle,
+                user: login.to_string(),
+                port,
+                elapsed_secs: 0,
+                error: None,
+                agent: AgentInfo {
+                    state: AgentState::Unknown,
+                    version: None,
+                    error: None,
+                    log: Vec::new(),
+                },
+            }),
+        }
+    }
+
+    fn snapshot(&self) -> SshInfo {
+        self.info.lock().unwrap().clone()
+    }
+
+    fn set(&self, f: impl FnOnce(&mut SshInfo)) {
+        f(&mut self.info.lock().unwrap());
+    }
+
+    /// keep at most the last N bootstrap log lines
+    const LOG_TAIL: usize = 200;
+    fn push_log(&self, line: &str) {
+        self.set(|i| {
+            i.agent.log.push(line.to_string());
+            let excess = i.agent.log.len().saturating_sub(Self::LOG_TAIL);
+            if excess > 0 {
+                i.agent.log.drain(0..excess);
+            }
+        });
+    }
 }
 
 // ---------------------------------------------------------------- detection
@@ -314,12 +455,28 @@ pub fn build_qemu_args(spec: &SandboxSpec, dir: &Path, accel: &str) -> Vec<Strin
                     dir.join("disk.qcow2").display()
                 ),
             ]);
+            if spec.kind.wants_seed() {
+                // cloud-init NoCloud seed: a tiny FAT volume labeled CIDATA
+                // carrying user-data/meta-data (login + ssh key)
+                a.extend([
+                    "-drive".into(),
+                    format!(
+                        "file={},format=raw,if=virtio",
+                        dir.join("seed.img").display()
+                    ),
+                ]);
+            }
         }
     }
 
     a.extend([
         "-netdev".into(),
-        format!("user,id=n0,hostfwd=tcp::{}-:22", spec.ssh_port),
+        // loopback bind: the guest ssh is reachable from this machine only
+        // (and no firewall prompt on windows)
+        format!(
+            "user,id=n0,hostfwd=tcp:127.0.0.1:{}-:22",
+            spec.ssh_port
+        ),
         "-device".into(),
         "virtio-net-pci,netdev=n0".into(),
         "-device".into(),
@@ -336,7 +493,7 @@ pub fn build_qemu_args(spec: &SandboxSpec, dir: &Path, accel: &str) -> Vec<Strin
 pub fn build_img_args(kind: ImageKind, dir: &Path, disk_gib: u32) -> Vec<String> {
     let disk = dir.join("disk.qcow2");
     match kind {
-        ImageKind::DebianTrixie | ImageKind::Nixos => vec![
+        ImageKind::DebianTrixie | ImageKind::Ubuntu2404 | ImageKind::Nixos => vec![
             "create".into(),
             "-f".into(),
             "qcow2".into(),
@@ -410,6 +567,8 @@ struct Entry {
     /// have recycled it for an unrelated process, so verify before killing
     pid_from_disk: bool,
     prog: Option<Arc<ProgShared>>,
+    /// ssh/agent state machine (seed kinds only)
+    ssh: Option<Arc<SshLive>>,
     error: Option<String>,
     /// set right before we kill qemu so the watchdog reports Stopped, not Failed
     stopping: bool,
@@ -437,7 +596,10 @@ impl SandboxManager {
                 .parent()
                 .map(|p| p.join("sandboxes"))
                 .unwrap_or_else(|| PathBuf::from("sandboxes"));
-            Arc::new(SandboxManager::new(dir))
+            let m = Arc::new(SandboxManager::new(dir));
+            // VMs found running after an app restart resume their ssh probing
+            m.spawn_ssh_wait_all();
+            m
         })
     }
 
@@ -490,6 +652,11 @@ impl SandboxManager {
                     VmState::Stopped
                 }
             };
+            let ssh = if spec.kind.wants_seed() {
+                Some(Arc::new(SshLive::new(&spec.login, spec.ssh_port)))
+            } else {
+                None
+            };
             map.insert(
                 spec.id.clone(),
                 Entry {
@@ -498,6 +665,7 @@ impl SandboxManager {
                     pid,
                     pid_from_disk: pid.is_some(),
                     prog: None,
+                    ssh,
                     error: None,
                     stopping: false,
                 },
@@ -515,6 +683,7 @@ impl SandboxManager {
                 pid: e.pid,
                 dir: self.dir.join(&e.spec.id).display().to_string(),
                 download: e.prog.as_ref().map(|p| p.snapshot()),
+                ssh: e.ssh.as_ref().map(|s| s.snapshot()),
                 error: e.error.clone(),
             })
             .collect();
@@ -546,6 +715,13 @@ impl SandboxManager {
         if name.len() > 64 {
             bail!("name is too long (max 64 chars)");
         }
+        let login = match req.login.as_deref().map(str::trim) {
+            None | Some("") => crate::seed::DEFAULT_LOGIN.to_string(),
+            Some(l) => {
+                crate::seed::validate_login(l)?;
+                l.to_string()
+            }
+        };
         let disk_gib = req.disk_gib.unwrap_or(20).clamp(DISK_MIN, DISK_MAX);
         let ram_mib = req.ram_mib.unwrap_or(2048).clamp(RAM_MIN, RAM_MAX);
         let cpus = req.cpus.unwrap_or(2).clamp(1, CPU_MAX);
@@ -581,6 +757,7 @@ impl SandboxManager {
         Ok(SandboxSpec {
             id,
             name: name.to_string(),
+            login,
             kind: req.kind,
             iso_path: req.iso_path.as_deref().map(str::trim).map(String::from),
             disk_gib,
@@ -596,7 +773,8 @@ impl SandboxManager {
     }
 
     /// create a sandbox from the wizard request; cloud kinds start
-    /// downloading immediately (progress via list())
+    /// downloading immediately (progress via list()) and get their
+    /// cloud-init seed written before the first boot can ever happen
     pub fn create(self: &Arc<Self>, req: &NewSandbox) -> Result<SandboxStatus> {
         let spec = self.prepare_spec(req)?;
         let dir = self.sandbox_dir(&spec.id);
@@ -605,6 +783,20 @@ impl SandboxManager {
         let raw = serde_json::to_string_pretty(&spec)?;
         std::fs::write(dir.join("sandbox.json"), raw)?;
         self.persist_pid(&spec.id, None);
+
+        // the seed (login + ssh key + sudo per the root flag) must be on
+        // disk before the first boot; a failure surfaces as a failed sandbox
+        let seed_err = if spec.kind.wants_seed() {
+            crate::seed::ensure_seed(&dir, &spec.id, &spec.login, spec.root).err()
+        } else {
+            None
+        };
+
+        let ssh = if spec.kind.wants_seed() {
+            Some(Arc::new(SshLive::new(&spec.login, spec.ssh_port)))
+        } else {
+            None
+        };
         self.inner.lock().unwrap().insert(
             spec.id.clone(),
             Entry {
@@ -613,22 +805,23 @@ impl SandboxManager {
                 pid: None,
                 pid_from_disk: false,
                 prog: None,
+                ssh,
                 error: None,
                 stopping: false,
             },
         );
 
-        let state = if spec.kind.needs_download() {
+        if let Some(err) = seed_err {
+            let msg = format!("{err:#}");
+            self.with_entry(&spec.id, |e| {
+                e.state = VmState::Failed;
+                e.error = Some(msg);
+            });
+        } else if spec.kind.needs_download() {
             let url = spec.kind.url().unwrap_or_default().to_string();
             let dest = dir.join("image.qcow2");
             self.spawn_download(spec.id.clone(), url, dest);
-            VmState::Downloading
-        } else {
-            VmState::Stopped
-        };
-        self.with_entry(&spec.id, |e| {
-            e.state = state;
-        });
+        }
         Ok(self.status_of(&spec.id)?)
     }
 
@@ -643,6 +836,7 @@ impl SandboxManager {
                 pid: e.pid,
                 dir: self.dir.join(id).display().to_string(),
                 download: e.prog.as_ref().map(|p| p.snapshot()),
+                ssh: e.ssh.as_ref().map(|s| s.snapshot()),
                 error: e.error.clone(),
             })
             .ok_or_else(|| anyhow!("sandbox \"{id}\" not found"))
@@ -694,6 +888,14 @@ impl SandboxManager {
             }
         }
 
+        // make sure the cloud-init seed exists (heals sandboxes created
+        // before phase 2 and ones whose files were wiped; the VM must not
+        // boot without it or the login/key never materialize)
+        if spec.kind.wants_seed() {
+            crate::seed::ensure_seed(&dir, &spec.id, &spec.login, spec.root)
+                .map_err(|e| anyhow!("seed: {e:#}"))?;
+        }
+
         let args = build_qemu_args(&spec, &dir, &accel);
         let log = std::fs::File::create(dir.join("qemu.log"))
             .with_context(|| format!("open qemu.log in {}", dir.display()))?;
@@ -715,6 +917,17 @@ impl SandboxManager {
         });
         self.persist_pid(id, Some(pid));
         self.spawn_watchdog(id.to_string(), child);
+        if spec.kind.wants_seed() {
+            {
+                let mut map = self.inner.lock().unwrap();
+                if let Some(e) = map.get_mut(id) {
+                    if e.ssh.is_none() {
+                        e.ssh = Some(Arc::new(SshLive::new(&spec.login, spec.ssh_port)));
+                    }
+                }
+            }
+            self.clone().spawn_ssh_wait(id.to_string());
+        }
         self.status_of(id)
     }
 
@@ -741,6 +954,13 @@ impl SandboxManager {
             e.stopping = true;
             e.state = VmState::Stopped;
             e.error = None;
+            if let Some(live) = &e.ssh {
+                live.cancel.store(true, Ordering::Relaxed);
+                live.set(|i| {
+                    i.state = SshState::Idle;
+                    i.elapsed_secs = 0;
+                });
+            }
             let pid = e.pid;
             e.pid = None;
             pid
@@ -753,13 +973,16 @@ impl SandboxManager {
     }
 
     /// delete the sandbox dir; a running VM is stopped first, an in-flight
-    /// download is cancelled
+    /// download is cancelled, ssh/install threads are interrupted
     pub fn delete(self: &Arc<Self>, id: &str) -> Result<()> {
         let pid = {
             let map = self.inner.lock().unwrap();
             let e = map.get(id).ok_or_else(|| anyhow!("sandbox \"{id}\" not found"))?;
             if let Some(p) = &e.prog {
                 p.cancel.store(true, Ordering::Relaxed);
+            }
+            if let Some(live) = &e.ssh {
+                live.cancel.store(true, Ordering::Relaxed);
             }
             e.pid
         };
@@ -894,6 +1117,13 @@ impl SandboxManager {
                     return; // a newer run owns this entry
                 }
                 e.pid = None;
+                if let Some(live) = &e.ssh {
+                    live.cancel.store(true, Ordering::Relaxed);
+                    live.set(|i| {
+                        i.state = SshState::Idle;
+                        i.elapsed_secs = 0;
+                    });
+                }
                 if e.stopping {
                     e.stopping = false;
                     e.state = VmState::Stopped;
@@ -911,6 +1141,285 @@ impl SandboxManager {
             });
             mgr.persist_pid(&id, None);
         });
+    }
+}
+
+// --------------------------------------------------------------- ssh bridge
+
+impl SandboxManager {
+    fn ssh_target(dir: &Path, spec: &SandboxSpec) -> crate::sshx::SshTarget {
+        crate::sshx::SshTarget::new(dir, spec.ssh_port, &spec.login)
+    }
+
+    /// (spec, dir, live ssh state) for a sandbox that has one
+    fn ssh_parts(&self, id: &str) -> Option<(SandboxSpec, PathBuf, Arc<SshLive>)> {
+        let map = self.inner.lock().unwrap();
+        map.get(id).and_then(|e| {
+            e.ssh
+                .as_ref()
+                .map(|s| (e.spec.clone(), self.sandbox_dir(id), s.clone()))
+        })
+    }
+
+    /// resume ssh probing for every VM that reload() found still running
+    /// (the app was restarted under a live guest)
+    pub fn spawn_ssh_wait_all(self: &Arc<Self>) {
+        let ids: Vec<String> = {
+            let map = self.inner.lock().unwrap();
+            map.values()
+                .filter(|e| e.state == VmState::Running && e.spec.kind.wants_seed())
+                .map(|e| e.spec.id.clone())
+                .collect()
+        };
+        for id in ids {
+            self.spawn_ssh_wait(id);
+        }
+    }
+
+    /// background thread: poll the guest sshd until it answers, then probe
+    /// for an already-installed agent (the disk survives restarts); the
+    /// whole ride is visible on the card as a waiting -> ready badge
+    fn spawn_ssh_wait(self: &Arc<Self>, id: String) {
+        let mgr = self.clone();
+        std::thread::spawn(move || {
+            let Some((spec, dir, live)) = mgr.ssh_parts(&id) else {
+                return;
+            };
+            live.cancel.store(false, Ordering::Relaxed);
+            live.set(|i| {
+                i.state = SshState::Waiting;
+                i.elapsed_secs = 0;
+                i.error = None;
+            });
+            let Some(bin) = crate::sshx::find_ssh() else {
+                live.set(|i| {
+                    i.state = SshState::Failed;
+                    i.error = Some(
+                        "no ssh client on the host — windows: Settings > Apps > Optional features > OpenSSH client"
+                            .to_string(),
+                    );
+                });
+                return;
+            };
+            let target = Self::ssh_target(&dir, &spec);
+            let started = Instant::now();
+            let deadline = started + Duration::from_secs(SSH_WAIT_SECS);
+
+            // a 1s ticker keeps the "waiting… Ns" counter alive while the
+            // poller blocks on ssh attempts
+            let stop_ticker = Arc::new(AtomicBool::new(false));
+            let ticker = {
+                let live = live.clone();
+                let stop = stop_ticker.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_secs(1));
+                        if stop.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        live.set(|i| {
+                            if i.state == SshState::Waiting {
+                                i.elapsed_secs = started.elapsed().as_secs();
+                            }
+                        });
+                    }
+                })
+            };
+            let res = crate::sshx::wait_ready(&bin, &target, &live.cancel, deadline);
+            stop_ticker.store(true, Ordering::Relaxed);
+            let _ = ticker.join();
+
+            match res {
+                Err(e) if e == "cancelled" => {
+                    live.set(|i| i.state = SshState::Idle);
+                }
+                Err(e) => {
+                    live.set(|i| {
+                        i.state = SshState::Failed;
+                        i.error = Some(e);
+                    });
+                }
+                Ok(secs) => {
+                    live.set(|i| {
+                        i.state = SshState::Ready;
+                        i.elapsed_secs = secs;
+                        i.error = None;
+                    });
+                    // reflect an agent that is already installed; an install
+                    // in flight is never touched by the probe
+                    if let Ok(p) = crate::sshx::probe_agent(&bin, &target, &live.cancel) {
+                        live.set(|i| {
+                            if i.agent.state != AgentState::Installing {
+                                if p.present {
+                                    i.agent.state = AgentState::Installed;
+                                    i.agent.version = p.version;
+                                    i.agent.error = None;
+                                } else {
+                                    i.agent.state = AgentState::Unknown;
+                                    i.agent.version = None;
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+        });
+    }
+
+    fn fail_install(&self, id: &str, msg: String) {
+        if let Some((_, _, live)) = self.ssh_parts(id) {
+            live.set(|i| {
+                i.agent.state = AgentState::Failed;
+                i.agent.error = Some(msg.clone());
+            });
+            live.push_log(&format!("[x] {msg}"));
+        }
+    }
+
+    /// install (or reinstall) the agent inside the running VM: upload the
+    /// host config (the agent needs its provider + api key), stream the
+    /// bootstrap script (apt tools per the root flag -> rustup -> cargo
+    /// install from the public repo), then verify the binary. Runs on its
+    /// own thread; the card follows the log.
+    pub fn install_agent(self: &Arc<Self>, id: &str) -> Result<SandboxStatus> {
+        let (spec, _dir, live) = self
+            .ssh_parts(id)
+            .ok_or_else(|| anyhow!("sandbox \"{id}\" has no ssh session"))?;
+        {
+            let state = self.inner.lock().unwrap().get(id).map(|e| e.state);
+            if state != Some(VmState::Running) {
+                bail!("start the VM first");
+            }
+            let info = live.info.lock().unwrap();
+            if info.state != SshState::Ready {
+                bail!("ssh is not ready yet (state: {:?})", info.state);
+            }
+            if info.agent.state == AgentState::Installing {
+                bail!("agent install is already running");
+            }
+        }
+        live.cancel.store(false, Ordering::Relaxed);
+        live.set(|i| {
+            i.agent.state = AgentState::Installing;
+            i.agent.error = None;
+            i.agent.version = None;
+            i.agent.log.clear();
+        });
+
+        let mgr = self.clone();
+        let tid = id.to_string();
+        std::thread::spawn(move || {
+            let id = tid;
+            let Some(bin) = crate::sshx::find_ssh() else {
+                mgr.fail_install(&id, "no ssh client on the host".into());
+                return;
+            };
+            let target = Self::ssh_target(&mgr.sandbox_dir(&id), &spec);
+            let cancel = &live.cancel;
+
+            // 1. the agent needs the host config (provider + api key) to run
+            match std::fs::read_to_string(crate::config::config_path()) {
+                Ok(cfg) => {
+                    live.push_log("[*] uploading the host config (provider, api key)");
+                    let remote = "mkdir -p \"$HOME/.config/hi-derola\" && cat > \"$HOME/.config/hi-derola/config.toml\"";
+                    match crate::sshx::stream(&bin, &target, remote, Some(cfg.as_bytes()), cancel, |_| {}) {
+                        Ok(0) => {}
+                        Ok(c) => {
+                            mgr.fail_install(&id, format!("config upload exited with {c}"));
+                            return;
+                        }
+                        Err(e) if e == "cancelled" => {}
+                        Err(e) => {
+                            mgr.fail_install(&id, format!("config upload: {e}"));
+                            return;
+                        }
+                    }
+                }
+                Err(_) => {
+                    live.push_log("[!] no host config found — the agent will start without an api key");
+                }
+            }
+
+            // 2. the bootstrap itself
+            let res = crate::sshx::stream(
+                &bin,
+                &target,
+                "sh -s 2>&1",
+                Some(crate::sshx::INSTALL_SH.as_bytes()),
+                cancel,
+                |line| live.push_log(line),
+            );
+            match res {
+                Ok(0) => match crate::sshx::probe_agent(&bin, &target, cancel) {
+                    Ok(p) if p.present => {
+                        live.set(|i| {
+                            i.agent.state = AgentState::Installed;
+                            i.agent.version = p.version;
+                            i.agent.error = None;
+                        });
+                        live.push_log("[ok] agent is ready — \"run agent\" opens it inside the VM");
+                    }
+                    Ok(_) => {
+                        mgr.fail_install(&id, "install reported success but the binary is missing".into())
+                    }
+                    Err(e) => mgr.fail_install(&id, format!("verify: {e}")),
+                },
+                Ok(c) => mgr.fail_install(&id, format!("install script exited with code {c}")),
+                Err(e) if e == "cancelled" => {
+                    live.set(|i| i.agent.state = AgentState::Unknown);
+                    live.push_log("[i] install cancelled");
+                }
+                Err(e) => mgr.fail_install(&id, e),
+            }
+        });
+        self.status_of(&id)
+    }
+
+    /// open a terminal window with an interactive ssh session into the VM
+    /// (plain shell, or the agent TUI when `agent` is on)
+    pub fn open_terminal(&self, id: &str, agent: bool) -> Result<()> {
+        let (spec, dir, live) = self
+            .ssh_parts(id)
+            .ok_or_else(|| anyhow!("sandbox \"{id}\" has no ssh session"))?;
+        if live.info.lock().unwrap().state != SshState::Ready {
+            bail!("ssh is not ready yet — wait for the ready badge first");
+        }
+        let bin = crate::sshx::find_ssh().ok_or_else(|| {
+            anyhow!(
+                "no ssh client on the host — windows: Settings > Apps > Optional features > OpenSSH client"
+            )
+        })?;
+        let target = Self::ssh_target(&dir, &spec);
+        let args = crate::sshx::terminal_cmdline(&target, agent);
+        crate::sshx::spawn_terminal(&bin, &args).map_err(|e| anyhow!("{e}"))
+    }
+
+    /// run one command in the VM and return its output (power-user path;
+    /// later phases route agent tools through this)
+    pub fn ssh_exec(
+        &self,
+        id: &str,
+        command: &str,
+        timeout_secs: Option<u64>,
+    ) -> Result<crate::sshx::SshOut> {
+        let (spec, dir, live) = self
+            .ssh_parts(id)
+            .ok_or_else(|| anyhow!("sandbox \"{id}\" has no ssh session"))?;
+        if live.info.lock().unwrap().state != SshState::Ready {
+            bail!("ssh is not ready yet");
+        }
+        let bin =
+            crate::sshx::find_ssh().ok_or_else(|| anyhow!("no ssh client on the host"))?;
+        let target = Self::ssh_target(&dir, &spec);
+        let cancel = AtomicBool::new(false);
+        crate::sshx::exec(
+            &bin,
+            &target,
+            command,
+            Duration::from_secs(timeout_secs.unwrap_or(15).clamp(1, 300)),
+            &cancel,
+        )
+        .map_err(|e| anyhow!("{e}"))
     }
 }
 
@@ -967,7 +1476,7 @@ fn unique_id(base: &str, mut taken: impl FnMut(&str) -> bool) -> String {
 }
 
 /// hide the console window a helper process would flash on Windows
-fn silent(cmd: &mut Command) -> &mut Command {
+pub(crate) fn silent(cmd: &mut Command) -> &mut Command {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -1058,6 +1567,7 @@ mod tests {
         NewSandbox {
             name: name.to_string(),
             kind,
+            login: None,
             iso_path: None,
             disk_gib: None,
             ram_mib: None,
@@ -1071,6 +1581,7 @@ mod tests {
         SandboxSpec {
             id: "test-01".into(),
             name: name.into(),
+            login: "derola".into(),
             kind,
             iso_path: iso.map(String::from),
             disk_gib: 20,
@@ -1088,15 +1599,34 @@ mod tests {
             serde_json::to_string(&ImageKind::DebianTrixie).unwrap(),
             "\"debian-trixie\""
         );
+        assert_eq!(
+            serde_json::to_string(&ImageKind::Ubuntu2404).unwrap(),
+            "\"ubuntu-24.04\""
+        );
         assert_eq!(serde_json::to_string(&ImageKind::Nixos).unwrap(), "\"nixos\"");
         assert_eq!(serde_json::to_string(&ImageKind::Custom).unwrap(), "\"custom\"");
+        let k: ImageKind = serde_json::from_str("\"ubuntu-24.04\"").unwrap();
+        assert_eq!(k, ImageKind::Ubuntu2404);
+        // legacy kinds keep loading
         let k: ImageKind = serde_json::from_str("\"nixos\"").unwrap();
         assert_eq!(k, ImageKind::Nixos);
         assert_eq!(ImageKind::DebianTrixie.url(), Some(DEBIAN_TRIXIE_URL));
+        assert_eq!(ImageKind::Ubuntu2404.url(), Some(UBUNTU_2404_URL));
         assert!(ImageKind::DebianTrixie.needs_download());
+        assert!(ImageKind::Ubuntu2404.needs_download());
         assert!(!ImageKind::Custom.needs_download());
         assert!(DEBIAN_TRIXIE_URL.starts_with("https://cloud.debian.org/images/cloud/trixie/"));
-        assert!(NIXOS_URL.starts_with("https://channels.nixos.org/nixos-"));
+        assert!(UBUNTU_2404_URL.starts_with("https://cloud-images.ubuntu.com/minimal/releases/24.04/"));
+        assert!(UBUNTU_2404_URL.ends_with("ubuntu-24.04-minimal-cloudimg-amd64.img"));
+    }
+
+    #[test]
+    fn seed_only_for_cloud_init_kinds() {
+        assert!(ImageKind::DebianTrixie.wants_seed());
+        assert!(ImageKind::Ubuntu2404.wants_seed());
+        // no cloud-init -> no seed/ssh wiring
+        assert!(!ImageKind::Nixos.wants_seed());
+        assert!(!ImageKind::Custom.wants_seed());
     }
 
     #[test]
@@ -1124,11 +1654,19 @@ mod tests {
         assert!(s.contains("-m 2048"));
         assert!(s.contains("-smp 2"));
         assert!(s.contains("file=/vm/test/disk.qcow2,format=qcow2,if=virtio"));
-        assert!(s.contains("hostfwd=tcp::2222-:22"));
+        // loopback bind: the guest ssh is host-local only
+        assert!(s.contains("hostfwd=tcp:127.0.0.1:2222-:22"));
+        assert!(!s.contains("hostfwd=tcp::2222"));
         assert!(s.contains("-device virtio-net-pci,netdev=n0"));
         assert!(s.contains("-name hiderola-test-01"));
         assert!(!s.contains("-cpu max"), "hw accel keeps the default cpu");
         assert!(!s.contains("-cdrom"));
+        // the cloud-init seed rides along as a second raw disk
+        assert!(s.contains("file=/vm/test/seed.img,format=raw,if=virtio"));
+
+        let ubuntu = spec("ub", ImageKind::Ubuntu2404, None);
+        let a = build_qemu_args(&ubuntu, dir, "kvm");
+        assert!(a.join(" ").contains("file=/vm/test/seed.img,format=raw,if=virtio"));
 
         let iso = spec("ins", ImageKind::Custom, Some("/imgs/debian.iso"));
         let a = build_qemu_args(&iso, dir, "tcg");
@@ -1137,6 +1675,7 @@ mod tests {
         assert!(s.contains("-boot d"));
         assert!(s.contains("file=/vm/test/disk.qcow2,format=qcow2,if=virtio"));
         assert!(s.contains("-cpu max"), "tcg gets the widest cpu model");
+        assert!(!s.contains("seed.img"), "custom iso has no seed drive");
 
         let diskimg = spec("own", ImageKind::Custom, Some("/imgs/preinstalled.qcow2"));
         let a = build_qemu_args(&diskimg, dir, "kvm");
@@ -1144,18 +1683,26 @@ mod tests {
         assert!(s.contains("file=/imgs/preinstalled.qcow2,format=auto,if=virtio"));
         assert!(!s.contains("disk.qcow2"), "own disk image boots directly");
         assert!(!s.contains("-boot d"));
+        assert!(!s.contains("seed.img"));
+
+        // legacy nixos boots without a seed (no cloud-init inside)
+        let nix = spec("nix", ImageKind::Nixos, None);
+        let a = build_qemu_args(&nix, dir, "kvm");
+        assert!(!a.join(" ").contains("seed.img"));
     }
 
     #[test]
     fn img_args_overlay_vs_plain() {
         let dir = Path::new("/vm/test");
-        let overlay = build_img_args(ImageKind::Nixos, dir, 20);
-        let s = overlay.join(" ");
-        assert!(s.starts_with("create -f qcow2"));
-        assert!(s.contains("-b /vm/test/image.qcow2"));
-        assert!(s.contains("-F qcow2"));
-        assert!(s.contains("/vm/test/disk.qcow2"));
-        assert!(s.ends_with("20G"));
+        for kind in [ImageKind::DebianTrixie, ImageKind::Ubuntu2404, ImageKind::Nixos] {
+            let overlay = build_img_args(kind, dir, 20);
+            let s = overlay.join(" ");
+            assert!(s.starts_with("create -f qcow2"));
+            assert!(s.contains("-b /vm/test/image.qcow2"));
+            assert!(s.contains("-F qcow2"));
+            assert!(s.contains("/vm/test/disk.qcow2"));
+            assert!(s.ends_with("20G"));
+        }
 
         let plain = build_img_args(ImageKind::Custom, dir, 8);
         let s = plain.join(" ");
@@ -1194,6 +1741,7 @@ mod tests {
             .create(&NewSandbox {
                 name: "Test Box".into(),
                 kind: ImageKind::Custom,
+                login: None,
                 iso_path: Some(iso.display().to_string()),
                 disk_gib: Some(1000), // clamped
                 ram_mib: Some(100),   // clamped
@@ -1252,6 +1800,99 @@ mod tests {
     }
 
     #[test]
+    fn cloud_create_generates_seed_keypair_and_ssh_state() {
+        let dir = temp_dir("seed-create");
+        let mgr = Arc::new(SandboxManager::new(dir.clone()));
+        let st = mgr.create(&req("seeded", ImageKind::Ubuntu2404)).unwrap();
+        let sdir = dir.join(&st.spec.id);
+        // the seed must be on disk before the first boot can happen
+        assert!(sdir.join("seed.img").is_file());
+        assert!(sdir.join("id_ed25519").is_file());
+        assert!(sdir.join("id_ed25519.pub").is_file());
+        let pub_line = std::fs::read_to_string(sdir.join("id_ed25519.pub")).unwrap();
+        assert!(pub_line.starts_with("ssh-ed25519 "));
+        assert!(pub_line.contains("hiderola-"));
+        // ssh snapshot is part of the status
+        let st = mgr.list().into_iter().next().unwrap();
+        let ssh = st.ssh.expect("seed kinds carry ssh info");
+        assert_eq!(ssh.user, "derola");
+        assert_eq!(ssh.port, 2222);
+        assert_eq!(ssh.agent.state, AgentState::Unknown);
+        assert!(st.error.is_none() || st.state == VmState::Failed);
+        let _ = mgr.delete(&st.spec.id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn custom_create_has_no_seed_or_ssh_state() {
+        let dir = temp_dir("noseed");
+        let mgr = Arc::new(SandboxManager::new(dir.clone()));
+        let iso = dir.join("mini.iso");
+        std::fs::write(&iso, b"fake").unwrap();
+        let mut r = req("plain", ImageKind::Custom);
+        r.iso_path = Some(iso.display().to_string());
+        let st = mgr.create(&r).unwrap();
+        assert!(!dir.join(&st.spec.id).join("seed.img").exists());
+        assert!(st.ssh.is_none(), "custom kinds carry no ssh state");
+        let _ = mgr.delete(&st.spec.id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn login_defaults_and_validation() {
+        let dir = temp_dir("login");
+        let mgr = Arc::new(SandboxManager::new(dir.clone()));
+        let iso = dir.join("a.iso");
+        std::fs::write(&iso, b"x").unwrap();
+
+        // default login kicks in
+        let mut r = req("dflt", ImageKind::Custom);
+        r.iso_path = Some(iso.display().to_string());
+        let st = mgr.create(&r).unwrap();
+        assert_eq!(st.spec.login, "derola");
+        let _ = mgr.delete(&st.spec.id);
+
+        // valid custom login passes through (trim included)
+        let mut r = req("custom", ImageKind::Custom);
+        r.iso_path = Some(iso.display().to_string());
+        r.login = Some("  agent-1 ".into());
+        let st = mgr.create(&r).unwrap();
+        assert_eq!(st.spec.login, "agent-1");
+        let _ = mgr.delete(&st.spec.id);
+
+        // blank login falls back to the default
+        let mut r = req("blank", ImageKind::Custom);
+        r.iso_path = Some(iso.display().to_string());
+        r.login = Some("   ".into());
+        let st = mgr.create(&r).unwrap();
+        assert_eq!(st.spec.login, "derola");
+        let _ = mgr.delete(&st.spec.id);
+
+        // invalid logins are refused before anything is written;
+        // empty/blank logins are NOT errors — they fall back to the default
+        for bad in ["root", "Root", "9lives", "has space", "x".repeat(33).as_str()] {
+            let mut r = req("bad", ImageKind::Custom);
+            r.iso_path = Some(iso.display().to_string());
+            r.login = Some(bad.to_string());
+            assert!(mgr.create(&r).is_err(), "{bad:?} must be refused");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn install_gates() {
+        let dir = temp_dir("gates");
+        let mgr = Arc::new(SandboxManager::new(dir.clone()));
+        // unknown sandbox
+        assert!(mgr.install_agent("missing").is_err());
+        // known but not running
+        let st = mgr.create(&req("gated", ImageKind::DebianTrixie)).unwrap();
+        assert!(mgr.install_agent(&st.spec.id).is_err());
+        let _ = mgr.delete(&st.spec.id);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn reload_detects_state_and_dead_pid() {
         let dir = temp_dir("reload");
         let mgr = Arc::new(SandboxManager::new(dir.clone()));
@@ -1302,19 +1943,88 @@ mod tests {
             pid: None,
             dir: "/d/test-01".into(),
             download: None,
+            ssh: None,
             error: None,
         };
         let v: serde_json::Value = serde_json::to_value(&st).unwrap();
         assert_eq!(v["spec"]["name"], "gui");
         assert_eq!(v["spec"]["kind"], "custom");
+        assert_eq!(v["spec"]["login"], "derola");
         assert_eq!(v["spec"]["ssh_port"], 2222);
         assert_eq!(v["state"], "stopped");
         assert_eq!(v["dir"], "/d/test-01");
         assert!(v.get("download").is_none());
+        assert!(v.get("ssh").is_none());
         assert!(v.get("error").is_none());
         let v: serde_json::Value =
             serde_json::to_value(&st.clone()).unwrap();
         assert!(v["spec"].is_object());
+    }
+
+    #[test]
+    fn ssh_info_json_shape_matches_gui() {
+        // the GUI reads s.ssh.state/.user/.port/.elapsed_secs/.agent.*
+        let info = SshInfo {
+            state: SshState::Ready,
+            user: "derola".into(),
+            port: 2222,
+            elapsed_secs: 37,
+            error: None,
+            agent: AgentInfo {
+                state: AgentState::Installed,
+                version: Some("0.1.0".into()),
+                error: None,
+                log: vec!["[ok] done".into()],
+            },
+        };
+        let v: serde_json::Value = serde_json::to_value(&info).unwrap();
+        assert_eq!(v["state"], "ready");
+        assert_eq!(v["user"], "derola");
+        assert_eq!(v["port"], 2222);
+        assert_eq!(v["elapsed_secs"], 37);
+        assert!(v.get("error").is_none());
+        assert_eq!(v["agent"]["state"], "installed");
+        assert_eq!(v["agent"]["version"], "0.1.0");
+        assert_eq!(v["agent"]["log"], serde_json::json!(["[ok] done"]));
+
+        let info = SshInfo {
+            state: SshState::Waiting,
+            user: "joe".into(),
+            port: 2200,
+            elapsed_secs: 3,
+            error: None,
+            agent: AgentInfo {
+                state: AgentState::Unknown,
+                version: None,
+                error: None,
+                log: Vec::new(),
+            },
+        };
+        let v: serde_json::Value = serde_json::to_value(&info).unwrap();
+        assert_eq!(v["state"], "waiting");
+        assert_eq!(v["agent"]["state"], "unknown");
+        assert!(v["agent"].get("version").is_none());
+        assert!(v["agent"].get("log").is_none());
+
+        // a failed wait carries the error
+        let info = SshInfo {
+            state: SshState::Failed,
+            user: "joe".into(),
+            port: 2200,
+            elapsed_secs: 600,
+            error: Some("ssh did not answer".into()),
+            agent: AgentInfo {
+                state: AgentState::Failed,
+                version: None,
+                error: Some("install script exited with code 33".into()),
+                log: Vec::new(),
+            },
+        };
+        let v: serde_json::Value = serde_json::to_value(&info).unwrap();
+        assert_eq!(v["state"], "failed");
+        assert_eq!(v["error"], "ssh did not answer");
+        assert_eq!(v["agent"]["state"], "failed");
+        assert_eq!(v["agent"]["error"], "install script exited with code 33");
     }
 
     #[test]

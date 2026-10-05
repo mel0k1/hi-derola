@@ -64,6 +64,7 @@ const ICONS = {
   stop: '<rect x="6" y="6" width="12" height="12" rx="1.5"/>',
   download: '<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>',
   warn: '<path d="M12 3L2 21h20z"/><path d="M12 10v5"/><path d="M12 18h.01"/>',
+  terminal: '<path d="M4 17l6-5-6-5"/><path d="M12 19h8"/>',
 };
 
 function icon(name) {
@@ -1994,21 +1995,24 @@ const SBX_IMAGES = [
     id: "debian-trixie",
     label: "Debian 13 (trixie) minimal",
     size: "~700 MiB download",
-    hint: "small official cloud image, boots fast; a cloud-init seed (login + ssh key) arrives in a later update — bring your own ISO to install manually today",
+    hint: "official minimal cloud image, boots fast; a cloud-init seed (your login + a generated ssh key) is created automatically",
   },
   {
-    id: "nixos",
-    label: "NixOS minimal",
-    size: "~1 GiB download",
-    hint: "declarative and reproducible; configure it from the VM console via configuration.nix",
+    id: "ubuntu-24.04",
+    label: "Ubuntu 24.04 LTS minimal",
+    size: "~300 MiB download",
+    hint: "Canonical's trimmed cloud image — smaller and quicker to boot than the standard server image; the cloud-init seed works out of the box",
   },
   {
     id: "custom",
     label: "own image",
     size: "no download",
-    hint: "an .iso boots as install media; a qcow2 / raw disk image boots directly",
+    hint: "an .iso boots as install media; a qcow2 / raw disk image boots directly (no seed — you configure the login yourself)",
   },
 ];
+
+/* kinds that no longer appear in the wizard but may exist on disk */
+const SBX_LEGACY_LABELS = { nixos: "NixOS minimal (legacy)" };
 
 function toggleSandboxView(force) {
   const on = force === undefined ? !sandboxOpen : !!force;
@@ -2079,7 +2083,8 @@ function stopSbxPoll() {
 
 function sbxKindLabel(kind) {
   const img = SBX_IMAGES.find((i) => i.id === kind);
-  return img ? img.label : kind;
+  if (img) return img.label;
+  return SBX_LEGACY_LABELS[kind] || kind;
 }
 
 function renderSbxQemu() {
@@ -2149,9 +2154,39 @@ function sbxCard(s) {
     card.appendChild(line);
   }
 
+  // ssh + agent block: the backend only attaches s.ssh for cloud-init kinds
+  const seed = !!s.ssh;
+  if (seed && s.state === "running") card.appendChild(sbxSshBlock(s));
+
   if (s.error) card.appendChild(el("div", "sbx-error", s.error));
 
   const actions = el("div", "sbx-card-actions");
+  if (seed && s.state === "running" && s.ssh.state === "ready") {
+    const ag = s.ssh.agent || {};
+    const term = el("button", "ghost sbx-btn");
+    term.innerHTML = `${icon("terminal")} terminal`;
+    term.title = "open a shell in the VM (a new terminal window)";
+    term.onclick = () => sbxTerminal(s);
+    actions.appendChild(term);
+    if (ag.state === "installed") {
+      const run = el("button", "ghost sbx-btn");
+      run.innerHTML = `${icon("spark")} run agent`;
+      run.title = "open the agent TUI inside the VM (a new terminal window)";
+      run.onclick = () => sbxTerminal(s, true);
+      actions.appendChild(run);
+    }
+    const inst = el("button", "ghost sbx-btn");
+    if (ag.state === "installing") {
+      inst.disabled = true;
+      inst.innerHTML = `${icon("download")} installing\u2026`;
+    } else {
+      inst.innerHTML = `${icon("download")} ${ag.state === "installed" ? "reinstall agent" : "install agent"}`;
+      inst.title = "build the agent inside the VM (apt tools + rustup + cargo install; needs root)";
+      inst.onclick = () => sbxInstall(s);
+    }
+    actions.appendChild(inst);
+  }
+
   const primary = el("button", "ghost sbx-btn");
   if (s.state === "running") primary.innerHTML = `${icon("stop")} stop`;
   else if (s.state === "downloading") primary.innerHTML = `${icon("x")} cancel`;
@@ -2179,6 +2214,62 @@ function sbxCard(s) {
   return card;
 }
 
+/* ssh readiness + in-VM agent state for one running cloud sandbox */
+
+function sbxSshBlock(s) {
+  const wrap = el("div", "sbx-ssh-wrap");
+  const info = s.ssh;
+  if (info.state === "waiting") {
+    const row = el("div", "sbx-ssh waiting");
+    row.innerHTML = `<span class="ic sm">${icon("download")}</span> ssh waiting\u2026 ${info.elapsed_secs || 0}s <span class="hint">(first boot applies the cloud-init seed)</span>`;
+    wrap.appendChild(row);
+  } else if (info.state === "failed") {
+    const row = el("div", "sbx-ssh failed");
+    row.innerHTML = `<span class="ic sm">${icon("warn")}</span> ssh failed — ${esc(info.error || "unknown error")}`;
+    row.title = "reboot the VM (stop / start) or check qemu.log";
+    wrap.appendChild(row);
+  } else if (info.state === "ready") {
+    const row = el("div", "sbx-ssh ready");
+    row.innerHTML = `<span class="ic sm">${icon("check")}</span> ssh ready · ${esc(info.user)}@127.0.0.1:${info.port} <span class="hint">· up in ${info.elapsed_secs || 0}s</span>`;
+    wrap.appendChild(row);
+
+    const ag = info.agent || {};
+    const agRow = el("div", "sbx-agent");
+    if (ag.state === "unknown") {
+      agRow.innerHTML = `<span class="hint">the agent is not installed in this VM yet${s.spec.root ? "" : " — installing needs root, enable \"allow root\" at creation"}</span>`;
+    } else if (ag.state === "installing") {
+      agRow.innerHTML = `<span class="sbx-agent-state">installing agent\u2026</span>`;
+    } else if (ag.state === "installed") {
+      agRow.innerHTML = `<span class="ic sm">${icon("check")}</span> agent${ag.version ? ` v${esc(ag.version)}` : ""} ready inside the VM`;
+    } else if (ag.state === "failed") {
+      agRow.innerHTML = `<span class="ic sm">${icon("warn")}</span> install failed — ${esc(ag.error || "error")}`;
+    }
+    wrap.appendChild(agRow);
+
+    if (ag.log && ag.log.length) {
+      const log = el("pre", "sbx-log");
+      const tail = ag.log.slice(-14);
+      log.textContent =
+        (ag.log.length > tail.length ? `\u2026 ${ag.log.length - tail.length} earlier lines\n` : "") +
+        tail.join("\n");
+      log.scrollTop = log.scrollHeight;
+      wrap.appendChild(log);
+    }
+  }
+  return wrap;
+}
+
+function sbxInstall(s) {
+  invoke("sandbox_agent_install", { id: s.spec.id })
+    .then(refreshSandbox)
+    .catch((e) => showSbxMsg(String(e)));
+}
+
+function sbxTerminal(s, agent = false) {
+  invoke("sandbox_ssh_terminal", { id: s.spec.id, agent })
+    .catch((e) => showSbxMsg(String(e)));
+}
+
 function sbxDelete(s, btn) {
   // two clicks: first arms, second deletes (same pattern as mcp servers)
   if (!btn.classList.contains("confirm")) {
@@ -2201,9 +2292,14 @@ function openWizard() {
   const used = new Set(SBX.list.map((s) => s.spec.ssh_port));
   let port = 2222;
   while (used.has(port)) port++;
-  SBXW = { step: 1, kind: "debian-trixie", iso: "", name: "", disk: 20, ram: 2048, cpus: 2, root: false, port };
+  SBXW = { step: 1, kind: "debian-trixie", iso: "", name: "", login: "derola", disk: 20, ram: 2048, cpus: 2, root: false, port };
   $("sbx-wizard").classList.remove("hidden");
   renderWizard();
+}
+
+function sbxwLoginOk() {
+  const l = (SBXW.login || "").trim();
+  return /^[a-z][a-z0-9_-]{0,31}$/.test(l) && l !== "root";
 }
 
 function closeWizard() {
@@ -2285,6 +2381,18 @@ function renderWizardStep2(body) {
   body.appendChild(grid);
   const grid2 = el("div", "grid3");
   grid2.appendChild(sbxwNumField("ssh port on the host", SBXW.port, 1024, 65535, (v) => (SBXW.port = v)));
+  grid2.appendChild(
+    sbxwField("login inside the VM", (lab) => {
+      const inp = el("input");
+      inp.value = SBXW.login;
+      inp.placeholder = "derola";
+      inp.spellcheck = false;
+      inp.oninput = () => {
+        SBXW.login = inp.value;
+      };
+      lab.appendChild(inp);
+    })
+  );
   body.appendChild(grid2);
 
   const nameLab = sbxwField("name", (lab) => {
@@ -2309,7 +2417,7 @@ function renderWizardStep2(body) {
   rootLab.appendChild(chk);
   rootLab.insertAdjacentHTML(
     "beforeend",
-    `<span>allow root inside the sandbox <span class="hint">(used by the agent profile in a later update)</span></span>`
+    `<span>allow root inside the sandbox <span class="hint">(passwordless sudo — the in-VM agent needs it to install itself)</span></span>`
   );
   body.appendChild(rootLab);
   sbxwNav(body, 2);
@@ -2324,7 +2432,8 @@ function renderWizardStep3(body) {
     ["ram", fmtGiB(SBXW.ram)],
     ["cpu", `${SBXW.cpus} vcpu`],
     ["ssh", `:${SBXW.port}`],
-    ["root", SBXW.root ? "allowed" : "denied"],
+    ["login", SBXW.login.trim() || "derola"],
+    ["root", SBXW.root ? "allowed (passwordless sudo)" : "denied"],
   ];
   for (const [k, v] of rows) {
     const row = el("div");
@@ -2337,11 +2446,9 @@ function renderWizardStep3(body) {
 
   const hint = el("div", "hint sbxw-hint");
   hint.textContent =
-    SBXW.kind === "debian-trixie"
-      ? "downloads the official Debian cloud image on create; the VM opens its own window, guest ssh is forwarded to the host port above"
-      : SBXW.kind === "nixos"
-        ? "downloads the NixOS minimal image on create; the VM opens its own window, guest ssh is forwarded to the host port above"
-        : "boots from your file as-is; the VM opens its own window, guest ssh is forwarded to the host port above";
+    SBXW.kind === "debian-trixie" || SBXW.kind === "ubuntu-24.04"
+      ? "downloads the official cloud image and generates a cloud-init seed (your login + a generated ssh key); the first boot sets the user up and the card shows when ssh is ready — then you can open a terminal or install the agent inside"
+      : "boots from your file as-is; the VM opens its own window, guest ssh is forwarded to the host port above";
   body.appendChild(hint);
 
   const create = el("button", "accent");
@@ -2353,12 +2460,19 @@ function renderWizardStep3(body) {
       renderWizard();
       return;
     }
+    if (!sbxwLoginOk()) {
+      showSbxMsg('login must be a-z, digits, "-" or "_" — starting with a letter, not "root"');
+      SBXW.step = 2;
+      renderWizard();
+      return;
+    }
     create.disabled = true;
     try {
       await invoke("sandbox_create", {
         spec: {
           name: SBXW.name.trim(),
           kind: SBXW.kind,
+          login: SBXW.login.trim() || "derola",
           iso_path: SBXW.kind === "custom" ? SBXW.iso.trim() : null,
           disk_gib: SBXW.disk,
           ram_mib: SBXW.ram,
@@ -2395,6 +2509,10 @@ function sbxwNav(body, step, primaryBtn) {
     next.onclick = () => {
       if (SBXW.step === 1 && SBXW.kind === "custom" && !SBXW.iso.trim()) {
         showSbxMsg("pick an image file path first");
+        return;
+      }
+      if (SBXW.step === 2 && !sbxwLoginOk()) {
+        showSbxMsg('login must be a-z, digits, "-" or "_" — starting with a letter, not "root"');
         return;
       }
       showSbxMsg("");
