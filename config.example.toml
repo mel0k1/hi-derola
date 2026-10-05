@@ -58,6 +58,9 @@ stream = true
 # are noted in the chat once per flip (absent or 0 = off)
 # timeout = 300 overrides the per-request timeouts for this server
 # (defaults: 15s requests, 120s tool calls, 30s connect)
+# servers can also be added at runtime from the chat:
+# /mcpadd <name> <url|command...> (saved here), /mcpconnect <name> reconnects,
+# /mcpdisconnect <name> drops the live connection without touching the config
 
 # gui hotkeys, combos: enter, escape, tab, ctrl+x, shift+enter, alt+f, comma...
 # set to "none" to disable, unknown keys fall back to defaults

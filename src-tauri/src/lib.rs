@@ -958,7 +958,7 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
         .unwrap_or((line, ""));
     match cmd {
         "/help" | "/h" => note(
-            "commands: /file <path> · /model <name> · /models · /plan · /undo · /redo · /init · /compact · /export [path] · /mcpres [server] · /mcpread <server> <uri> · /mcpsub <server> <uri> · /mcpunsub <server> <uri> · /mcpprompt [server] <name> [k=v] · /clear · /help\n\
+            "commands: /file <path> · /model <name> · /models · /plan · /undo · /redo · /init · /compact · /export [path] · /mcpadd <name> <url|command...> · /mcpconnect <name> · /mcpdisconnect <name> · /mcpres [server] · /mcpread <server> <uri> · /mcpsub <server> <uri> · /mcpunsub <server> <uri> · /mcpprompt [server] <name> [k=v] · /clear · /help\n\
              mutations (write/edit/bash/mcp) ask for confirmation, allow all skips further asks\n\
              custom commands: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)",
         ),
@@ -1000,6 +1000,79 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
                 let _ = tx.send(ApiEvent::Note(msg));
             });
             note("fetching models...")
+        }
+        "/mcpadd" => {
+            let cfg = match hi_derola::mcp::parse_add(arg) {
+                Ok(c) => c,
+                Err(e) => return note(format!("error: {e:#}")),
+            };
+            let name = cfg.name.clone();
+            let saved = {
+                let mut c = sh.cfg.lock().unwrap();
+                c.mcp.retain(|x| x.name != name);
+                c.mcp.push(cfg.clone());
+                match c.save() {
+                    Ok(_) => "saved to config".to_string(),
+                    Err(e) => format!("not saved: {e:#}"),
+                }
+            };
+            let hooks = {
+                let c = sh.cfg.lock().unwrap().clone();
+                mcp_hooks(&c, sh.tx.clone())
+            };
+            let slot = sh.mcp.clone();
+            let tx = sh.tx.clone();
+            tauri::async_runtime::spawn(async move {
+                let existing = slot.lock().unwrap().clone();
+                let msg = match existing {
+                    Some(m) => match m.add(&cfg, &hooks).await {
+                        Ok(sum) => format!("mcp {name}: connected ({sum})"),
+                        Err(e) => format!("error: {e:#}"),
+                    },
+                    None => {
+                        let (client, mut logs) = hi_derola::mcp::connect_all(std::slice::from_ref(&cfg), &hooks).await;
+                        *slot.lock().unwrap() = client;
+                        logs.pop().unwrap_or_else(|| format!("mcp {name}: connected"))
+                    }
+                };
+                let _ = tx.send(ApiEvent::Note(msg));
+            });
+            note(format!("adding mcp {name} ({saved})..."))
+        }
+        "/mcpconnect" => {
+            if arg.is_empty() {
+                return note("usage: /mcpconnect <name> — (re)connect a configured server");
+            }
+            let name = arg.trim().to_string();
+            let cfgs = sh.cfg.lock().unwrap().mcp.clone();
+            let hooks = {
+                let c = sh.cfg.lock().unwrap().clone();
+                mcp_hooks(&c, sh.tx.clone())
+            };
+            let slot = sh.mcp.clone();
+            let tx = sh.tx.clone();
+            tauri::async_runtime::spawn(async move {
+                for l in mcp::reconnect_one(&slot, &cfgs, &hooks, &name).await {
+                    let _ = tx.send(ApiEvent::Note(l));
+                }
+            });
+            note(format!("connecting mcp {name}..."))
+        }
+        "/mcpdisconnect" => {
+            if arg.is_empty() {
+                return note("usage: /mcpdisconnect <name> — drop the live connection (config untouched), /mcpconnect brings it back");
+            }
+            let name = arg.trim().to_string();
+            let m = sh.mcp.lock().unwrap().clone();
+            let Some(m) = m else {
+                return note("mcp is not configured");
+            };
+            let tx = sh.tx.clone();
+            tauri::async_runtime::spawn(async move {
+                let msg = m.disconnect(&name).await.unwrap_or_else(|e| format!("error: {e:#}"));
+                let _ = tx.send(ApiEvent::Note(msg));
+            });
+            note(format!("disconnecting mcp {name}..."))
         }
         "/mcpres" => {
             let mcp = sh.mcp.lock().unwrap().clone();

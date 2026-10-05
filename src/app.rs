@@ -81,7 +81,7 @@ pub struct App {
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
-const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /sessions      list saved sessions\n  /resume [id]   switch to a saved session (latest by default)\n  /mcpauth [name] mcp OAuth status, or authorize a remote server in browser; /mcpauth <name> <code> finishes a flow with a pasted authorization code (resume after a restart)\n  /mcpres [server]  list mcp resources and uri templates\n  /mcpread <server> <uri> read an mcp resource into the chat\n  /mcpprompt [server] <name> [k=v] use an mcp prompt (no args lists prompts)\n  /mcpsub <server> <uri> subscribe to mcp resource updates (land in chat)\n  /mcpunsub <server> <uri> stop the subscription\n  /mcplog [server]  recent mcp log messages; /mcplog set <server|all> <level> sets the minimum level\n  /jstools [reload] list user JS tools (.hi-derola/tools/), optional rescan\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch/mcp_resource + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
+const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /sessions      list saved sessions\n  /resume [id]   switch to a saved session (latest by default)\n  /mcpauth [name] mcp OAuth status, or authorize a remote server in browser; /mcpauth <name> <code> finishes a flow with a pasted authorization code (resume after a restart)\n  /mcpres [server]  list mcp resources and uri templates\n  /mcpread <server> <uri> read an mcp resource into the chat\n  /mcpprompt [server] <name> [k=v] use an mcp prompt (no args lists prompts)\n  /mcpsub <server> <uri> subscribe to mcp resource updates (land in chat)\n  /mcpunsub <server> <uri> stop the subscription\n  /mcplog [server]  recent mcp log messages; /mcplog set <server|all> <level> sets the minimum level\n  /mcpadd <name> <url|command...> add a server at runtime (saved to config) and connect it\n  /mcpconnect <name> (re)connect a configured server\n  /mcpdisconnect <name> drop the live connection (config untouched)\n  /jstools [reload] list user JS tools (.hi-derola/tools/), optional rescan\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch/mcp_resource + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
 
 pub fn help_text() -> &'static str {
     HELP
@@ -1063,6 +1063,77 @@ impl App {
                         }
                     }
                 }
+            }
+            "/mcpadd" => {
+                let cfg = match mcp::parse_add(arg) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        self.info(format!("error: {e:#}"));
+                        return;
+                    }
+                };
+                let name = cfg.name.clone();
+                self.cfg.mcp.retain(|c| c.name != name);
+                self.cfg.mcp.push(cfg.clone());
+                let saved = match self.cfg.save() {
+                    Ok(_) => "saved to config".to_string(),
+                    Err(e) => format!("not saved: {e:#}"),
+                };
+                let hooks = self.mcp_hooks();
+                let slot = self.mcp.clone();
+                let tx = self.tx.clone();
+                self.info(format!("adding mcp {name} ({saved})..."));
+                tokio::spawn(async move {
+                    let existing = slot.lock().unwrap().clone();
+                    let msg = match existing {
+                        Some(m) => match m.add(&cfg, &hooks).await {
+                            Ok(sum) => format!("mcp {name}: connected ({sum})"),
+                            Err(e) => format!("error: {e:#}"),
+                        },
+                        // no live client yet: start one with this server
+                        None => {
+                            let (client, mut logs) = mcp::connect_all(std::slice::from_ref(&cfg), &hooks).await;
+                            *slot.lock().unwrap() = client;
+                            logs.pop().unwrap_or_else(|| format!("mcp {name}: connected"))
+                        }
+                    };
+                    let _ = tx.send(ApiEvent::Note(msg));
+                });
+            }
+            "/mcpconnect" => {
+                if arg.is_empty() {
+                    self.info("usage: /mcpconnect <name> — (re)connect a configured server");
+                    return;
+                }
+                let name = arg.trim().to_string();
+                let cfgs = self.cfg.mcp.clone();
+                let hooks = self.mcp_hooks();
+                let slot = self.mcp.clone();
+                let tx = self.tx.clone();
+                self.info(format!("connecting mcp {name}..."));
+                tokio::spawn(async move {
+                    for l in mcp::reconnect_one(&slot, &cfgs, &hooks, &name).await {
+                        let _ = tx.send(ApiEvent::Note(l));
+                    }
+                });
+            }
+            "/mcpdisconnect" => {
+                if arg.is_empty() {
+                    self.info("usage: /mcpdisconnect <name> — drop the live connection (config untouched) /mcpconnect brings it back");
+                    return;
+                }
+                let name = arg.trim().to_string();
+                let mcp = self.mcp.lock().unwrap().clone();
+                let tx = self.tx.clone();
+                self.info(format!("disconnecting mcp {name}..."));
+                tokio::spawn(async move {
+                    let Some(m) = mcp else {
+                        let _ = tx.send(ApiEvent::Note("mcp is not configured".into()));
+                        return;
+                    };
+                    let msg = m.disconnect(&name).await.unwrap_or_else(|e| format!("error: {e:#}"));
+                    let _ = tx.send(ApiEvent::Note(msg));
+                });
             }
             "/mcpres" => {
                 let mcp = self.mcp.lock().unwrap().clone();

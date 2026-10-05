@@ -194,7 +194,7 @@ pub enum McpOAuthOpt {
     Off(bool),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct McpConfig {
     pub name: String,
     #[serde(default)]

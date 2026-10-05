@@ -1869,6 +1869,40 @@ pub async fn reconnect_one(
     }
 }
 
+/// parse a runtime add spec: `<name> <url>` for remote (anything with ://),
+/// `<name> <command...>` for local; shared by the tui and the gui
+pub fn parse_add(spec: &str) -> Result<McpConfig> {
+    let bad = || anyhow::anyhow!("usage: /mcpadd <name> <url> | /mcpadd <name> <command...>");
+    let Some((name, rest)) = spec.trim().split_once(char::is_whitespace) else {
+        return Err(bad());
+    };
+    let name = name.trim();
+    let rest = rest.trim();
+    if name.is_empty() || rest.is_empty() {
+        return Err(bad());
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        bail!("server name must be alphanumeric, _ or -");
+    }
+    if rest.contains("://") {
+        let url = reqwest::Url::parse(rest).map_err(|e| anyhow::anyhow!("bad url: {e}"))?;
+        Ok(McpConfig {
+            name: name.to_string(),
+            r#type: Some("remote".to_string()),
+            url: Some(url.to_string()),
+            ..Default::default()
+        })
+    } else {
+        let mut it = rest.split_whitespace();
+        Ok(McpConfig {
+            name: name.to_string(),
+            command: it.next().unwrap_or_default().to_string(),
+            args: it.map(String::from).collect(),
+            ..Default::default()
+        })
+    }
+}
+
 impl McpClient {
     async fn replace(&self, cfg: &McpConfig, hooks: &McpHooks) -> Result<String> {
         let mut servers = self.servers.lock().await;
@@ -1877,6 +1911,29 @@ impl McpClient {
         let sum = s.summary();
         servers.push(s);
         Ok(sum)
+    }
+
+    /// connect a server at runtime (from /mcpadd) and slot it in; the
+    /// previous instance only drops after a successful connect
+    pub async fn add(&self, cfg: &McpConfig, hooks: &McpHooks) -> Result<String> {
+        let s = McpServer::connect(cfg, hooks).await?;
+        let sum = s.summary();
+        let mut servers = self.servers.lock().await;
+        servers.retain(|x| x.shared.name != cfg.name);
+        servers.push(s);
+        Ok(sum)
+    }
+
+    /// drop a live server without touching the config (runtime disable);
+    /// a stdio child dies with its McpServer
+    pub async fn disconnect(&self, name: &str) -> Result<String> {
+        let mut servers = self.servers.lock().await;
+        let before = servers.len();
+        servers.retain(|s| s.shared.name != name);
+        if servers.len() == before {
+            bail!("mcp server not connected: {name}");
+        }
+        Ok(format!("mcp {name}: disconnected"))
     }
 
     pub async fn specs(&self) -> Vec<ToolSpec> {
@@ -3080,6 +3137,59 @@ mod tests {
             }
         }
         String::from_utf8_lossy(&buf).to_string()
+    }
+
+    #[test]
+    fn parse_add_specs() {
+        // remote by ://
+        let c = parse_add("search https://example.com/mcp?x=1").unwrap();
+        assert_eq!(c.name, "search");
+        assert_eq!(c.r#type.as_deref(), Some("remote"));
+        assert_eq!(c.url.as_deref(), Some("https://example.com/mcp?x=1"));
+        // local command with args
+        let c = parse_add("fs npx -y @modelcontextprotocol/server-filesystem /tmp").unwrap();
+        assert_eq!(c.command, "npx");
+        assert_eq!(c.args, vec!["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]);
+        assert!(c.url.is_none());
+        // bad specs
+        assert!(parse_add("").is_err());
+        assert!(parse_add("justname").is_err());
+        assert!(parse_add("bad!name npx").is_err(), "name must be alphanumeric, _ or -");
+        assert!(parse_add("srv https://bad url with spaces").is_err(), "url must parse");
+    }
+
+    #[tokio::test]
+    async fn runtime_add_and_disconnect() {
+        let hooks = McpHooks::workspace(None);
+        let (client, _) = connect_all(&[child_cfg("1")], &hooks).await;
+        let client = client.expect("base server connects");
+        assert_eq!(client.specs().await.len(), 1);
+
+        // add a second live server at runtime
+        let mut c2 = child_cfg("struct");
+        c2.name = "t2".into();
+        let sum = client.add(&c2, &hooks).await.unwrap();
+        assert!(sum.contains("1 tool"), "{sum}");
+        let names: Vec<String> = client.specs().await.into_iter().map(|t| t.name).collect();
+        assert!(names.contains(&"mcp__t2__ping".to_string()), "{names:?}");
+
+        // re-add replaces instead of duplicating
+        client.add(&c2, &hooks).await.unwrap();
+        let names: Vec<String> = client.specs().await.into_iter().map(|t| t.name).collect();
+        assert_eq!(
+            names.iter().filter(|n| *n == "mcp__t2__ping").count(),
+            1,
+            "re-add replaces, got {names:?}"
+        );
+
+        // disconnect drops it, a second disconnect errors
+        assert_eq!(client.disconnect("t2").await.unwrap(), "mcp t2: disconnected");
+        let names: Vec<String> = client.specs().await.into_iter().map(|t| t.name).collect();
+        assert!(!names.iter().any(|n| n.starts_with("mcp__t2__")));
+        let err = client.disconnect("t2").await.unwrap_err().to_string();
+        assert!(err.contains("not connected"), "{err}");
+        // the first server is untouched
+        assert_eq!(names.len(), 1);
     }
 
     #[tokio::test]
