@@ -567,14 +567,20 @@ async fn mcp_reconnect(sh: State<'_, Arc<Shared>>) -> Result<Vec<String>, String
 }
 
 #[tauri::command]
-async fn mcp_auth(sh: State<'_, Arc<Shared>>, name: String) -> Result<Vec<String>, String> {
+async fn mcp_auth(
+    sh: State<'_, Arc<Shared>>,
+    name: String,
+    code: Option<String>,
+) -> Result<Vec<String>, String> {
     let cfg = sh.cfg.lock().unwrap().clone();
     let hooks = mcp_hooks(&cfg, sh.tx.clone());
     let cfgs = cfg.mcp;
-    let mut logs = vec![match mcpauth::authorize_flow(&name, &cfgs).await {
-        Ok(m) => m,
-        Err(e) => return Err(format!("{e:#}")),
-    }];
+    let mut logs = vec![match code {
+        // a pasted authorization code resumes the pending flow
+        Some(code) => mcpauth::finish_auth(&name, &cfgs, &code).await,
+        None => mcpauth::authorize_flow(&name, &cfgs).await,
+    }
+    .map_err(|e| format!("{e:#}"))?];
     logs.extend(mcp::reconnect_one(&sh.mcp, &cfgs, &hooks, &name).await);
     Ok(logs)
 }

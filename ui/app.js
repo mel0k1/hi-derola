@@ -1473,7 +1473,23 @@ function fillMcpList() {
           const logs = await invoke("mcp_auth", { name: m.name });
           for (const l of logs) note(l);
         } catch (e) {
-          note(String(e));
+          const msg = String(e);
+          note(msg);
+          // the flow started (verifier persisted) but the callback never
+          // came: offer to finish with a pasted code
+          if (msg.includes("mcpauth") && msg.includes("<code")) {
+            const url = msg.split("\n").find((l) => l.startsWith("http"));
+            if (url) window.open(url, "_blank");
+            const code = prompt("paste the code from the redirect url:");
+            if (code && code.trim()) {
+              try {
+                const logs = await invoke("mcp_auth", { name: m.name, code: code.trim() });
+                for (const l of logs) note(l);
+              } catch (e2) {
+                note(String(e2));
+              }
+            }
+          }
         } finally {
           btn.disabled = false;
           btn.textContent = "auth";

@@ -81,7 +81,7 @@ pub struct App {
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
-const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /sessions      list saved sessions\n  /resume [id]   switch to a saved session (latest by default)\n  /mcpauth [name] mcp OAuth status, or authorize a remote server in browser\n  /mcpres [server]  list mcp resources and uri templates\n  /mcpread <server> <uri> read an mcp resource into the chat\n  /mcpprompt [server] <name> [k=v] use an mcp prompt (no args lists prompts)\n  /mcpsub <server> <uri> subscribe to mcp resource updates (land in chat)\n  /mcpunsub <server> <uri> stop the subscription\n  /mcplog [server]  recent mcp log messages; /mcplog set <server|all> <level> sets the minimum level\n  /jstools [reload] list user JS tools (.hi-derola/tools/), optional rescan\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch/mcp_resource + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
+const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /sessions      list saved sessions\n  /resume [id]   switch to a saved session (latest by default)\n  /mcpauth [name] mcp OAuth status, or authorize a remote server in browser; /mcpauth <name> <code> finishes a flow with a pasted authorization code (resume after a restart)\n  /mcpres [server]  list mcp resources and uri templates\n  /mcpread <server> <uri> read an mcp resource into the chat\n  /mcpprompt [server] <name> [k=v] use an mcp prompt (no args lists prompts)\n  /mcpsub <server> <uri> subscribe to mcp resource updates (land in chat)\n  /mcpunsub <server> <uri> stop the subscription\n  /mcplog [server]  recent mcp log messages; /mcplog set <server|all> <level> sets the minimum level\n  /jstools [reload] list user JS tools (.hi-derola/tools/), optional rescan\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch/mcp_resource + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
 
 pub fn help_text() -> &'static str {
     HELP
@@ -1019,25 +1019,49 @@ impl App {
                     }
                     self.info(out);
                 } else {
-                    let name = arg.to_string();
+                    let mut parts = arg.split_whitespace();
+                    let name = parts.next().unwrap_or("").to_string();
+                    // a pasted authorization code resumes a pending flow
+                    // (works after a restart — the verifier is persisted)
+                    let code = parts.next().map(|s| s.to_string());
                     let cfgs = self.cfg.mcp.clone();
                     let hooks = self.mcp_hooks();
                     let tx = self.tx.clone();
                     let mcp_slot = self.mcp.clone();
-                    self.info(format!("starting OAuth for {name} — check your browser"));
-                    tokio::spawn(async move {
-                        match crate::mcpauth::authorize_flow(&name, &cfgs).await {
-                            Ok(msg) => {
-                                let _ = tx.send(ApiEvent::Note(msg));
-                                for l in mcp::reconnect_one(&mcp_slot, &cfgs, &hooks, &name).await {
-                                    let _ = tx.send(ApiEvent::Note(l));
+                    match code {
+                        Some(code) => {
+                            self.info(format!("finishing OAuth for {name} with the pasted code..."));
+                            tokio::spawn(async move {
+                                match crate::mcpauth::finish_auth(&name, &cfgs, &code).await {
+                                    Ok(msg) => {
+                                        let _ = tx.send(ApiEvent::Note(msg));
+                                        for l in mcp::reconnect_one(&mcp_slot, &cfgs, &hooks, &name).await {
+                                            let _ = tx.send(ApiEvent::Note(l));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(ApiEvent::Note(format!("error: {e:#}")));
+                                    }
                                 }
-                            }
-                            Err(e) => {
-                                let _ = tx.send(ApiEvent::Note(format!("error: {e:#}")));
-                            }
+                            });
                         }
-                    });
+                        None => {
+                            self.info(format!("starting OAuth for {name} — check your browser"));
+                            tokio::spawn(async move {
+                                match crate::mcpauth::authorize_flow(&name, &cfgs).await {
+                                    Ok(msg) => {
+                                        let _ = tx.send(ApiEvent::Note(msg));
+                                        for l in mcp::reconnect_one(&mcp_slot, &cfgs, &hooks, &name).await {
+                                            let _ = tx.send(ApiEvent::Note(l));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = tx.send(ApiEvent::Note(format!("error: {e:#}")));
+                                    }
+                                }
+                            });
+                        }
+                    }
                 }
             }
             "/mcpres" => {

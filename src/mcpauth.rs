@@ -53,6 +53,9 @@ pub struct Entry {
     pub server_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_endpoint: Option<String>,
+    /// redirect_uri pinned when the flow started so the exchange matches
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_uri: Option<String>,
 }
 
 struct AuthEndpoints {
@@ -678,7 +681,19 @@ pub async fn bearer(
 
 // ---- interactive flow ----
 
-pub async fn authorize_flow(name: &str, cfgs: &[McpConfig]) -> Result<String> {
+/// everything the caller needs between the two oauth phases
+pub struct AuthStart {
+    pub url: String,
+    pub state: String,
+    /// (port, path) of the local callback server
+    pub callback: (u16, String),
+}
+
+/// phase 1: discover endpoints, register the client, persist the pkce pair
+/// (code_verifier + oauth_state + token_endpoint + redirect_uri) and return
+/// the authorization url. the flow is resumable from here at any time —
+/// even after a restart, the verifier lives in the auth store
+pub async fn start_auth(name: &str, cfgs: &[McpConfig]) -> Result<AuthStart> {
     let cfg = cfgs
         .iter()
         .find(|c| c.name == name)
@@ -730,11 +745,12 @@ pub async fn authorize_flow(name: &str, cfgs: &[McpConfig]) -> Result<String> {
         e.code_verifier = Some(verifier.clone());
         e.oauth_state = Some(state.clone());
         e.token_endpoint = Some(ep.token_endpoint.clone());
+        e.redirect_uri = Some(redirect.clone());
     })
     .ok();
 
     let scope = oauth.scope.clone().or_else(|| ep.scope.clone());
-    let auth_url = build_auth_url(
+    let url = build_auth_url(
         &ep.authorization_endpoint,
         &ci.client_id,
         &redirect,
@@ -743,27 +759,62 @@ pub async fn authorize_flow(name: &str, cfgs: &[McpConfig]) -> Result<String> {
         &challenge,
         ep.resource.as_deref(),
     )?;
-
-    let opened = open_browser(&auth_url).is_ok();
-    let (port, path) = parse_redirect(Some(&redirect));
-    let state2 = state.clone();
-    let code = tokio::task::spawn_blocking(move || {
-        wait_for_callback(port, &path, &state2, AUTH_TIMEOUT)
+    Ok(AuthStart {
+        url,
+        state,
+        callback: parse_redirect(Some(&redirect)),
     })
-    .await
-    .context("callback task failed")??;
+}
 
+/// phase 2: exchange an authorization code (from the local callback server
+/// or pasted manually as /mcpauth <name> <code>) using the persisted pkce
+/// pair; clears the pending flow on success
+pub async fn finish_auth(name: &str, cfgs: &[McpConfig], code: &str) -> Result<String> {
+    let code = code.trim();
+    if code.is_empty() {
+        bail!("empty authorization code");
+    }
+    let cfg = cfgs
+        .iter()
+        .find(|c| c.name == name)
+        .with_context(|| format!("mcp {name}: not in config"))?;
+    let oauth = cfg.oauth_cfg().context("mcp: OAuth is disabled in config")?;
+    let server_url = cfg
+        .url
+        .clone()
+        .context("mcp: OAuth applies to remote servers only")?;
+    let entry = get(name)
+        .with_context(|| format!("mcp {name}: nothing stored — run /mcpauth {name} first"))?;
+    let verifier = entry.code_verifier
+        .with_context(|| format!("mcp {name}: no pending oauth flow — run /mcpauth {name} first"))?;
+    let ep = entry.token_endpoint
+        .with_context(|| format!("mcp {name}: no token endpoint stored — run /mcpauth {name} first"))?;
+    let redirect = entry
+        .redirect_uri
+        .or_else(|| oauth.redirect_uri.clone())
+        .unwrap_or_else(|| format!("http://127.0.0.1:{CALLBACK_PORT}{CALLBACK_PATH}"));
+    let client_id = oauth
+        .client_id
+        .clone()
+        .or_else(|| entry.client_info.as_ref().map(|c| c.client_id.clone()))
+        .context("no client_id for the exchange")?;
+    let client_secret = oauth
+        .client_secret
+        .clone()
+        .or_else(|| entry.client_info.as_ref().and_then(|c| c.client_secret.clone()));
+
+    let http = Client::builder().user_agent("hi-derola").build()?;
     let mut form: Vec<(&str, &str)> = vec![
         ("grant_type", "authorization_code"),
-        ("code", code.as_str()),
+        ("code", code),
         ("redirect_uri", redirect.as_str()),
-        ("client_id", ci.client_id.as_str()),
+        ("client_id", client_id.as_str()),
         ("code_verifier", verifier.as_str()),
     ];
-    if let Some(sec) = &ci.client_secret {
+    if let Some(sec) = &client_secret {
         form.push(("client_secret", sec.as_str()));
     }
-    let tokens = token_request(&http, &ep.token_endpoint, &form).await?;
+    let tokens = token_request(&http, &ep, &form).await?;
     mutate(name, Some(&server_url), |e| {
         e.tokens = Some(tokens.clone());
         e.code_verifier = None;
@@ -776,11 +827,34 @@ pub async fn authorize_flow(name: &str, cfgs: &[McpConfig]) -> Result<String> {
         .as_deref()
         .map(|s| format!(" (scope: {s})"))
         .unwrap_or_default();
-    Ok(if opened {
-        format!("mcp {name}: authorized{scope_note}")
-    } else {
-        format!("mcp {name}: authorized{scope_note} (browser did not open, but the code was received)")
+    Ok(format!("mcp {name}: authorized{scope_note}"))
+}
+
+/// one-shot browser flow: start_auth, open the browser, wait for the local
+/// callback, then finish_auth. every failure carries the url and the manual
+/// resume hint — the verifier is already persisted
+pub async fn authorize_flow(name: &str, cfgs: &[McpConfig]) -> Result<String> {
+    let start = start_auth(name, cfgs).await?;
+    if open_browser(&start.url).is_err() {
+        bail!(
+            "browser did not open — open this url, approve, then finish with: /mcpauth {name} <code from the redirect url>\n{}",
+            start.url
+        );
+    }
+    let (port, path) = start.callback;
+    let state = start.state.clone();
+    let waited = tokio::task::spawn_blocking(move || {
+        wait_for_callback(port, &path, &state, AUTH_TIMEOUT)
     })
+    .await
+    .context("callback task failed")?;
+    let code = waited.map_err(|e| {
+        anyhow::anyhow!(
+            "{e:#} — approve in the browser and finish with: /mcpauth {name} <code>\n{}",
+            start.url
+        )
+    })?;
+    finish_auth(name, cfgs, &code).await
 }
 
 pub fn status_line(cfg: &McpConfig) -> String {
@@ -800,6 +874,10 @@ pub fn status_line(cfg: &McpConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// set_store_file is a process-global override: store tests take this
+    /// lock so parallel test threads do not race on it
+    static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn free_port() -> u16 {
         let l = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -1178,6 +1256,7 @@ mod tests {
 
     #[test]
     fn store_roundtrip_expiry_and_perms() {
+        let _g = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("mcpauth-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let file = dir.join("mcp-auth.json");
@@ -1234,5 +1313,140 @@ mod tests {
         let t = tokens_from_json(&json!({"access_token": "x"})).unwrap();
         assert_eq!(t.expires_at, None);
         assert_eq!(t.refresh_token, None);
+    }
+
+    #[test]
+    fn oauth_resume_via_persisted_verifier() {
+        let _g = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("mcpauth-resume-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("mcp-auth.json");
+        set_store_file(Some(file.clone()));
+
+        let (_p, log) = spawn_fake_http(|port| {
+            let base = format!("http://127.0.0.1:{port}");
+            let mut routes = BTreeMap::new();
+            routes.insert(
+                "/.well-known/oauth-protected-resource".to_string(),
+                (
+                    200,
+                    String::new(),
+                    json!({
+                        "resource": format!("{base}/mcp"),
+                        "authorization_servers": [base.clone()]
+                    })
+                    .to_string(),
+                ),
+            );
+            routes.insert(
+                "/.well-known/oauth-authorization-server".to_string(),
+                (
+                    200,
+                    String::new(),
+                    json!({
+                        "authorization_endpoint": format!("{base}/authorize"),
+                        "token_endpoint": format!("{base}/token"),
+                        "registration_endpoint": format!("{base}/register")
+                    })
+                    .to_string(),
+                ),
+            );
+            routes.insert(
+                "/register".to_string(),
+                (
+                    200,
+                    String::new(),
+                    json!({"client_id": "dyn-cid", "client_secret": "dyn-sec"}).to_string(),
+                ),
+            );
+            routes.insert(
+                "/token".to_string(),
+                (
+                    200,
+                    String::new(),
+                    json!({"access_token": "at9", "refresh_token": "rt9", "expires_in": 3600, "scope": "read"})
+                        .to_string(),
+                ),
+            );
+            routes
+        });
+        let base = format!("http://127.0.0.1:{_p}");
+        let cfgs = vec![McpConfig {
+            name: "srv".into(),
+            r#type: Some("remote".into()),
+            command: String::new(),
+            args: vec![],
+            env: BTreeMap::new(),
+            url: Some(format!("{base}/mcp")),
+            headers: BTreeMap::new(),
+            oauth: Some(crate::config::McpOAuthOpt::Off(true)),
+            sampling: None,
+            elicitation: None,
+            logging: None,
+            keepalive: None,
+            timeout: None,
+        }];
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        // phase 1: start the flow — the pkce pair, token endpoint and
+        // redirect persist, so the flow is resumable after a restart
+        let start = rt.block_on(start_auth("srv", &cfgs)).unwrap();
+        let entry = get("srv").unwrap();
+        assert!(entry.code_verifier.is_some(), "verifier persisted");
+        assert_eq!(entry.oauth_state.as_deref(), Some(start.state.as_str()));
+        assert_eq!(
+            entry.redirect_uri.as_deref(),
+            Some(
+                format!("http://127.0.0.1:{CALLBACK_PORT}{CALLBACK_PATH}").as_str()
+            )
+        );
+        assert_eq!(
+            entry.token_endpoint.as_deref(),
+            Some(format!("{base}/token").as_str())
+        );
+        assert!(start.url.contains("client_id=dyn-cid"), "{}", start.url);
+        assert!(start.url.contains(&format!("state={}", start.state)));
+
+        // phase 2 (simulated restart + pasted code): the persisted verifier
+        // completes the exchange
+        let msg = rt
+            .block_on(finish_auth("srv", &cfgs, " manual-code "))
+            .unwrap();
+        assert!(msg.contains("authorized"), "{msg}");
+        let entry = get("srv").unwrap();
+        assert_eq!(entry.tokens.unwrap().access_token, "at9");
+        assert!(entry.code_verifier.is_none(), "flow cleared");
+        assert!(entry.oauth_state.is_none());
+        let body = log
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| r.contains("/token"))
+            .expect("token request captured")
+            .clone();
+        for part in [
+            "grant_type=authorization_code",
+            "code=manual-code",
+            "client_id=dyn-cid",
+            "code_verifier=",
+            "redirect_uri=http%3A%2F%2F127.0.0.1%3A19876",
+        ] {
+            assert!(body.contains(part), "{part} missing in {body}");
+        }
+
+        // no pending flow anymore -> a second resume fails cleanly
+        let err = rt
+            .block_on(finish_auth("srv", &cfgs, "again"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no pending oauth flow"), "{err}");
+
+        remove("srv");
+        set_store_file(None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
