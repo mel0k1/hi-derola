@@ -656,6 +656,32 @@ async fn mcp_prompts(sh: State<'_, Arc<Shared>>) -> Result<Vec<Value>, String> {
 }
 
 #[tauri::command]
+async fn mcp_templates(sh: State<'_, Arc<Shared>>) -> Result<Vec<Value>, String> {
+    let Some(c) = sh.mcp.lock().unwrap().clone() else {
+        return Ok(vec![]);
+    };
+    Ok(c.templates()
+        .await
+        .into_iter()
+        .map(|t| {
+            json!({"server": t.server, "uri_template": t.uri_template, "name": t.name, "description": t.description, "mime": t.mime})
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn mcp_subscriptions(sh: State<'_, Arc<Shared>>) -> Result<Vec<Value>, String> {
+    let Some(c) = sh.mcp.lock().unwrap().clone() else {
+        return Ok(vec![]);
+    };
+    Ok(c.subscriptions()
+        .await
+        .into_iter()
+        .map(|(server, uri)| json!({"server": server, "uri": uri}))
+        .collect())
+}
+
+#[tauri::command]
 async fn mcp_get_prompt(
     sh: State<'_, Arc<Shared>>,
     server: String,
@@ -974,7 +1000,7 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
         .unwrap_or((line, ""));
     match cmd {
         "/help" | "/h" => note(
-            "commands: /file <path> · /model <name> · /models · /plan · /undo · /redo · /init · /compact · /export [path] · /mcpadd <name> <url|command...> · /mcpconnect <name> · /mcpdisconnect <name> · /mcplogout <name> · /mcpres [server] · /mcpread <server> <uri> · /mcpsub <server> <uri> · /mcpunsub <server> <uri> · /mcpprompt [server] <name> [k=v] · /clear · /help\n\
+            "commands: /file <path> · /model <name> · /models · /plan · /undo · /redo · /init · /compact · /export [path] · /mcpadd <name> <url|command...> · /mcpconnect <name> · /mcpdisconnect <name> · /mcplogout <name> · /mcpres [server] · /mcpread <server> <uri> · /mcpsub <server> <uri> · /mcpunsub <server> <uri> · /mcpprompt [server] <name> [k=v] · /mcplog [server] (/mcplog set <server|all> <level>) · /jstools [reload] · /clear · /help\n\
              mutations (write/edit/bash/mcp) ask for confirmation, allow all skips further asks\n\
              custom commands: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)",
         ),
@@ -1111,6 +1137,8 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
                     let _ = tx.send(ApiEvent::Note("mcp is not configured".into()));
                     return;
                 };
+                let subs: std::collections::HashSet<(String, String)> =
+                    c.subscriptions().await.into_iter().collect();
                 let list: Vec<_> = c
                     .resources()
                     .await
@@ -1134,6 +1162,9 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
                         out.push_str(&format!("mcp resources ({}):", list.len()));
                         for r in list {
                             out.push_str(&format!("\n  {}  {}", r.server, r.uri));
+                            if subs.contains(&(r.server.clone(), r.uri.clone())) {
+                                out.push_str(" [subscribed]");
+                            }
                             if !r.name.is_empty() && r.name != r.uri {
                                 out.push_str(&format!(" ({})", r.name));
                             }
@@ -1265,6 +1296,18 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
         "/file" => {
             if arg.is_empty() {
                 note("usage: /file <path>")
+            } else if hi_derola::files::is_image(arg) {
+                // images ride as data urls, same as the file-dialog attach
+                match hi_derola::files::read_image(arg) {
+                    Ok((mime, data)) => {
+                        let content = format!("data:{mime};base64,{data}");
+                        let size = content.len();
+                        sh.attachments.lock().unwrap().push((arg.to_string(), content));
+                        emit_attachments(sh, app);
+                        note(format!("attached {arg} ({mime} image, {size} bytes)"))
+                    }
+                    Err(e) => note(format!("error: {e:#}")),
+                }
             } else {
                 match hi_derola::files::read_attach(arg) {
                     Ok(content) => {
@@ -1275,6 +1318,69 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
                     }
                     Err(e) => note(format!("error: {e:#}")),
                 }
+            }
+        }
+        "/mcplog" => {
+            let parts: Vec<&str> = arg.split_whitespace().collect();
+            if parts.first().copied() == Some("set") {
+                if parts.len() < 3 {
+                    return note("usage: /mcplog set <server|all> <level> — levels: debug info notice warning error critical alert emergency");
+                }
+                let server = if parts[1] == "all" {
+                    String::new()
+                } else {
+                    parts[1].to_string()
+                };
+                let level = parts[2].to_string();
+                let mcp = sh.mcp.lock().unwrap().clone();
+                let tx = sh.tx.clone();
+                tauri::async_runtime::spawn(async move {
+                    let Some(c) = mcp else {
+                        let _ = tx.send(ApiEvent::Note("mcp is not configured".into()));
+                        return;
+                    };
+                    for l in c.set_log_level(&server, &level).await {
+                        let _ = tx.send(ApiEvent::Note(l));
+                    }
+                });
+                note(format!("setting mcp log level {level}..."))
+            } else {
+                // logs() is a sync snapshot of the ring buffer, no spawn needed
+                let filter = parts.first().copied().unwrap_or("");
+                let Some(c) = sh.mcp.lock().unwrap().clone() else {
+                    return note("mcp is not configured");
+                };
+                let list: Vec<mcp::McpLogEntry> = c
+                    .logs()
+                    .into_iter()
+                    .filter(|e| filter.is_empty() || e.server == filter)
+                    .collect();
+                if list.is_empty() {
+                    note("no mcp log messages yet — warning and above pop into the chat")
+                } else {
+                    let tail = &list[list.len().saturating_sub(20)..];
+                    let mut out = format!("mcp logs (last {}):", tail.len());
+                    for e in tail {
+                        let who = if e.logger.is_empty() {
+                            e.server.clone()
+                        } else {
+                            format!("{} {}", e.server, e.logger)
+                        };
+                        out.push_str(&format!("\n  [{}] {}: {}", e.level, who, e.data));
+                    }
+                    note(out)
+                }
+            }
+        }
+        "/jstools" => {
+            if arg.trim() == "reload" {
+                hi_derola::jstools::reload();
+                note(format!(
+                    "JS tools rescanned:\n{}",
+                    hi_derola::jstools::summary()
+                ))
+            } else {
+                note(format!("JS tools:\n{}", hi_derola::jstools::summary()))
             }
         }
         "/undo" | "/u" => note(snapshot::undo().unwrap_or_else(|| "nothing to undo".into())),
@@ -1592,7 +1698,8 @@ pub fn run() -> Result<()> {
         })
         .invoke_handler(tauri::generate_handler![
             init, save, send, confirm, answer, allow_all, stop, list_models, mcp_reconnect,
-            mcp_auth, mcp_resources, mcp_read_resource, mcp_subscribe, mcp_unsubscribe, mcp_prompts, mcp_get_prompt, undo,
+            mcp_auth, mcp_resources, mcp_read_resource, mcp_subscribe, mcp_unsubscribe, mcp_prompts,
+            mcp_templates, mcp_subscriptions, mcp_get_prompt, undo,
             redo, list_sessions, new_session, open_session, delete_session, list_dir, attach_path,
             detach, set_theme, list_project_files, set_plan, task_kill, list_agents
         ])

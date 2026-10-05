@@ -740,6 +740,9 @@ function paletteBuildItems() {
     ["/init", "write AGENTS.md", "init project"],
     ["/export", "export session to markdown", "save transcript"],
     ["/models", "list provider models", "fetch"],
+    ["/mcpres", "list mcp resources", "resources templates"],
+    ["/mcplog", "recent mcp log messages", "logs diagnostics"],
+    ["/jstools", "user JS tools", "list reload sandbox"],
   ];
   for (const [cmd, label, hint] of cmds) {
     items.push({ icon: "command", label, hint, run: () => runCmd(cmd) });
@@ -1533,6 +1536,57 @@ function fillMcpList() {
   box.style.whiteSpace = "";
 }
 
+function closePromptForm(det) {
+  const f = det.querySelector(".prmargs");
+  if (f) f.remove();
+}
+
+/* inline form with one input per prompt argument (required ones starred) */
+function buildPromptArgsForm(p, onRun) {
+  const box = el("div", "prmargs");
+  box.style.cssText = "display:flex;flex-direction:column;gap:2px;align-items:flex-start;margin:2px 0 0 8px";
+  const inputs = [];
+  for (const a of p.arguments) {
+    const row = el("div");
+    row.style.cssText = "display:flex;gap:4px;align-items:center;max-width:100%";
+    const lab = el("label", "", (a.required ? "*" : "") + a.name);
+    lab.title = a.description || a.name;
+    lab.style.cssText = "font-size:11px;flex:none";
+    const inp = el("input");
+    inp.placeholder = a.description || a.name;
+    inp.style.cssText = "font-size:11px;padding:1px 6px;width:240px;flex:1;min-width:0";
+    inp.dataset.argname = a.name;
+    inp.onkeydown = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        run.click();
+      }
+    };
+    row.append(lab, inp);
+    box.append(row);
+    inputs.push(inp);
+  }
+  const btns = el("div");
+  btns.style.cssText = "display:flex;gap:4px";
+  const run = el("button", "ghost", { text: "run" });
+  run.title = "fetch the prompt with these arguments";
+  run.style.cssText = "padding:0 8px;font-size:11px";
+  const cancel = el("button", "ghost", { text: "cancel" });
+  cancel.style.cssText = "padding:0 8px;font-size:11px";
+  run.onclick = () => {
+    const args = {};
+    for (const inp of inputs) {
+      const v = inp.value.trim();
+      if (v) args[inp.dataset.argname] = v;
+    }
+    onRun(args);
+  };
+  cancel.onclick = () => box.remove();
+  btns.append(run, cancel);
+  box.append(btns);
+  return box;
+}
+
 async function toggleMcpRes(m, btn, row) {
   let det = row.nextElementSibling;
   if (det && det.classList.contains("mcpres")) {
@@ -1543,9 +1597,13 @@ async function toggleMcpRes(m, btn, row) {
   btn.textContent = "...";
   const itemStyle = "padding:0 8px;font-size:11px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap";
   try {
-    const [res, prm] = await Promise.all([invoke("mcp_resources"), invoke("mcp_prompts")]);
+    const [res, prm, tpl, subs] = await Promise.all([
+      invoke("mcp_resources"), invoke("mcp_prompts"), invoke("mcp_templates"), invoke("mcp_subscriptions"),
+    ]);
     const rl = res.filter((r) => r.server === m.name);
     const pl = prm.filter((p) => p.server === m.name);
+    const tl = tpl.filter((t) => t.server === m.name);
+    const subSet = new Set(subs.map((s) => s.server + "|" + s.uri));
     det = el("div", "mcpres");
     det.style.cssText = "margin:2px 0 4px 16px;display:flex;flex-direction:column;gap:2px;align-items:flex-start";
     det.append(el("span", "", { text: `resources (${rl.length})` }));
@@ -1573,7 +1631,8 @@ async function toggleMcpRes(m, btn, row) {
           b.disabled = false;
         }
       };
-      const sb = el("button", "ghost", { text: "sub", title: "toggle subscription — resource updates land in the chat" });
+      const sb = el("button", "ghost", { title: "toggle subscription — resource updates land in the chat" });
+      sb.textContent = subSet.has(r.server + "|" + r.uri) ? "unsub" : "sub";
       sb.style.cssText = "padding:0 8px;font-size:11px;flex:none";
       sb.onclick = async () => {
         sb.disabled = true;
@@ -1595,11 +1654,55 @@ async function toggleMcpRes(m, btn, row) {
       det.append(rowEl);
     }
     if (!rl.length) det.append(el("span", "", { text: "  none" }));
+    det.append(el("span", "", { text: `uri templates (${tl.length})` }));
+    for (const t of tl) {
+      const b = el("button", "ghost", {
+        text: t.name || t.uri_template,
+        title: (t.description ? t.description + " — " : "") + t.uri_template + (t.mime ? " (" + t.mime + ")" : "")
+      });
+      b.style.cssText = itemStyle;
+      b.onclick = () => {
+        // templates need real values in place of the braces: drop the read
+        // command into the input so the user fills them in
+        $("input").value = "/mcpread " + t.server + " " + t.uri_template;
+        $("input").focus();
+      };
+      det.append(b);
+    }
+    if (!tl.length) det.append(el("span", "", { text: "  none" }));
     det.append(el("span", "", { text: `prompts (${pl.length})` }));
     for (const p of pl) {
       const b = el("button", "ghost", { text: p.name, title: p.description || p.name });
       b.style.cssText = itemStyle;
       b.onclick = async () => {
+        // prompts that declare arguments open an inline form instead of
+        // silently running with empty args
+        if (p.arguments && p.arguments.length) {
+          if (b.nextElementSibling && b.nextElementSibling.classList.contains("prmargs")) {
+            b.nextElementSibling.remove();
+            return;
+          }
+          closePromptForm(det);
+          const form = buildPromptArgsForm(p, async (args) => {
+            form.remove();
+            b.disabled = true;
+            try {
+              const msgs = await invoke("mcp_get_prompt", { server: p.server, name: p.name, args });
+              const text = msgs
+                .map((x) => (x.role !== "user" ? "[" + x.role + "]\n" : "") + x.text)
+                .join("\n\n");
+              $("input").value = text;
+              $("input").focus();
+            } catch (e) {
+              note(String(e));
+            } finally {
+              b.disabled = false;
+            }
+          });
+          b.after(form);
+          form.querySelector("input").focus();
+          return;
+        }
         b.disabled = true;
         try {
           const msgs = await invoke("mcp_get_prompt", { server: p.server, name: p.name, args: {} });
