@@ -639,10 +639,23 @@ fn shared_for(
     (shared, Arc::new(Mutex::new(BTreeMap::new())))
 }
 
+/// platform handle that lets McpServer::drop take down the whole server
+/// process tree (npx-style wrappers leave grandchildren behind): unix spawns
+/// the server in its own process group (SIGKILLed on drop), windows attaches
+/// it to a kill-on-close job object (terminated when the handle drops)
+struct TreeKill {
+    #[cfg(unix)]
+    pgid: Option<u32>,
+    #[cfg(windows)]
+    _job: Option<crate::winjob::Job>,
+}
+
 struct McpServer {
     shared: Arc<Shared>,
     pending: Pending,
     child: Option<Child>,
+    /// platform tree-kill handle for stdio children (process group / job)
+    tree: Option<TreeKill>,
     /// background tasks (reader/live stream + optional keepalive); aborted on drop
     tasks: Vec<tokio::task::JoinHandle<()>>,
     tools: Vec<McpTool>,
@@ -766,6 +779,12 @@ impl Drop for McpServer {
         }
         if let Some(c) = &mut self.child {
             let _ = c.start_kill();
+        }
+        // the direct child is dead; take everything it spawned with it
+        // (synchronous SIGKILL: a reaper task could never run at shutdown)
+        #[cfg(unix)]
+        if let Some(pgid) = self.tree.as_ref().and_then(|t| t.pgid) {
+            unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGKILL) };
         }
     }
 }
@@ -1799,9 +1818,9 @@ impl McpServer {
             || (cfg.command.is_empty() && cfg.url.is_some());
         let sampling = hooks.sampler.is_some() && cfg.sampling != Some(false);
         let elicitation = hooks.eliciter.is_some() && cfg.elicitation != Some(false);
-        let (shared, pending, child, reader, stderr, pre_tasks, init) = if remote {
+        let (shared, pending, child, reader, stderr, pre_tasks, init, tree) = if remote {
             let (sh, pd, i, tasks) = connect_remote(cfg, hooks, sampling, elicitation).await?;
-            (sh, pd, None, None, None, tasks, Some(i))
+            (sh, pd, None, None, None, tasks, Some(i), None)
         } else {
             let mut cmd = tokio::process::Command::new(&cfg.command);
             cmd.args(&cfg.args).envs(&cfg.env);
@@ -1816,6 +1835,10 @@ impl McpServer {
             {
                 cmd.creation_flags(0x0800_0000);
             }
+            // the server gets its own process group (unix) / job object
+            // (windows) so dropping McpServer can take the whole tree down
+            #[cfg(unix)]
+            cmd.process_group(0);
             let mut child = cmd
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
@@ -1824,6 +1847,12 @@ impl McpServer {
                 .stderr(std::process::Stdio::piped())
                 .spawn()
                 .with_context(|| format!("mcp {}: spawn {}", cfg.name, cfg.command))?;
+            let tree = Some(TreeKill {
+                #[cfg(unix)]
+                pgid: child.id(),
+                #[cfg(windows)]
+                _job: child.raw_handle().and_then(crate::winjob::Job::attach),
+            });
             let stdin = child.stdin.take().context("mcp: no stdin")?;
             let stdout = child.stdout.take().context("mcp: no stdout")?;
             let stderr = child.stderr.take();
@@ -1836,12 +1865,13 @@ impl McpServer {
                     stdin: Arc::new(Mutex::new(stdin)),
                 },
             );
-            (sh, pd, Some(child), Some(tokio::io::BufReader::new(stdout)), stderr, Vec::new(), None)
+            (sh, pd, Some(child), Some(tokio::io::BufReader::new(stdout)), stderr, Vec::new(), None, tree)
         };
         let mut s = Self {
             shared,
             pending,
             child,
+            tree,
             tasks: Vec::new(),
             tools: Vec::new(),
             resources: Vec::new(),
@@ -2599,7 +2629,21 @@ mod tests {
             let result = match method.as_str() {
                 "initialize" => {
                     caps_seen = v["params"]["capabilities"].clone();
-                    if mode == "min" {
+                    if mode == "tree" {
+                        // spawn a grandchild the client must take down with
+                        // the tree; its pid rides the log buffer to the test
+                        if let Ok(gc) =
+                            std::process::Command::new("sleep").arg("30").spawn()
+                        {
+                            let pid = gc.id();
+                            let note = json!({"jsonrpc": "2.0", "method": "notifications/message",
+                                "params": {"level": "info", "logger": "tree",
+                                           "data": format!("gc={pid}")}});
+                            writeln!(out, "{note}").unwrap();
+                            out.flush().unwrap();
+                        }
+                        json!({"capabilities": {}})
+                    } else if mode == "min" {
                         json!({"capabilities": {}})
                     } else {
                         json!({"capabilities": {"tools": {}, "resources": {"subscribe": true}, "prompts": {}, "logging": {}}, "instructions": "always call ping twice"})
@@ -3408,6 +3452,45 @@ mod tests {
             "server must observe notifications/cancelled for the hanging call"
         );
         drop(s);
+    }
+
+    /// /proc state of a pid: false when gone or already a zombie (a zombie
+    /// still answers kill(pid, 0) but is terminated for our purposes)
+    #[cfg(target_os = "linux")]
+    fn proc_alive(pid: u32) -> bool {
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(s) => {
+                let rest = s.rsplit(')').next().unwrap_or("").trim();
+                rest.chars().next() != Some('Z')
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn disconnect_kills_the_server_process_tree() {
+        let hooks = McpHooks::workspace(None);
+        let s = McpServer::connect(&child_cfg("tree"), &hooks).await.unwrap();
+        let pid: u32 = hooks
+            .logs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .find_map(|e| e.data.strip_prefix("gc=").and_then(|p| p.parse().ok()))
+            .expect("grandchild pid reported through the log buffer");
+        assert!(proc_alive(pid), "grandchild must be alive while connected");
+        drop(s);
+        // the whole process group is SIGKILLed with the server
+        let mut dead = false;
+        for _ in 0..40 {
+            if !proc_alive(pid) {
+                dead = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(dead, "grandchild must die together with the server tree");
     }
 
     /// read one http request (headers + content-length body) from a raw stream
