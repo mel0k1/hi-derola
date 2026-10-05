@@ -1010,21 +1010,46 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
                     .into_iter()
                     .filter(|r| filter.is_empty() || r.server == filter)
                     .collect();
-                let msg = if list.is_empty() {
+                let tpls: Vec<_> = c
+                    .templates()
+                    .await
+                    .into_iter()
+                    .filter(|t| filter.is_empty() || t.server == filter)
+                    .collect();
+                let msg = if list.is_empty() && tpls.is_empty() {
                     format!(
                         "no mcp resources{}",
                         if filter.is_empty() { String::new() } else { format!(" on {filter}") }
                     )
                 } else {
-                    let mut out = format!("mcp resources ({}):", list.len());
-                    for r in list {
-                        out.push_str(&format!("\n  {}  {}", r.server, r.uri));
-                        if !r.name.is_empty() && r.name != r.uri {
-                            out.push_str(&format!(" ({})", r.name));
+                    let mut out = String::new();
+                    if !list.is_empty() {
+                        out.push_str(&format!("mcp resources ({}):", list.len()));
+                        for r in list {
+                            out.push_str(&format!("\n  {}  {}", r.server, r.uri));
+                            if !r.name.is_empty() && r.name != r.uri {
+                                out.push_str(&format!(" ({})", r.name));
+                            }
+                            if !r.description.is_empty() {
+                                out.push_str(&format!(" — {}", r.description));
+                            }
                         }
-                        if !r.description.is_empty() {
-                            out.push_str(&format!(" — {}", r.description));
+                    }
+                    if !tpls.is_empty() {
+                        if !out.is_empty() {
+                            out.push_str("\n\n");
                         }
+                        out.push_str(&format!("mcp templates ({}):", tpls.len()));
+                        for t in tpls {
+                            out.push_str(&format!("\n  {}  {}", t.server, t.uri_template));
+                            if !t.name.is_empty() {
+                                out.push_str(&format!(" ({})", t.name));
+                            }
+                            if !t.description.is_empty() {
+                                out.push_str(&format!(" — {}", t.description));
+                            }
+                        }
+                        out.push_str("\n\nfill the braces with real values and read via /mcpread <server> <uri>");
                     }
                     out
                 };

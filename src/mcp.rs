@@ -31,6 +31,15 @@ struct McpResource {
     mime: Option<String>,
 }
 
+/// a resource template: a uri scheme with placeholders the caller fills in
+/// (resources/templates/list)
+struct McpTemplate {
+    uri_template: String,
+    name: String,
+    description: String,
+    mime: Option<String>,
+}
+
 struct McpPromptArg {
     name: String,
     description: String,
@@ -70,6 +79,19 @@ fn parse_resources(items: &[Value]) -> Vec<McpResource> {
             mime: r["mimeType"].as_str().map(|s| s.to_string()),
         })
         .filter(|r| !r.uri.is_empty())
+        .collect()
+}
+
+fn parse_templates(items: &[Value]) -> Vec<McpTemplate> {
+    items
+        .iter()
+        .map(|r| McpTemplate {
+            uri_template: r["uriTemplate"].as_str().unwrap_or("").to_string(),
+            name: r["name"].as_str().unwrap_or("").to_string(),
+            description: r["description"].as_str().unwrap_or("").to_string(),
+            mime: r["mimeType"].as_str().map(|s| s.to_string()),
+        })
+        .filter(|r| !r.uri_template.is_empty())
         .collect()
 }
 
@@ -566,6 +588,8 @@ struct McpServer {
     tasks: Vec<tokio::task::JoinHandle<()>>,
     tools: Vec<McpTool>,
     resources: Vec<McpResource>,
+    /// resource templates ride the resources cache (same list_changed)
+    templates: Vec<McpTemplate>,
     prompts: Vec<McpPrompt>,
     /// server instructions from initialize, surfaced into the system prompt
     instructions: Option<String>,
@@ -654,6 +678,14 @@ impl McpServer {
         match self.list_page("resources/list", "resources").await {
             Ok(items) => self.resources = parse_resources(&items),
             Err(_) => self.shared.stale_resources.store(true, Ordering::Relaxed),
+        }
+        // templates share the resources/list_changed trigger; a failed or
+        // unsupported re-list keeps the old cache
+        if let Ok(items) = self
+            .list_page("resources/templates/list", "resourceTemplates")
+            .await
+        {
+            self.templates = parse_templates(&items);
         }
     }
 
@@ -1433,6 +1465,7 @@ impl McpServer {
             tasks: Vec::new(),
             tools: Vec::new(),
             resources: Vec::new(),
+            templates: Vec::new(),
             prompts: Vec::new(),
             instructions: None,
         };
@@ -1518,6 +1551,14 @@ impl McpServer {
         if has_cap(&caps, "resources") {
             if let Ok(items) = s.list_page("resources/list", "resources").await {
                 s.resources = parse_resources(&items);
+            }
+            // templates are optional too: a method-not-found just means an
+            // older server with plain resources
+            if let Ok(items) = s
+                .list_page("resources/templates/list", "resourceTemplates")
+                .await
+            {
+                s.templates = parse_templates(&items);
             }
         }
         if has_cap(&caps, "prompts") {
@@ -1712,6 +1753,25 @@ impl McpClient {
         out
     }
 
+    /// all resource templates across servers, in connect order
+    pub async fn templates(&self) -> Vec<McpTemplateInfo> {
+        let mut servers = self.servers.lock().await;
+        let mut out = Vec::new();
+        for s in servers.iter_mut() {
+            s.refresh_resources().await;
+            for t in &s.templates {
+                out.push(McpTemplateInfo {
+                    server: s.shared.name.clone(),
+                    uri_template: t.uri_template.clone(),
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    mime: t.mime.clone(),
+                });
+            }
+        }
+        out
+    }
+
     /// read one resource; empty server name auto-resolves when the uri is unique
     pub async fn read_resource(&self, server: &str, uri: &str) -> Result<String> {
         let mut servers = self.servers.lock().await;
@@ -1872,6 +1932,14 @@ impl McpClient {
 pub struct McpResourceInfo {
     pub server: String,
     pub uri: String,
+    pub name: String,
+    pub description: String,
+    pub mime: Option<String>,
+}
+
+pub struct McpTemplateInfo {
+    pub server: String,
+    pub uri_template: String,
     pub name: String,
     pub description: String,
     pub mime: Option<String>,
@@ -2109,6 +2177,9 @@ mod tests {
                         json!({"resources": [{"uri": "mem://stats", "name": "stats", "description": "live stats"}]})
                     }
                 }
+                "resources/templates/list" => json!({"resourceTemplates": [
+                    {"uriTemplate": "file:///{path}", "name": "files", "description": "file by path", "mimeType": "text/plain"}
+                ]}),
                 "resources/read" => json!({"contents": [
                     {"uri": v["params"]["uri"], "mimeType": "text/plain", "text": "hello resource"}
                 ]}),
@@ -2214,6 +2285,10 @@ mod tests {
         assert_eq!(s.resources.len(), 2, "pagination follows nextCursor");
         assert_eq!(s.resources[0].uri, "file:///a.txt");
         assert_eq!(s.resources[1].uri, "mem://stats");
+        assert_eq!(s.templates.len(), 1, "templates listed alongside resources");
+        assert_eq!(s.templates[0].uri_template, "file:///{path}");
+        assert_eq!(s.templates[0].name, "files");
+        assert_eq!(s.templates[0].mime.as_deref(), Some("text/plain"));
         assert_eq!(s.prompts.len(), 1);
         assert_eq!(s.prompts[0].arguments[0].name, "lang");
 
@@ -2263,6 +2338,10 @@ mod tests {
             servers: Mutex::new(vec![s]),
             hooks: hooks.clone(),
         };
+        let tpls = client.templates().await;
+        assert_eq!(tpls.len(), 1, "templates ride the resources cache");
+        assert_eq!(tpls[0].server, "t");
+        assert_eq!(tpls[0].uri_template, "file:///{path}");
         assert_eq!(client.specs().await.len(), 2, "tools refreshed after list_changed");
     }
 
