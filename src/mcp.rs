@@ -12,11 +12,19 @@ use tokio::sync::Mutex;
 
 use crate::config::McpConfig;
 use crate::provider::ToolSpec;
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
-const CALL_TIMEOUT: Duration = Duration::from_secs(120);
+const CATALOG_TIMEOUT: Duration = Duration::from_secs(30);
+const EXECUTION_TIMEOUT: Duration = Duration::from_secs(3600);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_SAMPLING_TOKENS: u32 = 4096;
+/// hard cap on one jsonrpc frame / http body — a runaway server must not
+/// balloon client memory
+const FRAME_CAP: usize = 16 * 1024 * 1024;
+/// stderr kept for crash diagnostics
+const STDERR_TAIL_CHARS: usize = 1000;
 
 struct McpTool {
     name: String,
@@ -211,7 +219,7 @@ pub type ElicitFut = Pin<Box<dyn Future<Output = Result<ElicitOut>> + Send>>;
 pub type Eliciter = Arc<dyn Fn(ElicitReq) -> ElicitFut + Send + Sync>;
 
 /// one notifications/message entry from an mcp server
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct McpLogEntry {
     pub server: String,
     pub level: String,
@@ -235,6 +243,10 @@ pub struct McpHooks {
     pub notes: Option<tokio::sync::mpsc::UnboundedSender<crate::provider::ApiEvent>>,
     /// notifications/message ring buffer shared by every server
     pub logs: McpLogBuf,
+    /// the live chat session id, stamped into tools/call _meta as
+    /// "ai.hi-derola/sessionID" so servers can correlate calls; shared with
+    /// the frontend so a /resume or /clear updates every live server
+    pub session: Arc<RwLock<String>>,
 }
 
 impl McpHooks {
@@ -248,7 +260,21 @@ impl McpHooks {
             eliciter: None,
             notes: None,
             logs: Default::default(),
+            session: Arc::new(RwLock::new(String::new())),
         }
+    }
+
+    pub fn with_session(mut self, session: Arc<RwLock<String>>) -> Self {
+        self.session = session;
+        self
+    }
+
+    /// current chat session id for _meta passthrough (empty = not stamped)
+    pub fn session_id(&self) -> String {
+        self.session
+            .read()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     pub fn with_sampler(mut self, sampler: Sampler) -> Self {
@@ -538,6 +564,9 @@ struct HttpCtx {
     headers: BTreeMap<String, String>,
     oauth: Option<crate::config::McpOAuthCfg>,
     session: std::sync::Mutex<Option<String>>,
+    /// the initialize params used at connect; a session-expiry reconnect
+    /// replays them (404/400 on a request = the server lost the session)
+    init_params: std::sync::Mutex<Option<Value>>,
 }
 
 /// legacy http + server-sent-events transport: one long GET stream carries
@@ -590,20 +619,38 @@ struct Shared {
     /// keepalive state: false while pings keep failing (transition notes fire
     /// only on flips, so a dead server never spams the chat)
     alive: AtomicBool,
-    /// per-server timeout override (timeout = <seconds> in config)
-    timeout: Option<Duration>,
+    /// last 1000 chars of a stdio server's stderr, kept for crash diagnostics
+    /// (the crash message carries it even when logging = false)
+    stderr_tail: std::sync::Mutex<String>,
+    /// how the stdio child died, filled by the exit monitor:
+    /// "exit code 3" / "killed by signal 9"
+    exit: std::sync::Mutex<Option<String>>,
+    /// per-phase timeouts, resolved once at connect (startup bounds the
+    /// connect + initialize window and is kept on McpConfig only):
+    /// general requests / discovery + resource reads / tools/call;
+    /// a legacy `timeout` overrides all three
+    req: Duration,
+    catalog: Duration,
+    execution: Duration,
 }
 
 fn req_to(shared: &Shared) -> Duration {
-    shared.timeout.unwrap_or(REQUEST_TIMEOUT)
+    shared.req
 }
 
-fn call_to(shared: &Shared) -> Duration {
-    shared.timeout.unwrap_or(CALL_TIMEOUT)
+fn cat_to(shared: &Shared) -> Duration {
+    shared.catalog
+}
+
+fn exec_to(shared: &Shared) -> Duration {
+    shared.execution
 }
 
 fn cfg_connect_timeout(cfg: &McpConfig) -> Duration {
-    cfg.timeout.map(Duration::from_secs).unwrap_or(CONNECT_TIMEOUT)
+    cfg.startup_timeout
+        .or(cfg.timeout)
+        .map(Duration::from_secs)
+        .unwrap_or(CONNECT_TIMEOUT)
 }
 
 type Pending = Arc<Mutex<BTreeMap<u64, tokio::sync::oneshot::Sender<Result<Value>>>>>;
@@ -616,6 +663,7 @@ fn shared_for(
     elicitation: bool,
     reply: Reply,
 ) -> (Arc<Shared>, Pending) {
+    let legacy = cfg.timeout.map(Duration::from_secs);
     let shared = Arc::new(Shared {
         name: cfg.name.clone(),
         reply,
@@ -634,7 +682,19 @@ fn shared_for(
         progress: std::sync::Mutex::new(BTreeMap::new()),
         progress_reset: std::sync::Mutex::new(BTreeMap::new()),
         alive: AtomicBool::new(true),
-        timeout: cfg.timeout.map(Duration::from_secs),
+        stderr_tail: std::sync::Mutex::new(String::new()),
+        exit: std::sync::Mutex::new(None),
+        req: legacy.unwrap_or(REQUEST_TIMEOUT),
+        catalog: cfg
+            .catalog_timeout
+            .map(Duration::from_secs)
+            .or(legacy)
+            .unwrap_or(CATALOG_TIMEOUT),
+        execution: cfg
+            .execution_timeout
+            .map(Duration::from_secs)
+            .or(legacy)
+            .unwrap_or(EXECUTION_TIMEOUT),
     });
     (shared, Arc::new(Mutex::new(BTreeMap::new())))
 }
@@ -653,7 +713,8 @@ struct TreeKill {
 struct McpServer {
     shared: Arc<Shared>,
     pending: Pending,
-    child: Option<Child>,
+    /// stdio child, shared with the exit monitor (crash diagnostics)
+    child: Option<Arc<std::sync::Mutex<Child>>>,
     /// platform tree-kill handle for stdio children (process group / job)
     tree: Option<TreeKill>,
     /// background tasks (reader/live stream + optional keepalive); aborted on drop
@@ -701,7 +762,7 @@ impl McpServer {
             if let Some(c) = &cursor {
                 params["cursor"] = json!(c);
             }
-            let res = self.request_t(req_to(&self.shared), method, params).await?;
+            let res = self.request_t(cat_to(&self.shared), method, params).await?;
             if let Some(arr) = res[key].as_array() {
                 out.extend(arr.clone());
             }
@@ -715,7 +776,7 @@ impl McpServer {
 
     async fn read_resource(&self, uri: &str) -> Result<String> {
         let res = self
-            .request_t(call_to(&self.shared), "resources/read", json!({"uri": uri}))
+            .request_t(cat_to(&self.shared), "resources/read", json!({"uri": uri}))
             .await?;
         Ok(render_resource_contents(&res))
     }
@@ -724,7 +785,7 @@ impl McpServer {
     async fn get_prompt(&self, name: &str, args: &Value) -> Result<Vec<(String, String)>> {
         let res = self
             .request_t(
-                call_to(&self.shared),
+                cat_to(&self.shared),
                 "prompts/get",
                 json!({"name": name, "arguments": args}),
             )
@@ -777,8 +838,20 @@ impl Drop for McpServer {
         for t in self.tasks.drain(..) {
             t.abort();
         }
-        if let Some(c) = &mut self.child {
-            let _ = c.start_kill();
+        // streamable http: explicitly end the server-side session (best-effort,
+        // the spec says the server may not support it); a stdio child needs no
+        // goodbye — its whole process tree is taken down below
+        if let Reply::Http(ctx) = &self.shared.reply {
+            let ctx = Arc::clone(ctx);
+            let name = self.shared.name.clone();
+            if let Ok(h) = tokio::runtime::Handle::try_current() {
+                h.spawn(async move { http_terminate(&ctx, &name).await });
+            }
+        }
+        if let Some(c) = &self.child {
+            if let Ok(mut g) = c.lock() {
+                let _ = g.start_kill();
+            }
         }
         // the direct child is dead; take everything it spawned with it
         // (synchronous SIGKILL: a reaper task could never run at shutdown)
@@ -856,7 +929,7 @@ fn handle_notification(shared: &Arc<Shared>, pending: &Pending, method: &str, pa
                 let text = match request(
                     &shared,
                     &pending,
-                    call_to(&shared),
+                    cat_to(&shared),
                     "resources/read",
                     json!({"uri": uri}),
                 )
@@ -1022,7 +1095,7 @@ async fn handle_server_request(shared: &Arc<Shared>, id: Value, method: &str, pa
                                     .unwrap_or(512)
                                     .clamp(1, MAX_SAMPLING_TOKENS as u64) as u32,
                             };
-                            match tokio::time::timeout(call_to(&shared), sampler(req)).await {
+                            match tokio::time::timeout(exec_to(&shared), sampler(req)).await {
                                 Ok(Ok(out)) => Ok(json!({
                                     "role": "assistant",
                                     "model": out.model,
@@ -1049,7 +1122,7 @@ async fn handle_server_request(shared: &Arc<Shared>, id: Value, method: &str, pa
                             message: params["message"].as_str().unwrap_or("").to_string(),
                             schema: params["requestedSchema"].clone(),
                         };
-                        match tokio::time::timeout(call_to(&shared), el(req)).await {
+                        match tokio::time::timeout(exec_to(&shared), el(req)).await {
                             Ok(Ok(out)) => {
                                 let mut r = json!({"action": out.action});
                                 if out.action == "accept" && !out.content.is_null() {
@@ -1140,14 +1213,30 @@ async fn keepalive_loop(shared: Arc<Shared>, pending: Pending, interval: Duratio
 
 /// drain a stdio server's stderr into the shared log buffer as info entries
 /// with logger "stderr" (visible via /mcplog, never pops into the chat);
-/// skipped entirely when logging = false for the server
+/// the last chunk always lands in the crash-diagnostics tail, even when
+/// logging = false for the server
 async fn stderr_drain(err: impl tokio::io::AsyncRead + Unpin, shared: Arc<Shared>) {
     let mut lines = tokio::io::BufReader::new(err).lines();
     loop {
         match lines.next_line().await {
             Ok(Some(line)) => {
                 let line = line.trim_end();
-                if line.is_empty() || !shared.logging_on {
+                if line.is_empty() {
+                    continue;
+                }
+                {
+                    let mut g = shared
+                        .stderr_tail
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    g.push_str(line);
+                    g.push('\n');
+                    let n = g.chars().count();
+                    if n > STDERR_TAIL_CHARS {
+                        *g = g.chars().skip(n - STDERR_TAIL_CHARS).collect();
+                    }
+                }
+                if !shared.logging_on {
                     continue;
                 }
                 let data: String = line.chars().take(2000).collect();
@@ -1171,31 +1260,142 @@ async fn stderr_drain(err: impl tokio::io::AsyncRead + Unpin, shared: Arc<Shared
     }
 }
 
+/// push a process-level diagnostics entry into the log buffer (logger
+/// "process", error level — crashes and dropped frames show up in /mcplog)
+fn push_process_log(shared: &Shared, data: &str) {
+    let mut g = shared
+        .hooks
+        .logs
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    g.push_back(McpLogEntry {
+        server: shared.name.clone(),
+        level: "error".to_string(),
+        logger: "process".to_string(),
+        data: data.to_string(),
+    });
+    while g.len() > MAX_LOGS {
+        g.pop_front();
+    }
+}
+
+/// the error a stdio client gets when the server dies: exit status plus the
+/// last chunk of stderr — usually the only hint why it crashed
+fn crash_message(name: &str, exit: Option<&str>, tail: &str) -> String {
+    let tail = tail.trim();
+    let mut out = match exit {
+        Some(e) => format!("mcp {name}: server closed ({e})"),
+        None => format!("mcp {name}: server closed"),
+    };
+    if !tail.is_empty() {
+        out.push_str("\nstderr (last lines):\n");
+        out.push_str(tail);
+    }
+    out
+}
+
+/// watch the stdio child and record how it died, so the reader's "server
+/// closed" error carries the exit code instead of nothing
+async fn exit_monitor(child: Arc<std::sync::Mutex<Child>>, shared: Arc<Shared>) {
+    loop {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let status = {
+            let mut c = match child.lock() {
+                Ok(g) => g,
+                Err(_) => continue,
+            };
+            match c.try_wait() {
+                Ok(Some(st)) => st,
+                Ok(None) => continue,
+                Err(_) => return,
+            }
+        };
+        #[allow(unused_mut)]
+        let mut info = "terminated".to_string();
+        if let Some(code) = status.code() {
+            info = format!("exit code {code}");
+        }
+        #[cfg(unix)]
+        if info == "terminated" {
+            if let Some(sig) = status.signal() {
+                info = format!("killed by signal {sig}");
+            }
+        }
+        *shared
+            .exit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(info);
+        return;
+    }
+}
+
 /// background reader for stdio servers: routes replies to pending waiters,
-/// answers server -> client requests, tracks notifications
+/// answers server -> client requests, tracks notifications. reads raw chunks
+/// and splits frames on LF with a hard size cap — a runaway server cannot
+/// balloon memory; an oversized frame is dropped and the connection lives on
 async fn stdio_reader(
     mut reader: tokio::io::BufReader<ChildStdout>,
     shared: Arc<Shared>,
     pending: Pending,
 ) {
-    let mut line = String::new();
+    use tokio::io::AsyncReadExt as _;
+    let mut carry: Vec<u8> = Vec::new();
+    // carry[..scanned] holds no newline: only fresh bytes need scanning
+    let mut scanned = 0usize;
+    let mut tmp = [0u8; 8192];
     loop {
-        line.clear();
-        match reader.read_line(&mut line).await {
+        let n = match reader.read(&mut tmp).await {
             Ok(0) | Err(_) => break,
-            Ok(_) => {}
-        }
-        let Ok(v) = serde_json::from_str::<Value>(line.trim()) else {
-            continue;
+            Ok(n) => n,
         };
-        dispatch_incoming(&shared, &pending, v).await;
+        carry.extend_from_slice(&tmp[..n]);
+        while let Some(rel) = carry[scanned..].iter().position(|&b| b == b'\n') {
+            let pos = scanned + rel;
+            let frame: Vec<u8> = carry.drain(..pos + 1).collect();
+            scanned = 0;
+            let frame = &frame[..frame.len() - 1];
+            if frame.len() > FRAME_CAP {
+                push_process_log(&shared, "frame dropped: exceeds the 16 MiB cap");
+                continue;
+            }
+            let Ok(v) = serde_json::from_slice::<Value>(frame) else {
+                continue;
+            };
+            dispatch_incoming(&shared, &pending, v).await;
+        }
+        // the failing scan covered the whole carry: no newline anywhere
+        scanned = carry.len();
+        // a partial frame growing past the cap: drop it, the connection
+        // survives (the rest of the frame parses as junk and is skipped)
+        if carry.len() > FRAME_CAP {
+            carry.clear();
+            scanned = 0;
+            push_process_log(&shared, "frame dropped: exceeds the 16 MiB cap");
+        }
     }
     shared.closed.store(true, Ordering::Relaxed);
+    // give the exit monitor a beat to observe how the child died, then fail
+    // every in-flight request with the exit code and the stderr tail
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let exit = shared
+        .exit
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let tail = shared
+        .stderr_tail
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let msg = crash_message(&shared.name, exit.as_deref(), &tail);
+    if exit.is_some() || !tail.trim().is_empty() {
+        push_process_log(&shared, &msg);
+    }
     let mut p = pending.lock().await;
     let ids: Vec<u64> = p.keys().copied().collect();
     for id in ids {
         if let Some(tx) = p.remove(&id) {
-            let _ = tx.send(Err(anyhow::anyhow!("mcp {}: server closed", shared.name)));
+            let _ = tx.send(Err(anyhow::anyhow!("{msg}")));
         }
     }
 }
@@ -1262,9 +1462,10 @@ async fn connect_remote(
             headers: cfg.headers.clone(),
             oauth: cfg.oauth_cfg(),
             session: std::sync::Mutex::new(None),
+            init_params: std::sync::Mutex::new(Some(init_params.clone())),
         })),
     );
-    let to = req_to(&http_shared);
+    let to = cfg_connect_timeout(cfg);
     let first_err = match request(&http_shared, &pending, to, "initialize", init_params.clone()).await {
         Ok(v) => return Ok((http_shared, pending, v, Vec::new())),
         Err(e) => e,
@@ -1406,6 +1607,11 @@ async fn sse_consume(
             break;
         };
         buf.push_str(&String::from_utf8_lossy(&bytes));
+        if buf.len() > FRAME_CAP {
+            // bound memory against a runaway event stream
+            buf.clear();
+            push_process_log(shared, "sse frame dropped: exceeds the 16 MiB cap");
+        }
         while let Some(pos) = buf.find('\n') {
             let line: String = buf.drain(..pos + 1).collect();
             let line = line.trim_end();
@@ -1469,6 +1675,11 @@ async fn route_sse(
             break;
         };
         buf.push_str(&String::from_utf8_lossy(&bytes));
+        if buf.len() > FRAME_CAP {
+            // bound memory against a runaway event stream
+            buf.clear();
+            push_process_log(shared, "sse frame dropped: exceeds the 16 MiB cap");
+        }
         while let Some(pos) = buf.find('\n') {
             let line: String = buf.drain(..pos + 1).collect();
             let Some(data) = line.trim_end().strip_prefix("data:") else {
@@ -1524,6 +1735,24 @@ async fn http_send(
     }
 }
 
+/// read a response body with a hard size cap (a runaway server must not
+/// balloon client memory)
+async fn capped_body(mut resp: reqwest::Response, name: &str) -> Result<String> {
+    if let Some(len) = resp.content_length() {
+        if len as usize > FRAME_CAP {
+            bail!("mcp {name}: response body exceeds the 16 MiB cap");
+        }
+    }
+    let mut out: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp.chunk().await? {
+        if out.len() + chunk.len() > FRAME_CAP {
+            bail!("mcp {name}: response body exceeds the 16 MiB cap");
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
 /// send a request or notification; for http requests the reply is the
 /// return value, for stdio it arrives via pending
 async fn send_msg(shared: &Arc<Shared>, pending: &Pending, msg: &Value) -> Result<Value> {
@@ -1559,27 +1788,38 @@ async fn http_post(
         return Ok(json!({}));
     };
     let method = body["method"].as_str().unwrap_or("").to_string();
-    let mut resp = None;
-    for attempt in 0..2 {
-        let r = http_send(ctx, name, body, attempt > 0).await?;
-        if r.status().as_u16() == 401 && attempt == 0 {
-            continue;
+    let mut refreshed = false;
+    let mut reinited = false;
+    let resp = loop {
+        let r = http_send(ctx, name, body, refreshed).await?;
+        match r.status().as_u16() {
+            401 if !refreshed => {
+                // one re-auth attempt, then the failure surfaces
+                refreshed = true;
+                continue;
+            }
+            401 => {
+                let hint = if ctx.oauth.is_some() {
+                    format!(" — run /mcpauth {name}")
+                } else {
+                    String::new()
+                };
+                bail!("mcp {name}: 401 unauthorized{hint}");
+            }
+            // session-expiry reconnect: a server that restarted answers 404
+            // (and some answer 400) for its lost session id; replay the
+            // initialize handshake once and retry the original request
+            404 | 400 if !reinited && method != "initialize" && can_reinit(ctx) => {
+                reinited = true;
+                http_reinit(shared, ctx).await?;
+                continue;
+            }
+            _ => break r,
         }
-        if r.status().as_u16() == 401 {
-            let hint = if ctx.oauth.is_some() {
-                format!(" — run /mcpauth {name}")
-            } else {
-                String::new()
-            };
-            bail!("mcp {name}: 401 unauthorized{hint}");
-        }
-        resp = Some(r);
-        break;
-    }
-    let resp = resp.context("mcp: no response")?;
+    };
     let status = resp.status();
     if !status.is_success() {
-        let text = resp.text().await.unwrap_or_default();
+        let text = capped_body(resp, name).await.unwrap_or_default();
         bail!("mcp {name}: {} {}", status, crate::provider::truncate(&text).trim());
     }
     if method == "initialize" {
@@ -1600,11 +1840,75 @@ async fn http_post(
     if ctype.contains("text/event-stream") {
         route_sse(resp, shared, pending, Some(id)).await
     } else {
-        let text = resp.text().await?;
+        let text = capped_body(resp, name).await?;
         let v: Value = serde_json::from_str(&text)
             .map_err(|e| anyhow::anyhow!("mcp {name}: bad json: {e}"))?;
         extract_result(v, name)
     }
+}
+
+/// reinit guard: replaying initialize needs the params captured at connect
+fn can_reinit(ctx: &HttpCtx) -> bool {
+    ctx.init_params.lock().unwrap().is_some()
+}
+
+/// session-expiry reconnect: drop the stale session id, replay initialize +
+/// notifications/initialized (the params captured at connect), so the next
+/// attempt of the original request rides a fresh session
+async fn http_reinit(shared: &Arc<Shared>, ctx: &HttpCtx) -> Result<()> {
+    let name = &shared.name;
+    *ctx.session.lock().unwrap() = None;
+    let params = ctx
+        .init_params
+        .lock()
+        .unwrap()
+        .clone()
+        .context("mcp: no initialize params for reconnect")?;
+    let msg = json!({"jsonrpc": "2.0", "id": shared.next_id.fetch_add(1, Ordering::Relaxed) + 1, "method": "initialize", "params": params});
+    let resp = http_send(ctx, name, &msg, false).await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = capped_body(resp, name).await.unwrap_or_default();
+        bail!("mcp {name}: reinitialize failed: {} {}", status, crate::provider::truncate(&text).trim());
+    }
+    if let Some(sid) = resp
+        .headers()
+        .get("mcp-session-id")
+        .and_then(|v| v.to_str().ok())
+    {
+        *ctx.session.lock().unwrap() = Some(sid.to_string());
+    }
+    let body = capped_body(resp, name).await?;
+    let v: Value = serde_json::from_str(&body)
+        .map_err(|e| anyhow::anyhow!("mcp {name}: bad json in reinitialize: {e}"))?;
+    extract_result(v, name)?;
+    let note = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+    let _ = http_send(ctx, name, &note, false).await;
+    Ok(())
+}
+
+/// explicitly end a streamable http session: DELETE with the session id
+/// (spec: the server may answer 405 when it does not support termination —
+/// that is success for our purposes); best-effort, used on client close
+async fn http_terminate(ctx: &HttpCtx, name: &str) {
+    let Some(sid) = ctx.session.lock().unwrap().clone() else {
+        return;
+    };
+    let token = crate::mcpauth::bearer(name, &ctx.url, ctx.oauth.as_ref(), &ctx.http, false)
+        .await
+        .unwrap_or(None);
+    let mut req = ctx.http.delete(ctx.url.as_str());
+    if let Some(t) = &token {
+        req = req.header("Authorization", format!("Bearer {t}"));
+    }
+    req = req.header("mcp-session-id", sid);
+    for (k, v) in ctx.headers.iter() {
+        req = req.header(k.as_str(), v.as_str());
+    }
+    // best-effort: 405 (termination unsupported) and every other outcome
+    // still ends our side of the session
+    let _ = tokio::time::timeout(Duration::from_secs(5), req.send()).await;
+    *ctx.session.lock().unwrap() = None;
 }
 
 /// notifications/cancelled is sent when a request future is dropped mid-wait
@@ -1856,6 +2160,7 @@ impl McpServer {
             let stdin = child.stdin.take().context("mcp: no stdin")?;
             let stdout = child.stdout.take().context("mcp: no stdout")?;
             let stderr = child.stderr.take();
+            let child = Arc::new(std::sync::Mutex::new(child));
             let (sh, pd) = shared_for(
                 cfg,
                 hooks,
@@ -1881,7 +2186,8 @@ impl McpServer {
         };
         // stderr of a stdio server lands in the shared log buffer (logger
         // "stderr", info level — /mcplog shows it, the chat is not spammed);
-        // always drained so the child never blocks on a full pipe
+        // always drained so the child never blocks on a full pipe; the last
+        // chunk also feeds crash diagnostics
         if let Some(err) = stderr {
             s.tasks
                 .push(tokio::spawn(stderr_drain(err, s.shared.clone())));
@@ -1898,6 +2204,13 @@ impl McpServer {
             s.tasks.push(tokio::spawn(http_live(
                 s.shared.clone(),
                 s.pending.clone(),
+            )));
+        }
+        // how the stdio child died feeds the "server closed" crash message
+        if let Some(c) = &s.child {
+            s.tasks.push(tokio::spawn(exit_monitor(
+                c.clone(),
+                s.shared.clone(),
             )));
         }
         s.tasks.extend(pre_tasks);
@@ -1922,12 +2235,12 @@ impl McpServer {
             client_caps["elicitation"] = json!({});
         }
         // remote transports already answered initialize during transport
-        // selection; stdio sends it here
+        // selection; stdio sends it here (bounded by the startup phase)
         let init = match init {
             Some(v) => v,
             None => {
                 s.request_t(
-                    req_to(&s.shared),
+                    cfg_connect_timeout(cfg),
                     "initialize",
                     json!({
                         "protocolVersion": proto,
@@ -2170,11 +2483,16 @@ impl McpClient {
         let arguments: Value = serde_json::from_str(args).unwrap_or(json!({}));
         // the token lets the server report live progress via notifications/progress
         let token = s.shared.next_id.fetch_add(1, Ordering::Relaxed) + 1;
-        let params = json!({
+        let mut params = json!({
             "name": tool,
             "arguments": arguments,
             "_meta": {"progressToken": token}
         });
+        // session passthrough: servers correlate calls to the chat session
+        let sid = s.shared.hooks.session_id();
+        if !sid.is_empty() {
+            params["_meta"]["ai.hi-derola/sessionID"] = json!(sid);
+        }
         s.shared
             .progress
             .lock()
@@ -2183,7 +2501,7 @@ impl McpClient {
         let res = request_reset(
             &s.shared,
             &s.pending,
-            call_to(&s.shared),
+            exec_to(&s.shared),
             "tools/call",
             params,
             &token.to_string(),
@@ -2629,6 +2947,20 @@ mod tests {
             let result = match method.as_str() {
                 "initialize" => {
                     caps_seen = v["params"]["capabilities"].clone();
+                    if mode == "crash" {
+                        // die with a non-zero code and some stderr noise: the
+                        // client's error must carry both
+                        eprintln!("boom-1: exploded during startup");
+                        eprintln!("boom-2: giving up");
+                        std::process::exit(3);
+                    }
+                    if mode == "jumbo" {
+                        // one oversized frame before the answer: the reader
+                        // must drop it and still process the real reply
+                        let junk = "x".repeat(16 * 1024 * 1024 + 64);
+                        writeln!(out, "{junk}").unwrap();
+                        out.flush().unwrap();
+                    }
                     if mode == "tree" {
                         // spawn a grandchild the client must take down with
                         // the tree; its pid rides the log buffer to the test
@@ -2722,6 +3054,7 @@ mod tests {
                         "elicitation": elicit_reply,
                         "elicit_error": elicit_error,
                         "ping_reply": ping_reply,
+                        "meta": v["params"]["_meta"].clone(),
                     }).to_string()}]})
                     }
                 }
@@ -2810,6 +3143,9 @@ mod tests {
             logging,
             keepalive,
             timeout: None,
+            startup_timeout: None,
+            catalog_timeout: None,
+            execution_timeout: None,
             enabled: None,
             cwd: None,
         }
@@ -2818,6 +3154,12 @@ mod tests {
     fn child_cfg_timeout(mode: &str, timeout: Option<u64>) -> McpConfig {
         let mut c = child_cfg(mode);
         c.timeout = timeout;
+        c
+    }
+
+    fn child_cfg_exec(mode: &str, execution_timeout: Option<u64>) -> McpConfig {
+        let mut c = child_cfg(mode);
+        c.execution_timeout = execution_timeout;
         c
     }
 
@@ -2871,7 +3213,7 @@ mod tests {
 
         let res = s
             .request_t(
-                CALL_TIMEOUT,
+                EXECUTION_TIMEOUT,
                 "tools/call",
                 json!({"name": "ping", "arguments": {}}),
             )
@@ -2919,7 +3261,7 @@ mod tests {
 
         let res = s
             .request_t(
-                CALL_TIMEOUT,
+                EXECUTION_TIMEOUT,
                 "tools/call",
                 json!({"name": "ping", "arguments": {}}),
             )
@@ -2951,7 +3293,7 @@ mod tests {
         let s = McpServer::connect(&cfg, &hooks).await.unwrap();
         let res = s
             .request_t(
-                CALL_TIMEOUT,
+                EXECUTION_TIMEOUT,
                 "tools/call",
                 json!({"name": "ping", "arguments": {}}),
             )
@@ -2982,7 +3324,7 @@ mod tests {
         let s = McpServer::connect(&cfg, &hooks).await.unwrap();
         let res = s
             .request_t(
-                CALL_TIMEOUT,
+                EXECUTION_TIMEOUT,
                 "tools/call",
                 json!({"name": "ping", "arguments": {}}),
             )
@@ -3329,22 +3671,297 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn per_server_timeout_applies() {
+    async fn per_phase_timeouts_apply() {
         let hooks = McpHooks::workspace(None);
         let s = McpServer::connect(&child_cfg_timeout("1", Some(5)), &hooks)
             .await
             .unwrap();
-        assert_eq!(s.shared.timeout, Some(Duration::from_secs(5)));
+        // the legacy blanket timeout overrides every phase
         assert_eq!(req_to(&s.shared), Duration::from_secs(5));
-        assert_eq!(call_to(&s.shared), Duration::from_secs(5));
-        assert_eq!(cfg_connect_timeout(&child_cfg_timeout("1", Some(5))), Duration::from_secs(5));
+        assert_eq!(cat_to(&s.shared), Duration::from_secs(5));
+        assert_eq!(exec_to(&s.shared), Duration::from_secs(5));
+        assert_eq!(
+            cfg_connect_timeout(&child_cfg_timeout("1", Some(5))),
+            Duration::from_secs(5)
+        );
 
-        // defaults stay untouched without the override
+        // per-phase fields win over the legacy override
+        let mut c = child_cfg_timeout("1", Some(5));
+        c.startup_timeout = Some(10);
+        c.catalog_timeout = Some(45);
+        c.execution_timeout = Some(7200);
+        let s = McpServer::connect(&c, &hooks).await.unwrap();
+        assert_eq!(req_to(&s.shared), Duration::from_secs(5));
+        assert_eq!(cat_to(&s.shared), Duration::from_secs(45));
+        assert_eq!(exec_to(&s.shared), Duration::from_secs(7200));
+        assert_eq!(cfg_connect_timeout(&c), Duration::from_secs(10));
+
+        // defaults stay untouched without any override
         let s = McpServer::connect(&child_cfg("1"), &hooks).await.unwrap();
-        assert_eq!(s.shared.timeout, None);
         assert_eq!(req_to(&s.shared), REQUEST_TIMEOUT);
-        assert_eq!(call_to(&s.shared), CALL_TIMEOUT);
+        assert_eq!(cat_to(&s.shared), CATALOG_TIMEOUT);
+        assert_eq!(exec_to(&s.shared), EXECUTION_TIMEOUT);
         assert_eq!(cfg_connect_timeout(&child_cfg("1")), CONNECT_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn execution_timeout_bounds_tools_call() {
+        let hooks = McpHooks::workspace(None);
+        // a silent call hits the execution deadline
+        let (client, _) = connect_all(&[child_cfg_exec("hang", Some(1))], &hooks).await;
+        let client = client.expect("hang server connects");
+        let err = client.call("t__ping", "{}").await.unwrap_err();
+        assert!(
+            err.to_string().contains("timeout"),
+            "silent call must hit the execution timeout: {err:#}"
+        );
+
+        // a progress-reporting call keeps sliding past the deadline
+        let (client, _) = connect_all(&[child_cfg_exec("slow", Some(1))], &hooks).await;
+        let client = client.expect("slow server connects");
+        let out = client.call("t__ping", "{}").await.unwrap();
+        assert_eq!(out, "slow-done");
+    }
+
+    #[tokio::test]
+    async fn crash_message_carries_exit_code_and_stderr_tail() {
+        let hooks = McpHooks::workspace(None);
+        let err = match tokio::time::timeout(
+            Duration::from_secs(20),
+            McpServer::connect(&child_cfg("crash"), &hooks),
+        )
+        .await
+        {
+            Ok(Err(e)) => e,
+            Ok(Ok(_)) => panic!("crashing server must fail the connect"),
+            Err(_) => panic!("connect did not surface the crash in time"),
+        };
+        let msg = format!("{err:#}");
+        assert!(msg.contains("exit code 3"), "exit code in the message: {msg}");
+        assert!(msg.contains("boom-2: giving up"), "stderr tail in the message: {msg}");
+    }
+
+    #[tokio::test]
+    async fn oversized_frames_are_dropped_not_fatal() {
+        let hooks = McpHooks::workspace(None);
+        let (client, logs) = connect_all(&[child_cfg("jumbo")], &hooks).await;
+        assert!(
+            client.is_some(),
+            "a jumbo frame must not kill the connection: {logs:?}"
+        );
+        let client = client.unwrap();
+        assert_eq!(client.specs().await.len(), 1, "real replies still processed");
+        let logs = hooks.logs.lock().unwrap();
+        assert!(
+            logs.iter()
+                .any(|e| e.logger == "process" && e.data.contains("frame dropped")),
+            "frame drop must ride the process log: {logs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn tools_call_stamps_the_session_id() {
+        let hooks = McpHooks::workspace(None);
+        let (client, _) = connect_all(&[child_cfg("1")], &hooks).await;
+        let client = client.expect("server connects");
+        // no session id set: _meta carries only the progress token
+        let out = client.call("t__ping", "{}").await.unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert!(v["meta"]["ai.hi-derola/sessionID"].is_null());
+        assert!(v["meta"]["progressToken"].is_u64());
+
+        // a session id rides every tools/call
+        let session = Arc::new(std::sync::RwLock::new("sess-42".to_string()));
+        let hooks = McpHooks::workspace(None).with_session(session);
+        let (client, _) = connect_all(&[child_cfg("1")], &hooks).await;
+        let client = client.expect("server connects");
+        let out = client.call("t__ping", "{}").await.unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["meta"]["ai.hi-derola/sessionID"], json!("sess-42"));
+    }
+
+    /// fake streamable http server with session semantics: a fresh
+    /// mcp-session-id per initialize, DELETE recorded, GET refused (405);
+    /// with expires = true the second catalog request answers 404 once,
+    /// forcing the client's session-expiry reconnect
+    fn spawn_fake_streamable(expires: bool) -> (u16, Arc<FakeHttpState>) {
+        let state = Arc::new(FakeHttpState {
+            inits: 0.into(),
+            non_init: 0.into(),
+            expires,
+            deletes: std::sync::Mutex::new(Vec::new()),
+        });
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let st = state.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { continue };
+                let st = st.clone();
+                std::thread::spawn(move || {
+                    use std::io::Write as _;
+                    let req = read_http_req(&mut s);
+                    let head = req.lines().next().unwrap_or("").to_string();
+                    let mut parts = head.split_whitespace();
+                    let method = parts.next().unwrap_or("").to_string();
+                    let target = parts.next().unwrap_or("/").to_string();
+                    let path = target.split('?').next().unwrap_or("/").to_string();
+                    let body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+                    let session_hdr = req.lines().find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        if k.trim().eq_ignore_ascii_case("mcp-session-id") {
+                            Some(v.trim().to_string())
+                        } else {
+                            None
+                        }
+                    });
+                    if method == "GET" && path == "/mcp" {
+                        let _ = s.write_all(
+                            b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                        return;
+                    }
+                    if method == "DELETE" && path == "/mcp" {
+                        st.deletes
+                            .lock()
+                            .unwrap()
+                            .push(session_hdr.unwrap_or_default());
+                        let _ = s.write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                        );
+                        return;
+                    }
+                    if method != "POST" || path != "/mcp" {
+                        return;
+                    }
+                    let Ok(v) = serde_json::from_str::<Value>(&body) else {
+                        return;
+                    };
+                    let id = v.get("id").cloned();
+                    let rpc_method = v["method"].as_str().unwrap_or("").to_string();
+                    let answer = |status: &str, extra: &str, body_s: String| {
+                        format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body_s}",
+                            body_s.len()
+                        )
+                    };
+                    if rpc_method == "initialize" {
+                        let n = st.inits.fetch_add(1, Ordering::Relaxed) + 1;
+                        let result = reply_msg(
+                            id.clone(),
+                            json!({"capabilities": {"tools": {}, "resources": {}, "prompts": {}}}),
+                        );
+                        let _ = s.write_all(
+                            answer(
+                                "200 OK",
+                                &format!("mcp-session-id: s{n}\r\n"),
+                                result,
+                            )
+                            .as_bytes(),
+                        );
+                        return;
+                    }
+                    if id.is_none() {
+                        let _ = s.write_all(
+                            b"HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                        return;
+                    }
+                    let n = st.non_init.fetch_add(1, Ordering::Relaxed);
+                    if st.expires && n == 1 {
+                        // the session just "expired": the client must re-init
+                        let _ = s.write_all(
+                            b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 17\r\nConnection: close\r\n\r\nsession not found",
+                        );
+                        return;
+                    }
+                    let result = match rpc_method.as_str() {
+                        "tools/list" => json!({"tools": [
+                            {"name": "ping", "description": "d", "inputSchema": {"type": "object"}}
+                        ]}),
+                        _ => json!({}),
+                    };
+                    let _ = s.write_all(answer("200 OK", "", reply_msg(id, result)).as_bytes());
+                });
+            }
+        });
+        (port, state)
+    }
+
+    fn reply_msg(id: Option<Value>, result: Value) -> String {
+        json!({"jsonrpc": "2.0", "id": id, "result": result}).to_string()
+    }
+
+    struct FakeHttpState {
+        inits: std::sync::atomic::AtomicUsize,
+        non_init: std::sync::atomic::AtomicUsize,
+        expires: bool,
+        deletes: std::sync::Mutex<Vec<String>>,
+    }
+
+    fn remote_cfg(port: u16) -> McpConfig {
+        McpConfig {
+            name: "t".to_string(),
+            r#type: Some("remote".to_string()),
+            command: String::new(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            url: Some(format!("http://127.0.0.1:{port}/mcp")),
+            headers: BTreeMap::new(),
+            oauth: None,
+            sampling: None,
+            elicitation: None,
+            logging: None,
+            keepalive: None,
+            timeout: None,
+            startup_timeout: None,
+            catalog_timeout: None,
+            execution_timeout: None,
+            enabled: None,
+            cwd: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn http_session_expiry_reconnects_and_retries() {
+        let (port, state) = spawn_fake_streamable(true);
+        let (client, logs) = connect_all(&[remote_cfg(port)], &McpHooks::workspace(None)).await;
+        let client = match client {
+            Some(c) => c,
+            None => panic!("the reconnect must rescue the expired session: {logs:?}"),
+        };
+        let specs = client.specs().await;
+        assert_eq!(specs.len(), 1, "the retried tools/list must answer");
+        assert_eq!(
+            state.inits.load(Ordering::Relaxed),
+            2,
+            "initialize replayed exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_terminate_sends_delete_on_drop() {
+        let (port, state) = spawn_fake_streamable(false);
+        let (client, logs) = connect_all(&[remote_cfg(port)], &McpHooks::workspace(None)).await;
+        let client = match client {
+            Some(c) => c,
+            None => panic!("server must connect: {logs:?}"),
+        };
+        drop(client);
+        let mut seen = false;
+        for _ in 0..40 {
+            if !state.deletes.lock().unwrap().is_empty() {
+                seen = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(seen, "DELETE must be sent when the client closes");
+        assert_eq!(
+            state.deletes.lock().unwrap().as_slice(),
+            ["s1"],
+            "DELETE carries the session id"
+        );
     }
 
     #[tokio::test]
@@ -3657,23 +4274,7 @@ mod tests {
             }
         });
 
-        let cfg = McpConfig {
-            name: "t".to_string(),
-            r#type: Some("remote".to_string()),
-            command: String::new(),
-            args: Vec::new(),
-            env: BTreeMap::new(),
-            url: Some(format!("http://127.0.0.1:{port}/mcp")),
-            headers: BTreeMap::new(),
-            oauth: None,
-            sampling: None,
-            elicitation: None,
-            logging: None,
-            enabled: None,
-            cwd: None,
-            keepalive: None,
-            timeout: None,
-        };
+        let cfg = remote_cfg(port);
         let (client, logs) = connect_all(&[cfg], &McpHooks::workspace(None)).await;
         let client = client.expect("sse fallback must connect");
         let specs = client.specs().await;

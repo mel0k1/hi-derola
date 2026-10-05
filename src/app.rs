@@ -78,6 +78,8 @@ pub struct App {
     hist_idx: usize,
     draft: String,
     mcp: McpSlot,
+    /// live session id mirrored for mcp tools/call _meta passthrough
+    mcp_session: Arc<std::sync::RwLock<String>>,
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
@@ -124,12 +126,14 @@ impl App {
         let model = cfg.provider.model.clone();
         let system = crate::base_prompt("in the user's terminal", &model);
         let status = format!("{} · {}", provider.name(), model);
+        let sid = crate::sessions::new_id();
         Self {
             cfg,
             model,
             provider,
             session: Session::new(system),
-            sid: crate::sessions::new_id(),
+            sid: sid.clone(),
+            mcp_session: Arc::new(std::sync::RwLock::new(sid)),
             title: None,
             entries: Vec::new(),
             input: String::new(),
@@ -162,6 +166,7 @@ impl App {
     fn mcp_hooks(&self) -> mcp::McpHooks {
         mcp::McpHooks::workspace(std::env::current_dir().ok())
             .with_notes(self.tx.clone())
+            .with_session(self.mcp_session.clone())
             .with_eliciter(mcp::default_eliciter(self.tx.clone()))
             .with_sampler(mcp::default_sampler(
             self.provider.clone(),
@@ -378,6 +383,9 @@ impl App {
         self.reasoning = None;
         self.attachments.clear();
         self.sid = st.id.clone();
+        if let Ok(mut g) = self.mcp_session.write() {
+            *g = self.sid.clone();
+        }
         self.title = Some(st.title.clone());
         self.session.system = st.system;
         self.session.messages = st.messages.clone();
@@ -909,6 +917,9 @@ impl App {
                 self.queue.lock().unwrap().clear();
                 crate::todo::clear();
                 self.sid = crate::sessions::new_id();
+                if let Ok(mut g) = self.mcp_session.write() {
+                    *g = self.sid.clone();
+                }
                 self.title = None;
                 self.tokens_in = 0;
                 self.tokens_out = 0;

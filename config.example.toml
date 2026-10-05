@@ -56,8 +56,12 @@ stream = true
 # gui dialog; esc/skip cancels, the server gets decline/cancel)
 # keepalive = 30 pings the server every 30s; alive/unresponsive transitions
 # are noted in the chat once per flip (absent or 0 = off)
-# timeout = 300 overrides the per-request timeouts for this server
-# (defaults: 15s requests, 120s tool calls, 30s connect)
+# timeout = 300 legacy blanket override for every phase of this server
+# startup_timeout = 60 limits connect + initialize (default 30s)
+# catalog_timeout = 60 limits tools/resources/prompts discovery, re-lists,
+# resource reads and prompt fetches (default 30s)
+# execution_timeout = 43200 limits tools/call (default 3600s; a call that
+# reports progress keeps sliding, a silent one hits the deadline)
 # enabled = false skips this server at startup; /mcpconnect refuses it
 # until it is re-enabled
 # cwd = "/path/to/dir" sets the working directory of a local (stdio) server

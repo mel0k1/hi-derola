@@ -1442,6 +1442,9 @@ mod tests {
             logging: None,
             keepalive: None,
             timeout: None,
+            startup_timeout: None,
+            catalog_timeout: None,
+            execution_timeout: None,
             enabled: None,
             cwd: None,
         }];

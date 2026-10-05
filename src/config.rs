@@ -224,10 +224,23 @@ pub struct McpConfig {
     /// alive/unresponsive transitions in the chat (absent or 0 = off)
     #[serde(default)]
     pub keepalive: Option<u64>,
-    /// timeout = <seconds>: per-server request timeout (overrides the 15s
-    /// request / 120s tool-call / 30s connect defaults)
+    /// timeout = <seconds>: legacy blanket override — applies to every phase
+    /// (requests, discovery, tool calls, connect) unless the per-phase
+    /// startup_timeout/catalog_timeout/execution_timeout fields are set
     #[serde(default)]
     pub timeout: Option<u64>,
+    /// startup_timeout = <seconds>: connect + initialize window (default 30)
+    #[serde(default)]
+    pub startup_timeout: Option<u64>,
+    /// catalog_timeout = <seconds>: tools/resources/prompts discovery and
+    /// re-lists plus resource reads and prompt fetches (default 30)
+    #[serde(default)]
+    pub catalog_timeout: Option<u64>,
+    /// execution_timeout = <seconds>: tools/call deadline (default 3600;
+    /// a call reporting progress keeps sliding via resetTimeoutOnProgress,
+    /// a silent one hits the deadline)
+    #[serde(default)]
+    pub execution_timeout: Option<u64>,
     /// enabled = false skips this server at startup; /mcpconnect refuses it
     /// until it is re-enabled (absent = enabled)
     #[serde(default)]
@@ -344,6 +357,21 @@ mod tests {
         let cfg: Config = toml::from_str(&raw).unwrap();
         assert_eq!(cfg.mcp[0].timeout, Some(300), "per-server timeout override");
         assert_eq!(cfg.mcp[1].timeout, None, "absent keeps the defaults");
+    }
+
+    #[test]
+    fn mcp_phase_timeouts() {
+        let raw = format!(
+            "{MINIMAL}[[mcp]]\nname = \"a\"\ncommand = \"x\"\nstartup_timeout = 10\ncatalog_timeout = 45\nexecution_timeout = 7200\n\n[[mcp]]\nname = \"b\"\ncommand = \"y\"\n"
+        );
+        let cfg: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(cfg.mcp[0].startup_timeout, Some(10));
+        assert_eq!(cfg.mcp[0].catalog_timeout, Some(45));
+        assert_eq!(cfg.mcp[0].execution_timeout, Some(7200));
+        assert_eq!(cfg.mcp[1].startup_timeout, None, "absent keeps the defaults");
+        // round-trip keeps the fields
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back.mcp[0].execution_timeout, Some(7200));
     }
 
     #[test]

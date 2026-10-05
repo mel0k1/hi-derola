@@ -10,7 +10,7 @@ use hi_derola::todo::Todo;
 use hi_derola::{fmt, lsp, models, snapshot, tools};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::sync::{mpsc, oneshot};
 
@@ -29,6 +29,8 @@ pub struct Shared {
     todos: Mutex<Vec<Todo>>,
     attachments: Mutex<Vec<(String, String)>>,
     mcp: McpSlot,
+    /// live session id mirrored for mcp tools/call _meta passthrough
+    mcp_session: Arc<RwLock<String>>,
     allow_all: Arc<AtomicBool>,
     plan: AtomicBool,
     queue: Arc<Mutex<Vec<String>>>,
@@ -377,6 +379,9 @@ fn start_new(sh: &Shared, app: &AppHandle) {
     sh.titled.store(false, Ordering::Relaxed);
     *sh.changes.lock().unwrap() = Vec::new();
     *sh.sid.lock().unwrap() = sessions::new_id();
+    if let Ok(mut g) = sh.mcp_session.write() {
+        *g = sh.sid.lock().unwrap().clone();
+    }
     *sh.title.lock().unwrap() = String::new();
     *sh.created.lock().unwrap() = 0;
     *sh.tokens.lock().unwrap() = (0, 0);
@@ -539,9 +544,14 @@ async fn stop(sh: State<'_, Arc<Shared>>, app: AppHandle) -> Result<(), String> 
 }
 
 /// client hooks for mcp: workspace root (cwd) + sampling via our provider
-fn mcp_hooks(cfg: &Config, tx: mpsc::UnboundedSender<ApiEvent>) -> hi_derola::mcp::McpHooks {
+fn mcp_hooks(
+    cfg: &Config,
+    tx: mpsc::UnboundedSender<ApiEvent>,
+    session: Arc<RwLock<String>>,
+) -> hi_derola::mcp::McpHooks {
     let hooks = hi_derola::mcp::McpHooks::workspace(std::env::current_dir().ok())
         .with_notes(tx.clone())
+        .with_session(session)
         .with_eliciter(hi_derola::mcp::default_eliciter(tx.clone()));
     match cfg.api_key() {
         Some(k) => match provider::build(&cfg.provider.kind, cfg.provider.base_url.clone(), k) {
@@ -560,7 +570,7 @@ fn mcp_hooks(cfg: &Config, tx: mpsc::UnboundedSender<ApiEvent>) -> hi_derola::mc
 #[tauri::command]
 async fn mcp_reconnect(sh: State<'_, Arc<Shared>>) -> Result<Vec<String>, String> {
     let cfg = sh.cfg.lock().unwrap().clone();
-    let hooks = mcp_hooks(&cfg, sh.tx.clone());
+    let hooks = mcp_hooks(&cfg, sh.tx.clone(), sh.mcp_session.clone());
     let (client, logs) = mcp::connect_all(&cfg.mcp, &hooks).await;
     *sh.mcp.lock().unwrap() = client;
     Ok(logs)
@@ -573,7 +583,7 @@ async fn mcp_auth(
     code: Option<String>,
 ) -> Result<Vec<String>, String> {
     let cfg = sh.cfg.lock().unwrap().clone();
-    let hooks = mcp_hooks(&cfg, sh.tx.clone());
+    let hooks = mcp_hooks(&cfg, sh.tx.clone(), sh.mcp_session.clone());
     let cfgs = cfg.mcp;
     let mut logs = vec![match code {
         // a pasted authorization code resumes the pending flow
@@ -731,6 +741,9 @@ async fn open_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) ->
         messages: st.messages.clone(),
     };
     *sh.sid.lock().unwrap() = st.id.clone();
+    if let Ok(mut g) = sh.mcp_session.write() {
+        *g = st.id.clone();
+    }
     *sh.title.lock().unwrap() = st.title.clone();
     *sh.created.lock().unwrap() = st.created;
     *sh.tokens.lock().unwrap() = (st.tokens_in, st.tokens_out);
@@ -778,6 +791,9 @@ async fn delete_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) 
         sh.titled.store(false, Ordering::Relaxed);
         *sh.changes.lock().unwrap() = Vec::new();
         *sh.sid.lock().unwrap() = sessions::new_id();
+        if let Ok(mut g) = sh.mcp_session.write() {
+            *g = sh.sid.lock().unwrap().clone();
+        }
         *sh.title.lock().unwrap() = String::new();
         *sh.created.lock().unwrap() = 0;
         *sh.tokens.lock().unwrap() = (0, 0);
@@ -1018,7 +1034,7 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
             };
             let hooks = {
                 let c = sh.cfg.lock().unwrap().clone();
-                mcp_hooks(&c, sh.tx.clone())
+                mcp_hooks(&c, sh.tx.clone(), sh.mcp_session.clone())
             };
             let slot = sh.mcp.clone();
             let tx = sh.tx.clone();
@@ -1047,7 +1063,7 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
             let cfgs = sh.cfg.lock().unwrap().mcp.clone();
             let hooks = {
                 let c = sh.cfg.lock().unwrap().clone();
-                mcp_hooks(&c, sh.tx.clone())
+                mcp_hooks(&c, sh.tx.clone(), sh.mcp_session.clone())
             };
             let slot = sh.mcp.clone();
             let tx = sh.tx.clone();
@@ -1535,7 +1551,8 @@ pub fn run() -> Result<()> {
                 cfg: Mutex::new(cfg),
                 provider: Mutex::new(provider),
                 session: Mutex::new(session),
-                sid: Mutex::new(sid),
+                sid: Mutex::new(sid.clone()),
+                mcp_session: Arc::new(RwLock::new(sid)),
                 title: Mutex::new(title),
                 created: Mutex::new(created),
                 confirm: Mutex::new(None),
@@ -1560,7 +1577,7 @@ pub fn run() -> Result<()> {
             }
             let mcp_slot = sh.mcp.clone();
             let mcp_cfg = sh.cfg.lock().unwrap().clone();
-            let mcp_hooks = mcp_hooks(&mcp_cfg, tx.clone());
+            let mcp_hooks = mcp_hooks(&mcp_cfg, tx.clone(), sh.mcp_session.clone());
             let mcp_cfgs = mcp_cfg.mcp;
             tauri::async_runtime::spawn(async move {
                 let (client, logs) = mcp::connect_all(&mcp_cfgs, &mcp_hooks).await;
