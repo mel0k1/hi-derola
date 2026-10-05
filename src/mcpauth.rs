@@ -56,6 +56,10 @@ pub struct Entry {
     /// redirect_uri pinned when the flow started so the exchange matches
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect_uri: Option<String>,
+    /// RFC 8707 resource indicator pinned at flow start; rides the authorize
+    /// url, the token exchange and every refresh
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
 }
 
 struct AuthEndpoints {
@@ -284,7 +288,23 @@ async fn fetch_auth_meta(http: &Client, issuer: &str) -> Result<Value> {
     bail!("no OAuth metadata at issuer {issuer}")
 }
 
-async fn discover(http: &Client, server_url: &str) -> Result<AuthEndpoints> {
+async fn discover(http: &Client, server_url: &str, oauth: Option<&McpOAuthCfg>) -> Result<AuthEndpoints> {
+    // a pinned authorization server metadata url skips every RFC 9728 probe
+    // (no 401 initialize, no protected-resource fetch); the resource is
+    // pinned to the mcp server url itself
+    if let Some(pinned) = oauth.and_then(|o| o.auth_server_metadata_url.as_deref()) {
+        let meta = get_json(http, pinned).await?;
+        let (authorization_endpoint, token_endpoint, registration_endpoint, scope) =
+            endpoints_from_meta(&meta)?;
+        return Ok(AuthEndpoints {
+            authorization_endpoint,
+            token_endpoint,
+            registration_endpoint,
+            scope,
+            resource: Some(server_url.to_string()),
+        });
+    }
+
     let mut resource_meta: Option<Value> = None;
 
     // probe: unauthenticated initialize -> 401 + WWW-Authenticate
@@ -346,6 +366,21 @@ async fn discover(http: &Client, server_url: &str) -> Result<AuthEndpoints> {
     };
 
     let meta = fetch_auth_meta(http, &issuer).await?;
+    let (authorization_endpoint, token_endpoint, registration_endpoint, scope) =
+        endpoints_from_meta(&meta)?;
+    Ok(AuthEndpoints {
+        authorization_endpoint,
+        token_endpoint,
+        registration_endpoint,
+        scope,
+        resource,
+    })
+}
+
+/// the four fields we care about from an authorization server metadata doc
+fn endpoints_from_meta(
+    meta: &Value,
+) -> Result<(String, String, Option<String>, Option<String>)> {
     let scopes = meta["scopes_supported"]
         .as_array()
         .map(|a| {
@@ -355,25 +390,31 @@ async fn discover(http: &Client, server_url: &str) -> Result<AuthEndpoints> {
                 .join(" ")
         })
         .filter(|s| !s.is_empty());
-    Ok(AuthEndpoints {
-        authorization_endpoint: meta["authorization_endpoint"]
+    Ok((
+        meta["authorization_endpoint"]
             .as_str()
             .context("no authorization_endpoint in metadata")?
             .to_string(),
-        token_endpoint: meta["token_endpoint"]
+        meta["token_endpoint"]
             .as_str()
             .context("no token_endpoint in metadata")?
             .to_string(),
-        registration_endpoint: meta["registration_endpoint"].as_str().map(String::from),
-        scope: scopes,
-        resource,
-    })
+        meta["registration_endpoint"].as_str().map(String::from),
+        scopes,
+    ))
 }
 
 // ---- registration / tokens ----
 
-async fn register_client(http: &Client, ep: &str, redirect: &str, secret: bool) -> Result<ClientInfo> {
-    let body = json!({
+async fn register_client(
+    http: &Client,
+    ep: &str,
+    redirect: &str,
+    secret: bool,
+    scope: Option<&str>,
+) -> Result<ClientInfo> {
+    // RFC 7591 client metadata document
+    let mut body = json!({
         "client_name": "Hi!Derola",
         "client_uri": "https://github.com/mel0k1/hi-derola",
         "redirect_uris": [redirect],
@@ -381,6 +422,11 @@ async fn register_client(http: &Client, ep: &str, redirect: &str, secret: bool) 
         "response_types": ["code"],
         "token_endpoint_auth_method": if secret { "client_secret_post" } else { "none" },
     });
+    if let Some(s) = scope {
+        if !s.is_empty() {
+            body["scope"] = json!(s);
+        }
+    }
     let resp = http
         .post(ep)
         .json(&body)
@@ -628,8 +674,10 @@ async fn do_refresh(
     };
     let ep = match get(name).and_then(|e| e.token_endpoint) {
         Some(e) => e,
-        None => discover(http, server_url).await?.token_endpoint,
+        None => discover(http, server_url, oauth).await?.token_endpoint,
     };
+    // the resource indicator pinned at flow start must ride every refresh
+    let resource = get(name).and_then(|e| e.resource);
     let mut form: Vec<(&str, &str)> = vec![
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token),
@@ -638,6 +686,9 @@ async fn do_refresh(
     let secret = client_secret_for(name, oauth);
     if let Some(s) = &secret {
         form.push(("client_secret", s.as_str()));
+    }
+    if let Some(r) = &resource {
+        form.push(("resource", r.as_str()));
     }
     match token_request(http, &ep, &form).await {
         Ok(t) => {
@@ -716,11 +767,12 @@ pub async fn start_auth(name: &str, cfgs: &[McpConfig]) -> Result<AuthStart> {
         .context("mcp: OAuth applies to remote servers only")?;
 
     let http = Client::builder().user_agent("hi-derola").build()?;
-    let ep = discover(&http, &server_url).await?;
+    let ep = discover(&http, &server_url, Some(&oauth)).await?;
     let redirect = oauth
         .redirect_uri
         .clone()
         .unwrap_or_else(|| format!("http://127.0.0.1:{CALLBACK_PORT}{CALLBACK_PATH}"));
+    let scope = oauth.scope.clone().or_else(|| ep.scope.clone());
 
     let client_info = match &oauth.client_id {
         Some(id) => Some(ClientInfo {
@@ -736,8 +788,9 @@ pub async fn start_auth(name: &str, cfgs: &[McpConfig]) -> Result<AuthStart> {
                 }
                 _ => match &ep.registration_endpoint {
                     Some(r) => {
-                        let ci = register_client(&http, r, &redirect, oauth.client_secret.is_some())
-                            .await?;
+                        let ci =
+                            register_client(&http, r, &redirect, oauth.client_secret.is_some(), scope.as_deref())
+                                .await?;
                         mutate(name, Some(&server_url), |e| e.client_info = Some(ci.clone())).ok();
                         Some(ci)
                     }
@@ -757,10 +810,10 @@ pub async fn start_auth(name: &str, cfgs: &[McpConfig]) -> Result<AuthStart> {
         e.oauth_state = Some(state.clone());
         e.token_endpoint = Some(ep.token_endpoint.clone());
         e.redirect_uri = Some(redirect.clone());
+        e.resource = ep.resource.clone();
     })
     .ok();
 
-    let scope = oauth.scope.clone().or_else(|| ep.scope.clone());
     let url = build_auth_url(
         &ep.authorization_endpoint,
         &ci.client_id,
@@ -813,6 +866,9 @@ pub async fn finish_auth(name: &str, cfgs: &[McpConfig], code: &str) -> Result<S
         .client_secret
         .clone()
         .or_else(|| entry.client_info.as_ref().and_then(|c| c.client_secret.clone()));
+    // RFC 8707: the same resource indicator pinned at flow start rides the
+    // token exchange
+    let resource = entry.resource.clone();
 
     let http = Client::builder().user_agent("hi-derola").build()?;
     let mut form: Vec<(&str, &str)> = vec![
@@ -824,6 +880,9 @@ pub async fn finish_auth(name: &str, cfgs: &[McpConfig], code: &str) -> Result<S
     ];
     if let Some(sec) = &client_secret {
         form.push(("client_secret", sec.as_str()));
+    }
+    if let Some(r) = &resource {
+        form.push(("resource", r.as_str()));
     }
     let tokens = token_request(&http, &ep, &form).await?;
     mutate(name, Some(&server_url), |e| {
@@ -1131,7 +1190,7 @@ mod tests {
             .enable_all()
             .build()
             .unwrap();
-        let ep = match rt.block_on(discover(&http, &format!("{base}/mcp"))) {
+        let ep = match rt.block_on(discover(&http, &format!("{base}/mcp"), None)) {
             Ok(e) => e,
             Err(e) => {
                 eprintln!("REQ LOG: {:?}", log.lock().unwrap());
@@ -1193,12 +1252,167 @@ mod tests {
             .build()
             .unwrap();
         let ep = rt
-            .block_on(discover(&http, &format!("{base}/api/mcp")))
+            .block_on(discover(&http, &format!("{base}/api/mcp"), None))
             .unwrap();
         assert_eq!(ep.authorization_endpoint, format!("{base}/as/authorize"));
         assert_eq!(ep.token_endpoint, format!("{base}/as/token"));
         assert_eq!(ep.registration_endpoint, None);
         assert_eq!(ep.scope, None);
+    }
+
+    #[test]
+    fn resource_pinning_and_pinned_metadata() {
+        let _g = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("mcpauth-res-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        set_store_file(Some(dir.join("mcp-auth.json")));
+
+        // pinned metadata: endpoints come straight from the configured url,
+        // no 401 probe and no well-known fetches happen
+        let (_p, log) = spawn_fake_http(|port| {
+            let base = format!("http://127.0.0.1:{port}");
+            let mut routes = BTreeMap::new();
+            routes.insert(
+                "/mcp".to_string(),
+                (
+                    401u16,
+                    format!("WWW-Authenticate: Bearer resource_metadata=\"{base}/rs\"\r\n"),
+                    json!({"error": "unauthorized"}).to_string(),
+                ),
+            );
+            routes.insert(
+                "/as/meta".to_string(),
+                (
+                    200,
+                    String::new(),
+                    json!({
+                        "authorization_endpoint": format!("{base}/as/authorize"),
+                        "token_endpoint": format!("{base}/as/token"),
+                        "registration_endpoint": format!("{base}/as/register"),
+                        "scopes_supported": ["read", "write"]
+                    })
+                    .to_string(),
+                ),
+            );
+            routes.insert(
+                "/token".to_string(),
+                (
+                    200,
+                    String::new(),
+                    json!({"access_token": "at1", "refresh_token": "rt1", "expires_in": 3600})
+                        .to_string(),
+                ),
+            );
+            routes
+        });
+        let base = format!("http://127.0.0.1:{_p}");
+        let http = Client::builder().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let oauth = McpOAuthCfg {
+            client_id: Some("cid".into()),
+            auth_server_metadata_url: Some(format!("{base}/as/meta")),
+            ..Default::default()
+        };
+        let ep = rt
+            .block_on(discover(&http, &format!("{base}/mcp"), Some(&oauth)))
+            .unwrap();
+        assert_eq!(ep.authorization_endpoint, format!("{base}/as/authorize"));
+        assert_eq!(ep.token_endpoint, format!("{base}/as/token"));
+        assert_eq!(ep.scope.as_deref(), Some("read write"));
+        // the resource pins to the mcp server url
+        assert_eq!(ep.resource.as_deref(), Some(format!("{base}/mcp").as_str()));
+        let reqs = log.lock().unwrap();
+        assert!(
+            !reqs.iter().any(|r| r.starts_with("POST /mcp")),
+            "the 401 probe must be skipped: {reqs:?}"
+        );
+        assert!(
+            !reqs.iter().any(|r| r.contains(".well-known")),
+            "well-known discovery must be skipped: {reqs:?}"
+        );
+        drop(reqs);
+
+        // RFC 8707: a stored resource indicator rides every refresh
+        mutate(
+            "t",
+            Some(&format!("{base}/mcp")),
+            |e| {
+                e.tokens = Some(Tokens {
+                    access_token: "old".into(),
+                    refresh_token: Some("rt1".into()),
+                    ..Default::default()
+                });
+                e.token_endpoint = Some(format!("{base}/token"));
+                e.resource = Some("https://rs.example.com/mcp".into());
+            },
+        )
+        .unwrap();
+        let access = rt
+            .block_on(do_refresh(&http, "t", &format!("{base}/mcp"), Some(&oauth), "rt1"))
+            .unwrap();
+        assert_eq!(access, "at1");
+        let reqs = log.lock().unwrap();
+        let refresh = reqs
+            .iter()
+            .find(|r| r.contains("/token"))
+            .expect("refresh request captured");
+        for part in [
+            "grant_type=refresh_token",
+            "refresh_token=rt1",
+            "client_id=cid",
+            "resource=https%3A%2F%2Frs.example.com%2Fmcp",
+        ] {
+            assert!(refresh.contains(part), "{part} missing in {refresh}");
+        }
+    }
+
+    #[test]
+    fn registration_sends_scope_in_metadata_doc() {
+        let (_p, log) = spawn_fake_http(|_| {
+            let mut routes = BTreeMap::new();
+            routes.insert(
+                "/register".to_string(),
+                (
+                    200,
+                    String::new(),
+                    json!({"client_id": "cid-new"}).to_string(),
+                ),
+            );
+            routes
+        });
+        let base = format!("http://127.0.0.1:{_p}");
+        let http = Client::builder().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ci = rt
+            .block_on(register_client(
+                &http,
+                &format!("{base}/register"),
+                "http://127.0.0.1:19876/mcp/oauth/callback",
+                false,
+                Some("read write"),
+            ))
+            .unwrap();
+        assert_eq!(ci.client_id, "cid-new");
+        let reqs = log.lock().unwrap();
+        let reg = reqs
+            .iter()
+            .find(|r| r.contains("/register"))
+            .expect("registration captured");
+        for part in [
+            "\"client_name\":\"Hi!Derola\"",
+            "\"grant_types\":[\"authorization_code\",\"refresh_token\"]",
+            "\"response_types\":[\"code\"]",
+            "\"token_endpoint_auth_method\":\"none\"",
+            "\"scope\":\"read write\"",
+        ] {
+            assert!(reg.contains(part), "{part} missing in {reg}");
+        }
     }
 
     #[test]

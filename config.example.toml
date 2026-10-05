@@ -44,6 +44,9 @@ stream = true
 # [mcp.oauth]
 # client_id = "hi-derola"
 # scope = "read write"
+# auth_server_metadata_url = "https://as.example.com/.well-known/oauth-authorization-server"
+#   (pins the authorization server metadata url — the 401 probe and
+#   protected-resource discovery are skipped entirely)
 # sampling = false refuses sampling/createMessage from this server
 # (by default a sampling request runs a one-shot completion on your
 # provider with the configured model; each request is noted in the chat)

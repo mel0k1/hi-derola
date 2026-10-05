@@ -185,6 +185,10 @@ pub struct McpOAuthCfg {
     pub scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect_uri: Option<String>,
+    /// pin the authorization server metadata url directly — the RFC 9728
+    /// probe (401 + protected-resource discovery) is skipped entirely
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_server_metadata_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -407,10 +411,31 @@ mod tests {
         assert_eq!(c.scope.as_deref(), Some("read write"));
         assert_eq!(c.client_secret, None);
         // oauth = true -> defaults, round-trip keeps the shape
-        let raw2 = format!("{MINIMAL}[[mcp]]\nname = \"b\"\ntype = \"remote\"\nurl = \"u\"\noauth = true\n");
+        let raw2 = format!(
+            "{MINIMAL}[[mcp]]\nname = \"b\"\ntype = \"remote\"\nurl = \"u\"\noauth = true\n"
+        );
         let cfg2: Config = toml::from_str(&raw2).unwrap();
         assert!(cfg2.mcp[0].oauth_cfg().is_some());
         let _ = toml::to_string_pretty(&cfg2).unwrap();
+    }
+
+    #[test]
+    fn mcp_oauth_pinned_metadata_url() {
+        let raw = format!(
+            "{MINIMAL}[[mcp]]\nname = \"a\"\ntype = \"remote\"\nurl = \"https://h/mcp\"\n\n[mcp.oauth]\nclient_id = \"cid\"\nauth_server_metadata_url = \"https://as.example.com/.well-known/oauth-authorization-server\"\n"
+        );
+        let cfg: Config = toml::from_str(&raw).unwrap();
+        let c = cfg.mcp[0].oauth_cfg().expect("table enables oauth");
+        assert_eq!(
+            c.auth_server_metadata_url.as_deref(),
+            Some("https://as.example.com/.well-known/oauth-authorization-server")
+        );
+        // round-trip keeps the field
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(
+            back.mcp[0].oauth_cfg().unwrap().auth_server_metadata_url,
+            c.auth_server_metadata_url
+        );
     }
 }
 
