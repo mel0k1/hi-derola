@@ -57,13 +57,25 @@ fn has_cap(caps: &Value, key: &str) -> bool {
     c.is_object() || c.as_bool() == Some(true)
 }
 
+/// a tool schema the providers can work with: some servers ship a null or
+/// non-object inputSchema (and outputSchema with unresolvable $refs) — coerce
+/// the input schema to a valid object schema; outputSchema is ignored here,
+/// structured results are handled at call time
+fn sane_schema(v: &Value) -> Value {
+    if v.is_object() {
+        v.clone()
+    } else {
+        json!({"type": "object", "properties": {}})
+    }
+}
+
 fn parse_tools(items: &[Value]) -> Vec<McpTool> {
     items
         .iter()
         .map(|t| McpTool {
             name: t["name"].as_str().unwrap_or("").to_string(),
             description: t["description"].as_str().unwrap_or("").to_string(),
-            schema: t["inputSchema"].clone(),
+            schema: sane_schema(&t["inputSchema"]),
         })
         .filter(|t| !t.name.is_empty())
         .collect()
@@ -2197,6 +2209,19 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "ping");
 
+        // outputSchema tolerance: exotic outputSchema ignored, broken
+        // inputSchema coerced to a valid object schema
+        let weird = parse_tools(&[json!({
+            "name": "w",
+            "description": "d",
+            "inputSchema": Value::Null,
+            "outputSchema": {"type": "object", "$ref": "#/definitions/missing"}
+        })]);
+        assert_eq!(weird.len(), 1);
+        assert_eq!(weird[0].schema, json!({"type": "object", "properties": {}}));
+        let missing = parse_tools(&[json!({"name": "noschema"})]);
+        assert_eq!(missing[0].schema, json!({"type": "object", "properties": {}}));
+
         let res = parse_resources(&[
             json!({"uri": "file:///a", "name": "a", "description": "d", "mimeType": "text/plain"}),
             json!({"name": "no uri"}),
@@ -2356,7 +2381,9 @@ mod tests {
                     } else {
                         json!({"tools": [
                             {"name": "ping", "description": "d", "inputSchema": {"type": "object"}},
-                            {"name": "ping2", "description": "added", "inputSchema": {"type": "object"}}
+                            {"name": "ping2", "description": "added", "inputSchema": {"type": "object"}},
+                            {"name": "weird", "description": "d", "inputSchema": null,
+                             "outputSchema": {"type": "object", "properties": {"x": {"$ref": "#/definitions/none"}}}}
                         ]})
                     }
                 }
@@ -2568,7 +2595,16 @@ mod tests {
         assert_eq!(tpls.len(), 1, "templates ride the resources cache");
         assert_eq!(tpls[0].server, "t");
         assert_eq!(tpls[0].uri_template, "file:///{path}");
-        assert_eq!(client.specs().await.len(), 2, "tools refreshed after list_changed");
+        let specs = client.specs().await;
+        assert_eq!(specs.len(), 3, "tools refreshed after list_changed");
+        // outputSchema tolerance: the unresolvable $ref is ignored and the
+        // broken (null) inputSchema is coerced to a valid object schema
+        let weird = specs.iter().find(|t| t.name == "mcp__t__weird").unwrap();
+        assert_eq!(
+            weird.parameters,
+            json!({"type": "object", "properties": {}}),
+            "broken inputSchema coerced, exotic outputSchema ignored"
+        );
     }
 
     #[tokio::test]
