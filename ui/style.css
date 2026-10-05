@@ -368,6 +368,11 @@ pre.diff .ctx { color: var(--dim); }
 }
 .ask-field .f-ctl input:focus, .ask-field .f-ctl select:focus { border-color: var(--accent-dim); }
 .ask-field .f-ctl input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; }
+.ask-field .f-multi { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.ask-field .f-multi label {
+  display: flex; align-items: center; gap: 6px; cursor: pointer;
+  font: 12.5px var(--mono); color: var(--fg);
+}
 .ask-field.f-missing { outline: 1px solid var(--del); border-radius: 8px; }
 .ask-field.f-missing .f-name::after { content: " (required)"; color: var(--del); font-size: 11px; }
 .ask-q input {

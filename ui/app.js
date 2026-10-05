@@ -1193,6 +1193,7 @@ function openAsk(args) {
         ctl.className = "f-ctl";
         const record = (v) => { form.vals[name] = v; row.classList.remove("f-missing"); };
         if (Array.isArray(def.enum) && def.enum.length) {
+          const names = Array.isArray(def.enumNames) ? def.enumNames : [];
           const sel = document.createElement("select");
           const empty = document.createElement("option");
           empty.value = "";
@@ -1201,7 +1202,7 @@ function openAsk(args) {
           def.enum.forEach((v, k) => {
             const o = document.createElement("option");
             o.value = k;
-            o.textContent = v === null ? "null" : String(v);
+            o.textContent = names[k] !== undefined && names[k] !== null ? String(names[k]) : v === null ? "null" : String(v);
             if (def.default !== undefined && String(def.default) === String(v)) o.selected = true;
             sel.appendChild(o);
           });
@@ -1211,6 +1212,26 @@ function openAsk(args) {
           };
           if (def.default !== undefined) record(def.default);
           ctl.appendChild(sel);
+        } else if (def.type === "array" && Array.isArray(def.items && def.items.enum) && def.items.enum.length) {
+          // multiselect: checkbox group, the answer is an array of enum values
+          const inames = Array.isArray(def.items.enumNames) ? def.items.enumNames : [];
+          const box = el("div", "f-multi");
+          const chosen = new Set();
+          def.items.enum.forEach((v, k) => {
+            const lab = document.createElement("label");
+            const cb = document.createElement("input");
+            cb.type = "checkbox";
+            cb.value = k;
+            cb.onchange = () => {
+              cb.checked ? chosen.add(k) : chosen.delete(k);
+              record(def.items.enum.filter((_, j) => chosen.has(j)));
+              row.classList.remove("f-missing");
+            };
+            lab.appendChild(cb);
+            lab.appendChild(document.createTextNode(inames[k] !== undefined && inames[k] !== null ? String(inames[k]) : String(v)));
+            box.appendChild(lab);
+          });
+          ctl.appendChild(box);
         } else if (def.type === "boolean") {
           const box = document.createElement("input");
           box.type = "checkbox";
@@ -1221,6 +1242,8 @@ function openAsk(args) {
           const inp = document.createElement("input");
           inp.type = "number";
           if (def.type === "integer") inp.step = "1";
+          if (def.minimum !== undefined) inp.min = def.minimum;
+          if (def.maximum !== undefined) inp.max = def.maximum;
           if (def.default !== undefined) inp.value = String(def.default);
           inp.placeholder = def.type;
           inp.oninput = () => record(inp.value === "" ? "" : Number(inp.value));
@@ -1228,9 +1251,11 @@ function openAsk(args) {
         } else {
           const inp = document.createElement("input");
           inp.type = "text";
+          if (def.maxLength !== undefined) inp.maxLength = def.maxLength;
+          if (def.format) inp.placeholder = def.format;
           if (def.default !== undefined) inp.value = String(def.default);
           inp.spellcheck = false;
-          inp.placeholder = "value";
+          if (!inp.placeholder) inp.placeholder = "value";
           inp.oninput = () => record(inp.value);
           inp.onkeydown = (e) => {
             if (e.key === "Enter") {
@@ -1314,6 +1339,7 @@ function composeAsk() {
       for (const name of form.names) {
         const v = form.vals[name];
         if (v === undefined || v === "" || v === null) continue;
+        if (Array.isArray(v) && !v.length) continue;
         obj[name] = v;
       }
       if (Object.keys(obj).length) lines.push(JSON.stringify(obj));

@@ -359,8 +359,48 @@ pub fn default_sampler(
     })
 }
 
-/// coerce one user-provided value to the schema property's type; enum picks
-/// work by 1-based index, exact or case-insensitive text match
+/// match one answer value against an enum's choices: 1-based index, exact or
+/// case-insensitive text match on the value or the enumNames display label;
+/// non-text values pass through when they are literally one of the choices
+fn enum_pick(choices: &[Value], names: Option<&Vec<Value>>, val: &Value) -> Option<Value> {
+    let Some(t) = val.as_str().map(|s| s.trim().to_string()) else {
+        return if choices.contains(val) {
+            Some(val.clone())
+        } else {
+            None
+        };
+    };
+    if t.is_empty() {
+        return None;
+    }
+    if let Ok(n) = t.parse::<usize>() {
+        if (1..=choices.len()).contains(&n) {
+            return Some(choices[n - 1].clone());
+        }
+    }
+    if let Some(i) = choices
+        .iter()
+        .position(|v| v.as_str().map(|vs| vs.eq_ignore_ascii_case(&t)).unwrap_or(false))
+    {
+        return Some(choices[i].clone());
+    }
+    if let Some(names) = names {
+        if let Some(i) = names
+            .iter()
+            .position(|v| v.as_str().map(|vs| vs.eq_ignore_ascii_case(&t)).unwrap_or(false))
+        {
+            if i < choices.len() {
+                return Some(choices[i].clone());
+            }
+        }
+    }
+    None
+}
+
+/// coerce one user-provided value to the schema property's type: enums work
+/// by 1-based index, exact or case-insensitive text match (values and
+/// enumNames labels); arrays are multiselects fed as a json array or a
+/// comma-separated list, each item mapped through the items enum
 fn coerce_prop(def: &Value, val: &Value) -> Value {
     let s = val.as_str().map(|s| s.trim().to_string());
     match def["type"].as_str().unwrap_or("") {
@@ -379,17 +419,31 @@ fn coerce_prop(def: &Value, val: &Value) -> Value {
             Some(t) => t.parse::<f64>().map(|n| json!(n)).unwrap_or_else(|_| val.clone()),
             None => val.clone(),
         },
+        "array" => {
+            let raw: Vec<Value> = match val {
+                Value::Array(a) => a.clone(),
+                Value::String(t) => t
+                    .split(',')
+                    .map(|p| json!(p.trim()))
+                    .filter(|v| !v.as_str().unwrap_or("").is_empty())
+                    .collect(),
+                other => vec![other.clone()],
+            };
+            match def["items"]["enum"].as_array() {
+                Some(choices) if !choices.is_empty() => {
+                    let names = def["items"]["enumNames"].as_array();
+                    Value::Array(
+                        raw.iter()
+                            .filter_map(|v| enum_pick(choices, names, v))
+                            .collect(),
+                    )
+                }
+                _ => Value::Array(raw),
+            }
+        }
         _ => match def["enum"].as_array() {
             Some(vals) if !vals.is_empty() => {
-                let t = s.unwrap_or_default();
-                if let Ok(n) = t.parse::<usize>() {
-                    if (1..=vals.len()).contains(&n) {
-                        return vals[n - 1].clone();
-                    }
-                }
-                vals.iter()
-                    .find(|v| v.as_str().map(|vs| vs.eq_ignore_ascii_case(&t)).unwrap_or(false))
-                    .cloned()
+                enum_pick(vals, def["enumNames"].as_array(), val)
                     .unwrap_or_else(|| val.clone())
             }
             _ => val.clone(),
@@ -424,39 +478,103 @@ pub fn elicit_content(schema: &Value, answer: &str) -> Option<Value> {
     None
 }
 
+/// enum option labels for the ask flow: enumNames display names win over the
+/// raw values
+fn enum_option_labels(choices: &[Value], names: Option<&Vec<Value>>) -> Vec<String> {
+    choices
+        .iter()
+        .enumerate()
+        .map(|(k, v)| {
+            names
+                .and_then(|n| n.get(k))
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    v.as_str()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| v.to_string())
+                })
+        })
+        .collect()
+}
+
 /// format an elicitation request as a question-tool payload: returns the
-/// question text and option buttons (only for one-property schemas)
-fn elicit_question(message: &str, schema: &Value) -> (String, Vec<Value>) {
+/// question text, option buttons (only for one-property schemas) and a
+/// multiple flag for array multiselects; hints carry the rich schema details
+/// (title, format, bounds, allowed values)
+fn elicit_question(message: &str, schema: &Value) -> (String, Vec<Value>, bool) {
     let mut hints = Vec::new();
     let mut opts = Vec::new();
+    let mut multiple = false;
     let props = schema["properties"].as_object();
     let prop_count = props.map(|p| p.len()).unwrap_or(0);
     if let Some(props) = props {
         for (name, def) in props {
             let ty = def["type"].as_str().unwrap_or("string");
             let desc = def["description"].as_str().unwrap_or("");
-            let mut h = format!("{name} ({ty})");
-            if !desc.is_empty() {
-                h.push_str(&format!(": {desc}"));
+            let mut h = match def["title"].as_str() {
+                Some(t) if !t.is_empty() => format!("{name} ({ty}, {t})"),
+                _ => format!("{name} ({ty})"),
+            };
+            if ty == "string" {
+                if let Some(f) = def["format"].as_str() {
+                    h.push_str(&format!(" format {f}"));
+                }
+                match (
+                    def["minLength"].as_u64(),
+                    def["maxLength"].as_u64(),
+                ) {
+                    (Some(a), Some(b)) => h.push_str(&format!(" length {a}-{b}")),
+                    (Some(a), None) => h.push_str(&format!(" min length {a}")),
+                    (None, Some(b)) => h.push_str(&format!(" max length {b}")),
+                    _ => {}
+                }
             }
-            hints.push(h);
-            if prop_count == 1 {
-                if let Some(vals) = def["enum"].as_array() {
-                    for v in vals {
-                        let label = v.as_str().map(|s| s.to_string()).unwrap_or(v.to_string());
+            if ty == "integer" || ty == "number" {
+                match (def["minimum"].as_f64(), def["maximum"].as_f64()) {
+                    (Some(a), Some(b)) => h.push_str(&format!(" range {a}..{b}")),
+                    (Some(a), None) => h.push_str(&format!(" min {a}")),
+                    (None, Some(b)) => h.push_str(&format!(" max {b}")),
+                    _ => {}
+                }
+            }
+            if let Some(vals) = def["enum"].as_array() {
+                let labels = enum_option_labels(vals, def["enumNames"].as_array());
+                h.push_str(&format!(" one of: {}", labels.join(" | ")));
+                if prop_count == 1 {
+                    for label in labels {
                         opts.push(json!({"label": label}));
                     }
                 }
             }
+            if let Some(vals) = def["items"]["enum"].as_array() {
+                let labels =
+                    enum_option_labels(vals, def["items"]["enumNames"].as_array());
+                h.push_str(&format!(" pick multiple of: {}", labels.join(" | ")));
+                if prop_count == 1 {
+                    multiple = true;
+                    for label in labels {
+                        opts.push(json!({"label": label}));
+                    }
+                }
+            }
+            if !desc.is_empty() {
+                h.push_str(&format!(": {desc}"));
+            }
+            hints.push(h);
         }
     }
     let mut q = format!("{message}\nfields: {}", hints.join("; "));
     if prop_count == 1 {
-        q.push_str("\nanswer with the value; esc cancels");
+        if multiple {
+            q.push_str("\nanswer with comma-separated values; esc cancels");
+        } else {
+            q.push_str("\nanswer with the value; esc cancels");
+        }
     } else {
         q.push_str("\nanswer as a json object like {\"field\": value}; esc cancels");
     }
-    (q, opts)
+    (q, opts, multiple)
 }
 
 /// default eliciter: surface the server's request through the ask flow (TUI
@@ -468,18 +586,20 @@ pub fn default_eliciter(
     Arc::new(move |req| {
         let notes = notes.clone();
         Box::pin(async move {
-            let (question, opts) = elicit_question(&req.message, &req.schema);
-            let args = json!({
-                "questions": [{
-                    "header": format!("mcp {}", req.server),
-                    "question": question,
-                    "options": opts,
-                    // raw requestedSchema: the gui renders it as a form, the
-                    // tui ignores it and keeps the free-text answer
-                    "schema": req.schema,
-                }]
-            })
-            .to_string();
+            let (question, opts, multiple) = elicit_question(&req.message, &req.schema);
+            let mut q = json!({
+                "header": format!("mcp {}", req.server),
+                "question": question,
+                "options": opts,
+                // raw requestedSchema: the gui renders it as a form, the
+                // tui ignores it and keeps the free-text answer
+                "schema": req.schema,
+            });
+            if multiple {
+                // gui: option buttons toggle instead of single-pick
+                q["multiple"] = json!(true);
+            }
+            let args = json!({"questions": [q]}).to_string();
             let (otx, orx) = tokio::sync::oneshot::channel();
             notes
                 .send(crate::provider::ApiEvent::Ask {
@@ -510,6 +630,99 @@ fn file_uri(dir: &str) -> String {
     } else {
         format!("file:///{p}")
     }
+}
+
+/// url-mode anti-phishing check (spec: the elicitation url must live on the
+/// server's own dns domain): remote servers accept their exact host or a
+/// subdomain of it; stdio servers have no origin, so they must use https
+fn url_mode_origin_ok(origin: Option<&str>, raw: &str) -> bool {
+    let Ok(u) = reqwest::Url::parse(raw) else {
+        return false;
+    };
+    if u.scheme() != "https" && u.scheme() != "http" {
+        return false;
+    }
+    let Some(host) = u.host_str() else {
+        return false;
+    };
+    let host = host.to_lowercase();
+    match origin {
+        Some(srv) => host == srv || host.ends_with(&format!(".{srv}")),
+        // no origin to pin against: only encrypted urls are trustworthy
+        None => u.scheme() == "https",
+    }
+}
+
+/// best-effort system browser open (start/open/xdg-open); failures are
+/// silent because the url is always surfaced as a note regardless
+fn open_in_browser(url: String) {
+    let mut cmd = {
+        #[cfg(target_os = "windows")]
+        {
+            let mut c = std::process::Command::new("cmd");
+            c.args(["/C", "start", "", &url]);
+            c
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let mut c = std::process::Command::new("open");
+            c.arg(&url);
+            c
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let mut c = std::process::Command::new("xdg-open");
+            c.arg(&url);
+            c
+        }
+    };
+    let Ok(child) = cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() else {
+        return;
+    };
+    // reap so the launcher process does not linger as a zombie
+    tokio::task::spawn_blocking(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
+}
+
+/// handle one url-mode elicitation/create: validate the url against the
+/// server origin, surface it as a note + /mcplog entry, open the browser
+/// best-effort, and reply with the empty result (completion arrives later
+/// as notifications/elicitation/complete); untrusted urls decline
+async fn url_mode_elicitation(shared: &Arc<Shared>, params: &Value) -> Value {
+    let url = params["url"].as_str().unwrap_or("").trim().to_string();
+    let id = params["elicitationId"].as_str().unwrap_or("").trim().to_string();
+    let message = params["message"].as_str().unwrap_or("").trim().to_string();
+    if id.is_empty() || url.is_empty() || !url_mode_origin_ok(shared.origin.as_deref(), &url) {
+        push_log_entry(
+            shared,
+            "warning",
+            "elicitation",
+            format!("url elicitation rejected: untrusted or malformed url {url}"),
+        );
+        return json!({"action": "decline"});
+    }
+    push_log_entry(
+        shared,
+        "info",
+        "elicitation",
+        format!("url elicitation {id}: {message} -> {url}"),
+    );
+    if let Some(tx) = &shared.hooks.notes {
+        let _ = tx.send(crate::provider::ApiEvent::Note(format!(
+            "mcp {}: open {url} in your browser{}",
+            shared.name,
+            if message.is_empty() {
+                String::new()
+            } else {
+                format!(" — {message}")
+            }
+        )));
+    }
+    open_in_browser(url);
+    // spec: the empty result means the url was shown, not that the flow ended
+    json!({})
 }
 
 fn root_name(dir: &str) -> String {
@@ -597,6 +810,9 @@ struct Shared {
     sampling: bool,
     /// elicitation/create requests are routed to the hooks' eliciter
     elicitation: bool,
+    /// lowercase host of the server url (remote servers only): url-mode
+    /// elicitation must land on the same host or a subdomain of it
+    origin: Option<String>,
     next_id: AtomicU64,
     stale_tools: AtomicBool,
     stale_resources: AtomicBool,
@@ -664,12 +880,18 @@ fn shared_for(
     reply: Reply,
 ) -> (Arc<Shared>, Pending) {
     let legacy = cfg.timeout.map(Duration::from_secs);
+    let origin = cfg
+        .url
+        .as_deref()
+        .and_then(|u| reqwest::Url::parse(u).ok())
+        .and_then(|u| u.host_str().map(|h| h.to_lowercase()));
     let shared = Arc::new(Shared {
         name: cfg.name.clone(),
         reply,
         hooks: hooks.clone(),
         sampling,
         elicitation,
+        origin,
         next_id: AtomicU64::new(0),
         stale_tools: AtomicBool::new(false),
         stale_resources: AtomicBool::new(false),
@@ -901,6 +1123,24 @@ async fn dispatch_incoming(shared: &Arc<Shared>, pending: &Pending, v: Value) {
     }
 }
 
+/// append one entry to the /mcplog ring buffer (oldest entries evicted)
+fn push_log_entry(shared: &Shared, level: &str, logger: &str, data: String) {
+    let mut g = shared
+        .hooks
+        .logs
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    g.push_back(McpLogEntry {
+        server: shared.name.clone(),
+        level: level.to_string(),
+        logger: logger.to_string(),
+        data,
+    });
+    while g.len() > MAX_LOGS {
+        g.pop_front();
+    }
+}
+
 fn handle_notification(shared: &Arc<Shared>, pending: &Pending, method: &str, params: &Value) {
     match method {
         "notifications/tools/list_changed" => {
@@ -947,6 +1187,22 @@ fn handle_notification(shared: &Arc<Shared>, pending: &Pending, method: &str, pa
                 }
             });
         }
+        "notifications/elicitation/complete" => {
+            // url-mode flow finished server-side; make it visible
+            let id = params["elicitationId"].as_str().unwrap_or("").to_string();
+            push_log_entry(
+                shared,
+                "info",
+                "elicitation",
+                format!("url elicitation {id} complete"),
+            );
+            if let Some(tx) = &shared.hooks.notes {
+                let _ = tx.send(crate::provider::ApiEvent::Note(format!(
+                    "mcp {}: url elicitation {id} complete",
+                    shared.name
+                )));
+            }
+        }
         "notifications/message" => {
             if !shared.logging_on {
                 return;
@@ -957,22 +1213,7 @@ fn handle_notification(shared: &Arc<Shared>, pending: &Pending, method: &str, pa
                 Some(s) => s.to_string(),
                 None => params["data"].to_string(),
             };
-            {
-                let mut g = shared
-                    .hooks
-                    .logs
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                g.push_back(McpLogEntry {
-                    server: shared.name.clone(),
-                    level: level.clone(),
-                    logger: logger.clone(),
-                    data: data.clone(),
-                });
-                while g.len() > MAX_LOGS {
-                    g.pop_front();
-                }
-            }
+            push_log_entry(shared, &level, &logger, data.clone());
             // warning and above also pop into the chat
             if log_level_rank(&level).unwrap_or(1) >= 3 {
                 if let Some(tx) = &shared.hooks.notes {
@@ -1113,6 +1354,11 @@ async fn handle_server_request(shared: &Arc<Shared>, id: Value, method: &str, pa
             // a decline (not an error) keeps the server's flow well-defined
             if !shared.elicitation {
                 Ok(json!({"action": "decline"}))
+            } else if params["mode"].as_str() == Some("url") {
+                // url mode (spec 2026-06-18+): the server wants the user to
+                // finish a flow in the browser; no form input is collected,
+                // so the reply is the empty result once the url is surfaced
+                Ok(url_mode_elicitation(shared, &params).await)
             } else {
                 match &shared.hooks.eliciter {
                     None => Ok(json!({"action": "decline"})),
@@ -2160,7 +2406,10 @@ impl McpServer {
         let remote = cfg.r#type.as_deref() == Some("remote")
             || (cfg.command.is_empty() && cfg.url.is_some());
         let sampling = hooks.sampler.is_some() && cfg.sampling != Some(false);
-        let elicitation = hooks.eliciter.is_some() && cfg.elicitation != Some(false);
+        // url-mode elicitation needs no eliciter hook (no user input is
+        // collected client-side), only the config opt-out kills it; the form
+        // branch still declines when no eliciter is wired
+        let elicitation = cfg.elicitation != Some(false);
         let (shared, pending, child, reader, stderr, pre_tasks, init, tree) = if remote {
             let (sh, pd, i, tasks) = connect_remote(cfg, hooks, sampling, elicitation).await?;
             (sh, pd, None, None, None, tasks, Some(i), None)
@@ -2901,6 +3150,7 @@ mod tests {
         let mut sampling_error = false;
         let mut elicit_reply = Value::Null;
         let mut elicit_error = false;
+        let mut url_reply = Value::Null;
         let mut ping_reply = Value::Null;
         let mut tools_listed = 0u32;
         // the tools/call request "hang" is currently ignoring
@@ -2912,7 +3162,31 @@ mod tests {
             };
             let method = v["method"].as_str().unwrap_or("").to_string();
             if method == "notifications/initialized" {
-                if mode != "min" {
+                if mode == "urlmode" {
+                    // url-mode elicitation: one trusted url, one cross-host
+                    // http url the client must reject, then the completion
+                    // notification for the trusted flow
+                    let reqs = [
+                        json!({"jsonrpc": "2.0", "id": 503, "method": "elicitation/create", "params": {
+                            "mode": "url",
+                            "message": "sign in to continue",
+                            "url": "https://auth.srv.example.com/login?state=1",
+                            "elicitationId": "login-1"
+                        }}),
+                        json!({"jsonrpc": "2.0", "id": 504, "method": "elicitation/create", "params": {
+                            "mode": "url",
+                            "message": "phish",
+                            "url": "http://evil.example.com/hack",
+                            "elicitationId": "evil-1"
+                        }}),
+                        json!({"jsonrpc": "2.0", "method": "notifications/elicitation/complete",
+                            "params": {"elicitationId": "login-1"}}),
+                    ];
+                    for r in reqs {
+                        writeln!(out, "{r}").unwrap();
+                    }
+                    out.flush().unwrap();
+                } else if mode != "min" {
                     // server -> client requests the client must answer
                     let reqs = [
                         json!({"jsonrpc": "2.0", "id": 501, "method": "roots/list", "params": {}}),
@@ -2979,6 +3253,9 @@ mod tests {
                     sampling_reply = v["result"].clone();
                 } else if id == 503 {
                     elicit_reply = v["result"].clone();
+                } else if mode == "urlmode" {
+                    // 504 is the second url-mode elicitation
+                    url_reply = v["result"].clone();
                 } else {
                     ping_reply = v["result"].clone();
                 }
@@ -3093,6 +3370,7 @@ mod tests {
                         "sampling_error": sampling_error,
                         "elicitation": elicit_reply,
                         "elicit_error": elicit_error,
+                        "url_reply": url_reply,
                         "ping_reply": ping_reply,
                         "meta": v["params"]["_meta"].clone(),
                     }).to_string()}]})
@@ -3376,6 +3654,76 @@ mod tests {
         assert_eq!(dump["elicitation"]["action"], "decline");
     }
 
+    /// poll the /mcplog ring buffer until an entry containing `needle` shows
+    /// up (server -> client handling is async), 2s budget
+    async fn wait_for_log(logs: &McpLogBuf, needle: &str) -> bool {
+        for _ in 0..40 {
+            {
+                let g = logs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                if g.iter().any(|e| e.data.contains(needle)) {
+                    return true;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn url_mode_elicitation_validates_and_completes() {
+        // no eliciter hook: url-mode needs none (no form input is collected)
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws")))
+            .with_notes(tx);
+        let logs = hooks.logs.clone();
+        let cfg = child_cfg("urlmode");
+        let s = McpServer::connect(&cfg, &hooks).await.unwrap();
+        let res = s
+            .request_t(
+                EXECUTION_TIMEOUT,
+                "tools/call",
+                json!({"name": "ping", "arguments": {}}),
+            )
+            .await
+            .unwrap();
+        let dump: Value =
+            serde_json::from_str(res["content"][0]["text"].as_str().unwrap()).unwrap();
+        // the trusted https url got the spec reply: the empty result
+        assert_eq!(dump["elicitation"], json!({}), "url-mode replies empty result");
+        // the cross-host http url was declined
+        assert_eq!(dump["url_reply"]["action"], "decline");
+        assert_eq!(dump["caps"]["elicitation"], json!({}), "cap advertised without eliciter");
+        // surfacing, rejection and completion all landed in /mcplog
+        assert!(
+            wait_for_log(&logs, "url elicitation login-1: sign in to continue").await,
+            "surfaced entry missing"
+        );
+        assert!(
+            wait_for_log(&logs, "url elicitation rejected").await,
+            "rejection entry missing"
+        );
+        assert!(
+            wait_for_log(&logs, "url elicitation login-1 complete").await,
+            "completion entry missing"
+        );
+        // the trusted url was surfaced as a note with the url in it
+        let mut saw_note = false;
+        for _ in 0..40 {
+            while let Some(ev) = rx.try_recv().ok() {
+                if let crate::provider::ApiEvent::Note(t) = ev {
+                    if t.contains("https://auth.srv.example.com/login") {
+                        saw_note = true;
+                    }
+                }
+            }
+            if saw_note {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(saw_note, "url note missing");
+    }
+
     #[test]
     fn elicit_answer_parsing() {
         let schema = json!({"type": "object", "properties": {
@@ -3406,10 +3754,118 @@ mod tests {
             json!({"c": "green"}),
             "enum pick by index"
         );
+        // enumNames: the display label maps back to the raw enum value
+        let named = json!({"type": "object", "properties": {"c": {
+            "enum": ["red", "green"], "enumNames": ["Red Team", "Green Team"]
+        }}});
+        assert_eq!(
+            elicit_content(&named, "green team").unwrap(),
+            json!({"c": "green"}),
+            "enumNames label match"
+        );
+        assert_eq!(
+            elicit_content(&named, "Red Team").unwrap(),
+            json!({"c": "red"}),
+            "enumNames label case-insensitive"
+        );
+        assert_eq!(
+            elicit_content(&named, "2").unwrap(),
+            json!({"c": "green"}),
+            "index still works with enumNames"
+        );
+        // multiselect: comma-separated text maps through items.enum(+Names)
+        let multi = json!({"type": "object", "properties": {"tags": {
+            "type": "array",
+            "items": {"enum": ["a", "b", "c"], "enumNames": ["Aa", "Bb", "Cc"]}
+        }}});
+        assert_eq!(
+            elicit_content(&multi, "Aa, c").unwrap(),
+            json!({"tags": ["a", "c"]}),
+            "multiselect by label and value"
+        );
+        assert_eq!(
+            elicit_content(&multi, "1, 3").unwrap(),
+            json!({"tags": ["a", "c"]}),
+            "multiselect by index"
+        );
+        assert_eq!(
+            elicit_content(&multi, "a, junk").unwrap(),
+            json!({"tags": ["a"]}),
+            "multiselect drops unmatched items"
+        );
+        // multiselect: a json array answer coerces each element
+        let schema2 = json!({"type": "object", "properties": {
+            "tags": {"type": "array", "items": {"enum": ["a", "b", "c"]}}
+        }});
+        assert_eq!(
+            elicit_content(&schema2, r#"{"tags": ["a", "C"]}"#).unwrap(),
+            json!({"tags": ["a", "c"]}),
+            "json array answer coerced"
+        );
+        // array without items.enum keeps the raw split values
+        let free = json!({"type": "object", "properties": {
+            "tags": {"type": "array", "items": {"type": "string"}}
+        }});
+        assert_eq!(
+            elicit_content(&free, "x, y").unwrap(),
+            json!({"tags": ["x", "y"]}),
+            "free-form array splits on commas"
+        );
+        // non-string enums: exact json values pass through
+        let nums = json!({"type": "object", "properties": {"n": {"enum": [1, 2, 3]}}});
+        assert_eq!(
+            elicit_content(&nums, r#"{"n": 2}"#).unwrap(),
+            json!({"n": 2}),
+            "number enum exact value"
+        );
+        assert_eq!(
+            elicit_content(&nums, r#"{"n": 5}"#).unwrap(),
+            json!({"n": 5}),
+            "number enum passthrough keeps the answer"
+        );
         assert!(elicit_content(&schema, "").is_none(), "empty cancels");
         assert!(elicit_content(&schema, "  ").is_none(), "blank cancels");
         assert!(elicit_content(&schema, "green").is_none(), "multi-property raw text cancels");
         assert!(elicit_content(&json!({}), "x").is_none(), "no properties cancels");
+    }
+
+    #[test]
+    fn elicit_question_rich_hints() {
+        let schema = json!({"type": "object", "properties": {
+            "age": {"type": "integer", "title": "Age", "minimum": 1, "maximum": 120},
+            "email": {"type": "string", "format": "email", "minLength": 3, "maxLength": 254},
+            "role": {"type": "string", "enum": ["admin", "dev"], "enumNames": ["Admin", "Developer"]}
+        }});
+        let (q, opts, multiple) = elicit_question("fill it", &schema);
+        assert!(q.contains("age (integer, Age)"), "title in hint: {q}");
+        assert!(q.contains("range 1..120"), "bounds in hint: {q}");
+        assert!(q.contains("format email"), "format in hint: {q}");
+        assert!(q.contains("length 3-254"), "string bounds in hint: {q}");
+        assert!(q.contains("one of: Admin | Developer"), "enumNames in hint: {q}");
+        assert!(opts.is_empty(), "multi-property schemas get no buttons");
+        assert!(!multiple);
+
+        // single array property: multiselect buttons with display labels
+        let multi = json!({"type": "object", "properties": {"tags": {
+            "type": "array", "items": {"enum": ["a", "b"], "enumNames": ["Aa", "Bb"]}
+        }}});
+        let (q, opts, multiple) = elicit_question("pick", &multi);
+        assert!(multiple, "array property flags multiple");
+        assert!(q.contains("pick multiple of: Aa | Bb"), "multiselect hint: {q}");
+        assert_eq!(q.contains("comma-separated"), true);
+        assert_eq!(
+            opts,
+            vec![json!({"label": "Aa"}), json!({"label": "Bb"})],
+            "buttons carry display labels"
+        );
+
+        // single scalar enum property: single-pick buttons, plain hint
+        let single = json!({"type": "object", "properties": {"c": {"enum": ["red", "green"]}}});
+        let (q, opts, multiple) = elicit_question("pick", &single);
+        assert!(!multiple);
+        assert!(q.contains("one of: red | green"));
+        assert_eq!(q.contains("comma-separated"), false);
+        assert_eq!(opts, vec![json!({"label": "red"}), json!({"label": "green"})]);
     }
 
     #[tokio::test]
