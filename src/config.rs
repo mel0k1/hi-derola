@@ -228,6 +228,13 @@ pub struct McpConfig {
     /// request / 120s tool-call / 30s connect defaults)
     #[serde(default)]
     pub timeout: Option<u64>,
+    /// enabled = false skips this server at startup; /mcpconnect refuses it
+    /// until it is re-enabled (absent = enabled)
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// working directory for a local (stdio) server
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 impl McpConfig {
@@ -337,6 +344,22 @@ mod tests {
         let cfg: Config = toml::from_str(&raw).unwrap();
         assert_eq!(cfg.mcp[0].timeout, Some(300), "per-server timeout override");
         assert_eq!(cfg.mcp[1].timeout, None, "absent keeps the defaults");
+    }
+
+    #[test]
+    fn mcp_enabled_and_cwd_options() {
+        let raw = format!(
+            "{MINIMAL}[[mcp]]\nname = \"a\"\ncommand = \"x\"\nenabled = false\ncwd = \"/tmp/ws\"\n\n[[mcp]]\nname = \"b\"\ncommand = \"y\"\n"
+        );
+        let cfg: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(cfg.mcp[0].enabled, Some(false));
+        assert_eq!(cfg.mcp[0].cwd.as_deref(), Some("/tmp/ws"));
+        assert_eq!(cfg.mcp[1].enabled, None, "absent keeps the server enabled");
+        assert_eq!(cfg.mcp[1].cwd, None);
+        // round-trip keeps both fields
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back.mcp[0].enabled, Some(false));
+        assert_eq!(back.mcp[0].cwd.as_deref(), Some("/tmp/ws"));
     }
 
     #[test]

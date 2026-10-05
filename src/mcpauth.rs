@@ -1385,6 +1385,8 @@ mod tests {
             logging: None,
             keepalive: None,
             timeout: None,
+            enabled: None,
+            cwd: None,
         }];
 
         let rt = tokio::runtime::Builder::new_current_thread()

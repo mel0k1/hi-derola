@@ -1662,6 +1662,13 @@ impl McpServer {
         } else {
             let mut cmd = tokio::process::Command::new(&cfg.command);
             cmd.args(&cfg.args).envs(&cfg.env);
+            // cwd for local servers: validated up front so a typo fails with
+            // a clear message instead of a generic spawn error
+            if let Some(wd) = &cfg.cwd {
+                let p = std::path::Path::new(wd);
+                anyhow::ensure!(p.is_dir(), "mcp {}: cwd not found: {wd}", cfg.name);
+                cmd.current_dir(p);
+            }
             #[cfg(windows)]
             {
                 cmd.creation_flags(0x0800_0000);
@@ -1822,6 +1829,10 @@ pub async fn connect_all(
     let mut servers = Vec::new();
     let mut logs = Vec::new();
     for c in cfgs {
+        if c.enabled == Some(false) {
+            logs.push(format!("mcp {}: disabled (enabled = false)", c.name));
+            continue;
+        }
         let to = cfg_connect_timeout(c);
         match tokio::time::timeout(to, McpServer::connect(c, hooks)).await {
             Ok(Ok(s)) => {
@@ -1852,6 +1863,11 @@ pub async fn reconnect_one(
     let Some(cfg) = cfgs.iter().find(|c| c.name == name) else {
         return vec![format!("mcp {name}: not in config")];
     };
+    if cfg.enabled == Some(false) {
+        return vec![format!(
+            "mcp {name}: disabled (enabled = false in config) — re-enable it to connect"
+        )];
+    }
     let existing = slot.lock().unwrap().clone();
     if let Some(client) = existing {
         let mut logs = Vec::new();
@@ -2565,6 +2581,8 @@ mod tests {
             logging,
             keepalive,
             timeout: None,
+            enabled: None,
+            cwd: None,
         }
     }
 
@@ -3100,6 +3118,52 @@ mod tests {
         assert_eq!(cfg_connect_timeout(&child_cfg("1")), CONNECT_TIMEOUT);
     }
 
+    #[tokio::test]
+    async fn enabled_false_skips_startup_connect() {
+        let hooks = McpHooks::workspace(None);
+        let mut off = child_cfg("1");
+        off.name = "off".into();
+        off.enabled = Some(false);
+        let on = child_cfg("1");
+        let (client, logs) = connect_all(&[off, on], &hooks).await;
+        assert!(
+            logs.iter().any(|l| l.contains("mcp off: disabled (enabled = false)")),
+            "disabled server is logged: {logs:?}"
+        );
+        let client = client.expect("the enabled server still connects");
+        let specs = client.specs().await;
+        assert!(
+            specs.iter().all(|s| !s.name.starts_with("mcp__off__")),
+            "disabled server exposes no tools"
+        );
+
+        // /mcpconnect refuses a disabled server even with a live client
+        let slot: McpSlot = std::sync::Arc::new(std::sync::Mutex::new(Some(client)));
+        let mut off2 = child_cfg("1");
+        off2.name = "off".into();
+        off2.enabled = Some(false);
+        let logs = reconnect_one(&slot, &[off2.clone()], &hooks, "off").await;
+        assert!(
+            logs[0].contains("disabled"),
+            "/mcpconnect on a disabled server is refused: {logs:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cwd_option_spawns_and_validates() {
+        let hooks = McpHooks::workspace(None);
+        // a real dir: connect works
+        let mut cfg = child_cfg("1");
+        cfg.cwd = Some(std::env::temp_dir().display().to_string());
+        McpServer::connect(&cfg, &hooks).await.expect("valid cwd connects");
+        // a bogus dir: clear error before the spawn
+        cfg.cwd = Some("/nonexistent-hi-derola-dir/xyz".into());
+        match McpServer::connect(&cfg, &hooks).await {
+            Ok(_) => panic!("bogus cwd must fail"),
+            Err(e) => assert!(e.to_string().contains("cwd not found"), "got: {e:#}"),
+        }
+    }
+
     /// read one http request (headers + content-length body) from a raw stream
     fn read_http_req(s: &mut std::net::TcpStream) -> String {
         use std::io::Read as _;
@@ -3276,6 +3340,8 @@ mod tests {
             sampling: None,
             elicitation: None,
             logging: None,
+            enabled: None,
+            cwd: None,
             keepalive: None,
             timeout: None,
         };
