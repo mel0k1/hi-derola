@@ -158,6 +158,24 @@ pub struct SampleOut {
 pub type SampleFut = Pin<Box<dyn Future<Output = Result<SampleOut>> + Send>>;
 pub type Sampler = Arc<dyn Fn(SampleReq) -> SampleFut + Send + Sync>;
 
+/// one elicitation/create request from a server: it wants structured input
+/// from the user, described by a flat schema (primitive or enum properties)
+pub struct ElicitReq {
+    pub server: String,
+    pub message: String,
+    /// requestedSchema from the server
+    pub schema: Value,
+}
+
+pub struct ElicitOut {
+    /// accept | decline | cancel
+    pub action: String,
+    pub content: Value,
+}
+
+pub type ElicitFut = Pin<Box<dyn Future<Output = Result<ElicitOut>> + Send>>;
+pub type Eliciter = Arc<dyn Fn(ElicitReq) -> ElicitFut + Send + Sync>;
+
 /// one notifications/message entry from an mcp server
 #[derive(Clone)]
 pub struct McpLogEntry {
@@ -179,6 +197,7 @@ pub type McpLogBuf = Arc<std::sync::Mutex<VecDeque<McpLogEntry>>>;
 pub struct McpHooks {
     pub roots: Arc<RwLock<Vec<String>>>,
     pub sampler: Option<Sampler>,
+    pub eliciter: Option<Eliciter>,
     pub notes: Option<tokio::sync::mpsc::UnboundedSender<crate::provider::ApiEvent>>,
     /// notifications/message ring buffer shared by every server
     pub logs: McpLogBuf,
@@ -192,6 +211,7 @@ impl McpHooks {
         Self {
             roots: Arc::new(RwLock::new(if s.is_empty() { Vec::new() } else { vec![s] })),
             sampler: None,
+            eliciter: None,
             notes: None,
             logs: Default::default(),
         }
@@ -199,6 +219,11 @@ impl McpHooks {
 
     pub fn with_sampler(mut self, sampler: Sampler) -> Self {
         self.sampler = Some(sampler);
+        self
+    }
+
+    pub fn with_eliciter(mut self, eliciter: Eliciter) -> Self {
+        self.eliciter = Some(eliciter);
         self
     }
 
@@ -274,6 +299,147 @@ pub fn default_sampler(
     })
 }
 
+/// coerce one user-provided value to the schema property's type; enum picks
+/// work by 1-based index, exact or case-insensitive text match
+fn coerce_prop(def: &Value, val: &Value) -> Value {
+    let s = val.as_str().map(|s| s.trim().to_string());
+    match def["type"].as_str().unwrap_or("") {
+        "boolean" => match &s {
+            Some(t) => json!(matches!(
+                t.to_lowercase().as_str(),
+                "y" | "yes" | "true" | "1" | "on"
+            )),
+            None => val.clone(),
+        },
+        "integer" => match &s {
+            Some(t) => t.parse::<i64>().map(|n| json!(n)).unwrap_or_else(|_| val.clone()),
+            None => val.clone(),
+        },
+        "number" => match &s {
+            Some(t) => t.parse::<f64>().map(|n| json!(n)).unwrap_or_else(|_| val.clone()),
+            None => val.clone(),
+        },
+        _ => match def["enum"].as_array() {
+            Some(vals) if !vals.is_empty() => {
+                let t = s.unwrap_or_default();
+                if let Ok(n) = t.parse::<usize>() {
+                    if (1..=vals.len()).contains(&n) {
+                        return vals[n - 1].clone();
+                    }
+                }
+                vals.iter()
+                    .find(|v| v.as_str().map(|vs| vs.eq_ignore_ascii_case(&t)).unwrap_or(false))
+                    .cloned()
+                    .unwrap_or_else(|| val.clone())
+            }
+            _ => val.clone(),
+        },
+    }
+}
+
+/// build the accept content from a free-text answer, guided by the requested
+/// schema: a JSON object wins, one-property schemas take the raw text coerced
+/// to the property type, anything else cancels
+pub fn elicit_content(schema: &Value, answer: &str) -> Option<Value> {
+    let answer = answer.trim();
+    if answer.is_empty() {
+        return None;
+    }
+    let props = schema["properties"].as_object()?;
+    if let Some(obj) = serde_json::from_str::<Value>(answer)
+        .ok()
+        .and_then(|v| v.as_object().cloned())
+    {
+        let mut out = serde_json::Map::new();
+        for (k, val) in obj {
+            let def = props.get(&k).cloned().unwrap_or(json!({}));
+            out.insert(k, coerce_prop(&def, &val));
+        }
+        return Some(Value::Object(out));
+    }
+    if props.len() == 1 {
+        let (k, def) = props.iter().next().unwrap();
+        return Some(json!({ k: coerce_prop(def, &json!(answer)) }));
+    }
+    None
+}
+
+/// format an elicitation request as a question-tool payload: returns the
+/// question text and option buttons (only for one-property schemas)
+fn elicit_question(message: &str, schema: &Value) -> (String, Vec<Value>) {
+    let mut hints = Vec::new();
+    let mut opts = Vec::new();
+    let props = schema["properties"].as_object();
+    let prop_count = props.map(|p| p.len()).unwrap_or(0);
+    if let Some(props) = props {
+        for (name, def) in props {
+            let ty = def["type"].as_str().unwrap_or("string");
+            let desc = def["description"].as_str().unwrap_or("");
+            let mut h = format!("{name} ({ty})");
+            if !desc.is_empty() {
+                h.push_str(&format!(": {desc}"));
+            }
+            hints.push(h);
+            if prop_count == 1 {
+                if let Some(vals) = def["enum"].as_array() {
+                    for v in vals {
+                        let label = v.as_str().map(|s| s.to_string()).unwrap_or(v.to_string());
+                        opts.push(json!({"label": label}));
+                    }
+                }
+            }
+        }
+    }
+    let mut q = format!("{message}\nfields: {}", hints.join("; "));
+    if prop_count == 1 {
+        q.push_str("\nanswer with the value; esc cancels");
+    } else {
+        q.push_str("\nanswer as a json object like {\"field\": value}; esc cancels");
+    }
+    (q, opts)
+}
+
+/// default eliciter: surface the server's request through the ask flow (TUI
+/// question prompt / GUI dialog), build the reply from the schema; empty
+/// answer cancels
+pub fn default_eliciter(
+    notes: tokio::sync::mpsc::UnboundedSender<crate::provider::ApiEvent>,
+) -> Eliciter {
+    Arc::new(move |req| {
+        let notes = notes.clone();
+        Box::pin(async move {
+            let (question, opts) = elicit_question(&req.message, &req.schema);
+            let args = json!({
+                "questions": [{
+                    "header": format!("mcp {}", req.server),
+                    "question": question,
+                    "options": opts,
+                }]
+            })
+            .to_string();
+            let (otx, orx) = tokio::sync::oneshot::channel();
+            notes
+                .send(crate::provider::ApiEvent::Ask {
+                    name: "mcp elicit".to_string(),
+                    args,
+                    rx: otx,
+                })
+                .map_err(|_| anyhow::anyhow!("ui closed"))?;
+            let answer = orx.await.unwrap_or_default();
+            match elicit_content(&req.schema, &answer) {
+                Some(content) => Ok(ElicitOut {
+                    action: "accept".to_string(),
+                    content,
+                }),
+                None => Ok(ElicitOut {
+                    action: "cancel".to_string(),
+                    content: Value::Null,
+                }),
+            }
+        })
+    })
+}
+
 fn file_uri(dir: &str) -> String {
     let p = dir.replace('\\', "/");
     if p.starts_with('/') {
@@ -332,6 +498,8 @@ struct Shared {
     reply: Reply,
     hooks: McpHooks,
     sampling: bool,
+    /// elicitation/create requests are routed to the hooks' eliciter
+    elicitation: bool,
     next_id: AtomicU64,
     stale_tools: AtomicBool,
     stale_resources: AtomicBool,
@@ -655,6 +823,34 @@ async fn handle_server_request(shared: &Arc<Shared>, id: Value, method: &str, pa
                                 Ok(Err(e)) => Err((-32000, format!("{e:#}"))),
                                 Err(_) => Err((-32000, "sampling timed out".into())),
                             }
+                        }
+                    }
+                }
+            }
+        }
+        "elicitation/create" => {
+            // a decline (not an error) keeps the server's flow well-defined
+            if !shared.elicitation {
+                Ok(json!({"action": "decline"}))
+            } else {
+                match &shared.hooks.eliciter {
+                    None => Ok(json!({"action": "decline"})),
+                    Some(el) => {
+                        let req = ElicitReq {
+                            server: shared.name.clone(),
+                            message: params["message"].as_str().unwrap_or("").to_string(),
+                            schema: params["requestedSchema"].clone(),
+                        };
+                        match tokio::time::timeout(CALL_TIMEOUT, el(req)).await {
+                            Ok(Ok(out)) => {
+                                let mut r = json!({"action": out.action});
+                                if out.action == "accept" && !out.content.is_null() {
+                                    r["content"] = out.content;
+                                }
+                                Ok(r)
+                            }
+                            // a failed or timed-out prompt cancels instead of erroring
+                            Ok(Err(_)) | Err(_) => Ok(json!({"action": "cancel"})),
                         }
                     }
                 }
@@ -993,6 +1189,7 @@ impl McpServer {
         let remote = cfg.r#type.as_deref() == Some("remote")
             || (cfg.command.is_empty() && cfg.url.is_some());
         let sampling = hooks.sampler.is_some() && cfg.sampling != Some(false);
+        let elicitation = hooks.eliciter.is_some() && cfg.elicitation != Some(false);
         let (shared, pending, child, reader) = if remote {
             let url = cfg.url.clone().context("mcp: url required")?;
             let http = reqwest::Client::builder().user_agent("hi-derola").build()?;
@@ -1008,6 +1205,7 @@ impl McpServer {
                     })),
                     hooks: hooks.clone(),
                     sampling,
+                    elicitation,
                     next_id: AtomicU64::new(0),
                     stale_tools: AtomicBool::new(false),
                     stale_resources: AtomicBool::new(false),
@@ -1045,6 +1243,7 @@ impl McpServer {
                     },
                     hooks: hooks.clone(),
                     sampling,
+                    elicitation,
                     next_id: AtomicU64::new(0),
                     stale_tools: AtomicBool::new(false),
                     stale_resources: AtomicBool::new(false),
@@ -1089,6 +1288,9 @@ impl McpServer {
         let mut client_caps = json!({"roots": {"listChanged": true}});
         if sampling {
             client_caps["sampling"] = json!({});
+        }
+        if elicitation {
+            client_caps["elicitation"] = json!({});
         }
         let init = s
             .request_t(
@@ -1534,6 +1736,8 @@ mod tests {
         let mut roots_reply = Value::Null;
         let mut sampling_reply = Value::Null;
         let mut sampling_error = false;
+        let mut elicit_reply = Value::Null;
+        let mut elicit_error = false;
         let mut tools_listed = 0u32;
         for line in stdin.lock().lines() {
             let Ok(line) = line else { break };
@@ -1549,6 +1753,13 @@ mod tests {
                         json!({"jsonrpc": "2.0", "id": 502, "method": "sampling/createMessage", "params": {
                             "messages": [{"role": "user", "content": {"type": "text", "text": "say hi"}}],
                             "maxTokens": 64
+                        }}),
+                        json!({"jsonrpc": "2.0", "id": 503, "method": "elicitation/create", "params": {
+                            "message": "pick a color",
+                            "requestedSchema": {"type": "object", "properties": {
+                                "color": {"type": "string", "enum": ["red", "green"]},
+                                "count": {"type": "integer"}
+                            }}
                         }}),
                         json!({"jsonrpc": "2.0", "method": "notifications/message",
                             "params": {"level": "error", "logger": "db", "data": "boom"}}),
@@ -1567,14 +1778,21 @@ mod tests {
                 continue;
             };
             // replies to the server-initiated requests above
-            if id == 501 || id == 502 {
+            if (501..=503).contains(&id) {
                 if v.get("error").is_some() {
-                    sampling_reply = v["error"].clone();
-                    sampling_error = true;
+                    if id == 503 {
+                        elicit_error = true;
+                        elicit_reply = v["error"].clone();
+                    } else {
+                        sampling_error = true;
+                        sampling_reply = v["error"].clone();
+                    }
                 } else if id == 501 {
                     roots_reply = v["result"].clone();
-                } else {
+                } else if id == 502 {
                     sampling_reply = v["result"].clone();
+                } else {
+                    elicit_reply = v["result"].clone();
                 }
                 continue;
             }
@@ -1616,6 +1834,8 @@ mod tests {
                         "roots": roots_reply,
                         "sampling": sampling_reply,
                         "sampling_error": sampling_error,
+                        "elicitation": elicit_reply,
+                        "elicit_error": elicit_error,
                     }).to_string()}]})
                 }
                 "resources/list" => {
@@ -1660,6 +1880,15 @@ mod tests {
     }
 
     fn child_cfg_opts(mode: &str, sampling: Option<bool>, logging: Option<bool>) -> McpConfig {
+        child_cfg_full(mode, sampling, logging, None)
+    }
+
+    fn child_cfg_full(
+        mode: &str,
+        sampling: Option<bool>,
+        logging: Option<bool>,
+        elicitation: Option<bool>,
+    ) -> McpConfig {
         let exe = std::env::current_exe().unwrap();
         let mut env = BTreeMap::new();
         env.insert("HI_DEROLA_FAKE_MCP".to_string(), mode.to_string());
@@ -1677,6 +1906,7 @@ mod tests {
             headers: BTreeMap::new(),
             oauth: None,
             sampling,
+            elicitation,
             logging,
         }
     }
@@ -1775,6 +2005,140 @@ mod tests {
         );
         assert_eq!(dump["sampling_error"], true);
         assert_eq!(dump["sampling"]["code"], -32601);
+    }
+
+    #[tokio::test]
+    async fn elicitation_roundtrip() {
+        let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws"))).with_eliciter(
+            Arc::new(|_req: ElicitReq| {
+                Box::pin(async move {
+                    Ok(ElicitOut {
+                        action: "accept".into(),
+                        content: json!({"color": "green", "count": 3}),
+                    })
+                })
+            }),
+        );
+        let cfg = child_cfg("1");
+        let s = McpServer::connect(&cfg, &hooks).await.unwrap();
+        let res = s
+            .request_t(
+                CALL_TIMEOUT,
+                "tools/call",
+                json!({"name": "ping", "arguments": {}}),
+            )
+            .await
+            .unwrap();
+        let dump: Value =
+            serde_json::from_str(res["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(dump["caps"]["elicitation"], json!({}), "elicitation cap declared");
+        assert_eq!(dump["elicit_error"], false);
+        assert_eq!(dump["elicitation"]["action"], "accept");
+        assert_eq!(dump["elicitation"]["content"]["color"], "green");
+        assert_eq!(dump["elicitation"]["content"]["count"], 3);
+    }
+
+    #[tokio::test]
+    async fn elicitation_opt_out_declines() {
+        let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws"))).with_eliciter(
+            Arc::new(|_req: ElicitReq| {
+                Box::pin(async move {
+                    Ok(ElicitOut {
+                        action: "accept".into(),
+                        content: json!({"color": "green"}),
+                    })
+                })
+            }),
+        );
+        let cfg = child_cfg_full("1", None, None, Some(false));
+        let s = McpServer::connect(&cfg, &hooks).await.unwrap();
+        let res = s
+            .request_t(
+                CALL_TIMEOUT,
+                "tools/call",
+                json!({"name": "ping", "arguments": {}}),
+            )
+            .await
+            .unwrap();
+        let dump: Value =
+            serde_json::from_str(res["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(dump["caps"]["elicitation"].is_null(), "no cap when disabled");
+        assert_eq!(dump["elicitation"]["action"], "decline");
+    }
+
+    #[test]
+    fn elicit_answer_parsing() {
+        let schema = json!({"type": "object", "properties": {
+            "color": {"type": "string", "enum": ["red", "green", "blue"]},
+            "count": {"type": "integer"},
+            "ok": {"type": "boolean"}
+        }});
+        let c = elicit_content(&schema, r#" {"color": "2", "count": "7", "ok": "y"} "#).unwrap();
+        assert_eq!(c["color"], "green", "enum pick by 1-based index");
+        assert_eq!(c["count"], 7, "integer coerced from text");
+        assert_eq!(c["ok"], true, "boolean coerced from text");
+
+        let single = json!({"type": "object", "properties": {"name": {"type": "string"}}});
+        assert_eq!(
+            elicit_content(&single, "hello").unwrap(),
+            json!({"name": "hello"}),
+            "one-property schema takes the raw text"
+        );
+        let enum1 = json!({"type": "object", "properties": {"c": {"enum": ["Red", "Green"]}}});
+        assert_eq!(
+            elicit_content(&enum1, "green").unwrap(),
+            json!({"c": "Green"}),
+            "enum case-insensitive match"
+        );
+        let enum2 = json!({"type": "object", "properties": {"c": {"enum": ["red", "green"]}}});
+        assert_eq!(
+            elicit_content(&enum2, "2").unwrap(),
+            json!({"c": "green"}),
+            "enum pick by index"
+        );
+        assert!(elicit_content(&schema, "").is_none(), "empty cancels");
+        assert!(elicit_content(&schema, "  ").is_none(), "blank cancels");
+        assert!(elicit_content(&schema, "green").is_none(), "multi-property raw text cancels");
+        assert!(elicit_content(&json!({}), "x").is_none(), "no properties cancels");
+    }
+
+    #[tokio::test]
+    async fn default_eliciter_uses_ask_flow() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let el = default_eliciter(tx);
+        tokio::spawn(async move {
+            if let Some(crate::provider::ApiEvent::Ask { rx: arx, .. }) = rx.recv().await {
+                let _ = arx.send("green".to_string());
+            }
+        });
+        let out = el(ElicitReq {
+            server: "t".into(),
+            message: "pick".into(),
+            schema: json!({"type": "object", "properties": {
+                "color": {"type": "string", "enum": ["red", "green"]}
+            }}),
+        })
+        .await
+        .unwrap();
+        assert_eq!(out.action, "accept");
+        assert_eq!(out.content["color"], "green");
+
+        // empty answer (esc in the tui, skip in the gui) cancels
+        let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
+        let el2 = default_eliciter(tx2);
+        tokio::spawn(async move {
+            if let Some(crate::provider::ApiEvent::Ask { rx: arx, .. }) = rx2.recv().await {
+                let _ = arx.send(String::new());
+            }
+        });
+        let out = el2(ElicitReq {
+            server: "t".into(),
+            message: "pick".into(),
+            schema: json!({"type": "object", "properties": {"color": {"type": "string"}}}),
+        })
+        .await
+        .unwrap();
+        assert_eq!(out.action, "cancel");
     }
 
     #[tokio::test]

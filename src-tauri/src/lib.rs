@@ -541,7 +541,8 @@ async fn stop(sh: State<'_, Arc<Shared>>, app: AppHandle) -> Result<(), String> 
 /// client hooks for mcp: workspace root (cwd) + sampling via our provider
 fn mcp_hooks(cfg: &Config, tx: mpsc::UnboundedSender<ApiEvent>) -> hi_derola::mcp::McpHooks {
     let hooks = hi_derola::mcp::McpHooks::workspace(std::env::current_dir().ok())
-        .with_notes(tx.clone());
+        .with_notes(tx.clone())
+        .with_eliciter(hi_derola::mcp::default_eliciter(tx.clone()));
     match cfg.api_key() {
         Some(k) => match provider::build(&cfg.provider.kind, cfg.provider.base_url.clone(), k) {
             Ok(p) => hooks.with_sampler(hi_derola::mcp::default_sampler(

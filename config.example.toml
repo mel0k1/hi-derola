@@ -50,6 +50,9 @@ stream = true
 # (everything lands in a 500-entry ring buffer — /mcplog shows the recent
 # tail, warning and above also pop into the chat; /mcplog set <server|all>
 # <level> sets the minimum level via logging/setLevel)
+# elicitation = false declines elicitation/create from this server
+# (by default the request surfaces as a question prompt — tui ask flow or
+# gui dialog; esc/skip cancels, the server gets decline/cancel)
 
 # gui hotkeys, combos: enter, escape, tab, ctrl+x, shift+enter, alt+f, comma...
 # set to "none" to disable, unknown keys fall back to defaults

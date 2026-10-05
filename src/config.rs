@@ -214,6 +214,9 @@ pub struct McpConfig {
     /// sampling = false refuses sampling/createMessage from this server
     #[serde(default)]
     pub sampling: Option<bool>,
+    /// elicitation = false declines elicitation/create from this server
+    #[serde(default)]
+    pub elicitation: Option<bool>,
     /// logging = false drops notifications/message log entries from this server
     #[serde(default)]
     pub logging: Option<bool>,
@@ -295,6 +298,16 @@ mod tests {
         let cfg: Config = toml::from_str(&raw).unwrap();
         assert_eq!(cfg.mcp[0].sampling, Some(false));
         assert_eq!(cfg.mcp[1].sampling, None, "absent keeps the default (enabled)");
+    }
+
+    #[test]
+    fn mcp_elicitation_flag() {
+        let raw = format!(
+            "{MINIMAL}[[mcp]]\nname = \"a\"\ncommand = \"x\"\nelicitation = false\n\n[[mcp]]\nname = \"b\"\ncommand = \"y\"\n"
+        );
+        let cfg: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(cfg.mcp[0].elicitation, Some(false));
+        assert_eq!(cfg.mcp[1].elicitation, None, "absent keeps the default (enabled)");
     }
 
     #[test]

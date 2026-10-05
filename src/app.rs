@@ -162,6 +162,7 @@ impl App {
     fn mcp_hooks(&self) -> mcp::McpHooks {
         mcp::McpHooks::workspace(std::env::current_dir().ok())
             .with_notes(self.tx.clone())
+            .with_eliciter(mcp::default_eliciter(self.tx.clone()))
             .with_sampler(mcp::default_sampler(
             self.provider.clone(),
             self.model.clone(),
