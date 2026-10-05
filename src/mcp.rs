@@ -584,6 +584,9 @@ struct Shared {
     /// in-flight progress tokens from tools/call _meta.progressToken:
     /// normalized token -> tool label; unknown tokens are ignored
     progress: std::sync::Mutex<BTreeMap<String, String>>,
+    /// resetTimeoutOnProgress: in-flight tools/call tokens whose call
+    /// deadline restarts on every notifications/progress for that token
+    progress_reset: std::sync::Mutex<BTreeMap<String, Arc<tokio::sync::Notify>>>,
     /// keepalive state: false while pings keep failing (transition notes fire
     /// only on flips, so a dead server never spams the chat)
     alive: AtomicBool,
@@ -629,6 +632,7 @@ fn shared_for(
         logging: AtomicBool::new(false),
         logging_on: cfg.logging != Some(false),
         progress: std::sync::Mutex::new(BTreeMap::new()),
+        progress_reset: std::sync::Mutex::new(BTreeMap::new()),
         alive: AtomicBool::new(true),
         timeout: cfg.timeout.map(Duration::from_secs),
     });
@@ -909,6 +913,16 @@ fn handle_notification(shared: &Arc<Shared>, pending: &Pending, method: &str, pa
             let Some(label) = label else {
                 return;
             };
+            // resetTimeoutOnProgress: restart the tools/call deadline
+            let wake = shared
+                .progress_reset
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&token)
+                .cloned();
+            if let Some(n) = wake {
+                n.notify_one();
+            }
             let p = params["progress"].as_f64().unwrap_or(0.0);
             let pos = params["total"]
                 .as_f64()
@@ -1602,6 +1616,69 @@ async fn request(
     res
 }
 
+/// request() with resetTimeoutOnProgress for tools/call (opencode's catalog
+/// hardcodes the hook on): the call deadline restarts every time the server
+/// reports progress for the call's token, so a chatty long-running job is not
+/// killed mid-flight while a silent one still hits the fixed timeout
+async fn request_reset(
+    shared: &Arc<Shared>,
+    pending: &Pending,
+    timeout: Duration,
+    method: &str,
+    params: Value,
+    token: &str,
+) -> Result<Value> {
+    let id = shared.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    let notify = Arc::new(tokio::sync::Notify::new());
+    // registered before the send so a note racing the send is not lost
+    shared
+        .progress_reset
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(token.to_string(), notify.clone());
+    pending.lock().await.insert(id, tx);
+    let msg = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+    let sent = send_msg(shared, pending, &msg).await;
+    let res = match sent {
+        Err(e) => Err(e),
+        // http replies come back inline; stdio/sse replies arrive via pending
+        Ok(v) if matches!(shared.reply, Reply::Http(_)) => Ok(v),
+        Ok(_) => {
+            let mut deadline = tokio::time::Instant::now() + timeout;
+            let out: Result<Value> = loop {
+                tokio::select! {
+                    biased;
+                    r = &mut rx => match r {
+                        // the pending channel carries Result<Value> items
+                        Ok(Ok(r)) => break Ok(r),
+                        Ok(Err(_)) | Err(_) => {
+                            break Err(anyhow::anyhow!("mcp {}: server closed", shared.name))
+                        }
+                    },
+                    // notify_one stores a permit when nobody waits, so a note
+                    // landing between iterations is consumed on the next poll
+                    _ = notify.notified() => {
+                        deadline = tokio::time::Instant::now() + timeout;
+                    }
+                    _ = tokio::time::sleep_until(deadline) => break Err(anyhow::anyhow!(
+                        "mcp {}: {method} timeout (no progress)",
+                        shared.name
+                    )),
+                }
+            };
+            out
+        }
+    };
+    shared
+        .progress_reset
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(&token.to_string());
+    pending.lock().await.remove(&id);
+    res
+}
+
 impl McpServer {
     async fn request_t(&self, timeout: Duration, method: &str, params: Value) -> Result<Value> {
         request(&self.shared, &self.pending, timeout, method, params).await
@@ -2007,9 +2084,15 @@ impl McpClient {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(token.to_string(), tool.to_string());
-        let res = s
-            .request_t(call_to(&s.shared), "tools/call", params)
-            .await;
+        let res = request_reset(
+            &s.shared,
+            &s.pending,
+            call_to(&s.shared),
+            "tools/call",
+            params,
+            &token.to_string(),
+        )
+        .await;
         s.shared
             .progress
             .lock()
@@ -2465,6 +2548,24 @@ mod tests {
                         // no content blocks: the client must fall back to
                         // structuredContent
                         json!({"structuredContent": {"answer": 42}})
+                    } else if mode == "slow" {
+                        // six progress notes 300ms apart, the answer only
+                        // lands after ~1.8s: with resetTimeoutOnProgress a
+                        // 1s deadline keeps sliding, without it the call
+                        // would time out
+                        let tok = v["params"]["_meta"]["progressToken"].clone();
+                        for i in 1..=6u32 {
+                            std::thread::sleep(std::time::Duration::from_millis(300));
+                            let n = json!({"jsonrpc": "2.0", "method": "notifications/progress",
+                                "params": {"progressToken": tok, "progress": i, "total": 6}});
+                            writeln!(out, "{n}").unwrap();
+                            out.flush().unwrap();
+                        }
+                        json!({"content": [{"type": "text", "text": "slow-done"}]})
+                    } else if mode == "hang" {
+                        // never answered: the fixed timeout (or an aborted
+                        // request) must clean up on the client side
+                        continue;
                     } else {
                     // progress for the in-flight token, then a stale token
                     // the client must ignore; live refresh trigger last
@@ -3162,6 +3263,26 @@ mod tests {
             Ok(_) => panic!("bogus cwd must fail"),
             Err(e) => assert!(e.to_string().contains("cwd not found"), "got: {e:#}"),
         }
+    }
+
+    #[tokio::test]
+    async fn reset_timeout_on_progress_extends_call() {
+        let hooks = McpHooks::workspace(None);
+        // slow server: ~1.8s of progress notes, then the answer — a fixed 1s
+        // deadline would kill the call, each progress restarts it instead
+        let (client, _) = connect_all(&[child_cfg_timeout("slow", Some(1))], &hooks).await;
+        let client = client.expect("slow server connects");
+        let out = client.call("t__ping", "{}").await.unwrap();
+        assert_eq!(out, "slow-done");
+
+        // no progress at all: the 1s deadline still fires
+        let (client, _) = connect_all(&[child_cfg_timeout("hang", Some(1))], &hooks).await;
+        let client = client.expect("hang server connects");
+        let err = client.call("t__ping", "{}").await.unwrap_err();
+        assert!(
+            err.to_string().contains("timeout"),
+            "silent call must hit the fixed timeout: {err:#}"
+        );
     }
 
     /// read one http request (headers + content-length body) from a raw stream
