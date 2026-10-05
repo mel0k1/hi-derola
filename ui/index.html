@@ -153,7 +153,35 @@
         <section>
           <h3>mcp servers</h3>
           <div id="s-mcp" class="hint"></div>
-          <button id="s-mcp-reconnect" class="ghost">reconnect</button>
+          <div class="row-inline">
+            <button id="s-mcp-add" class="ghost"><span class="ic sm" data-icon="plus"></span>add server</button>
+            <button id="s-mcp-reconnect" class="ghost">reconnect</button>
+          </div>
+          <div id="s-mcp-form" class="hidden">
+            <label>name <input id="sa-name" placeholder="my-server" spellcheck="false" /></label>
+            <label>type
+              <select id="sa-type">
+                <option value="stdio">stdio - local process</option>
+                <option value="remote">remote - http / sse</option>
+              </select>
+            </label>
+            <div id="sa-stdio-fields">
+              <label>command <input id="sa-command" placeholder="npx" spellcheck="false" /></label>
+              <label>args <textarea id="sa-args" rows="2" placeholder="one argument per line" spellcheck="false"></textarea></label>
+              <label>env <textarea id="sa-env" rows="2" placeholder="KEY=value per line" spellcheck="false"></textarea></label>
+              <label>working dir <input id="sa-cwd" placeholder="optional" spellcheck="false" /></label>
+            </div>
+            <div id="sa-remote-fields" class="hidden">
+              <label>url <input id="sa-url" placeholder="https://example.com/mcp" spellcheck="false" /></label>
+              <label>headers <textarea id="sa-headers" rows="2" placeholder="Name: value per line" spellcheck="false"></textarea></label>
+            </div>
+            <label>timeout, seconds <input id="sa-timeout" type="number" min="1" step="1" placeholder="default" /></label>
+            <div class="row-inline">
+              <button id="sa-save" class="accent">add</button>
+              <button id="sa-cancel" class="ghost">cancel</button>
+              <span class="hint">saved to config.toml and connected</span>
+            </div>
+          </div>
         </section>
         <section>
           <h3>permissions</h3>

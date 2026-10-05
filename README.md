@@ -12,7 +12,7 @@ A high-performance, lightweight chat and autonomous coding assistant written in 
 - windows, linux, macos — shell commands run via `cmd /C` on windows, `sh -c` elsewhere; the shell is configurable (`[agent] shell`, e.g. `"C:\\Program Files\\Git\\bin\\bash.exe"` — cmd/powershell/pwsh get their own flag, everything else gets `-c`)
 - multi-provider: any OpenAI-compatible endpoint (OpenAI, OpenRouter, ...) + native Anthropic
 - streaming responses and reasoning in a separate collapsible thinking block (GUI)
-- api key, endpoint and model are editable right in the GUI settings; the model dropdown is filled from the provider's `/models` endpoint
+- api key, endpoint and model are editable right in the GUI settings; the model dropdown is filled from the provider's `/models` endpoint; mcp servers can be added or removed in the same settings — name, type (stdio or remote), command/args/env/working dir or url/headers, optional timeout — saved to config.toml and connected on the spot (removal asks twice)
 - configurable hotkeys (`[keys]` in config or capture fields in GUI settings)
 - tool calling: read_file (line numbers, offset/limit, images come back as native image parts), write_file, edit (tolerant to CRLF/LF, BOM, trailing whitespace; a third pass normalizes smart quotes/dashes for unicode-mangled files; a final fuzzy pass salvages near-miss blocks — at least 2 lines, >=85% line similarity — and re-indents the replacement to the matched block), apply_patch (multi-file V4A patches — nothing is written unless every hunk matches), list_files, glob, grep, bash (workdir, timeout, tail output, background tasks), webfetch (http/https, html converted to markdown/text), websearch (DuckDuckGo, no key needed), codesearch (Exa code/docs search, no key needed) + MCP servers
 - custom JS tools: drop `.js` files into `.hi-derola/tools/` (project) or `~/.config/hi-derola/tools/` (global) — each exports `{ name, description, parameters, execute(input) }` and runs in the same confined boa sandbox as the code tool (no fs/network/process access, console.log captured, 30s budget); list them with `/jstools` (TUI and GUI, `/jstools reload` rescans)
@@ -198,4 +198,4 @@ permission = "allow"
 /clear         start new session
 ```
 
-gui-only: command palette (`ctrl+k`), review panel, context pill, attachment chips, hotkey capture in settings.
+gui-only: command palette (`ctrl+k`), review panel, context pill, attachment chips, hotkey capture in settings; living-minimalism polish — soft motion everywhere (panel pop-ins, message entrance, thinking dots, focus rings, button press feedback), all disabled under `prefers-reduced-motion`.

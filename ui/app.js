@@ -265,7 +265,7 @@ function applyStatus() {
   $("status-left").textContent = `${KIND} · ${MODEL}${PLAN ? " · plan" : ""}`;
   const right = $("status-right");
   if (waiting) {
-    right.textContent = "thinking...";
+    right.textContent = "thinking";
     right.classList.add("busy");
   } else {
     right.classList.remove("busy");
@@ -995,6 +995,10 @@ async function doSend() {
   m.appendChild(el("div", "body", text));
   $("chat-col").appendChild(m);
   autoscroll();
+  const sendBtn = $("btn-send");
+  sendBtn.classList.remove("ready");
+  sendBtn.classList.add("sent");
+  setTimeout(() => sendBtn.classList.remove("sent"), 350);
   waiting = true;
   applyStatus();
   let res;
@@ -1482,7 +1486,7 @@ function fillMcpList() {
   const box = $("s-mcp");
   const list = (CFG && CFG.mcp) || [];
   if (!list.length) {
-    box.textContent = "no servers configured (config.toml [[mcp]])";
+    box.textContent = "no servers yet — add one below or edit config.toml [[mcp]]";
     box.style.whiteSpace = "pre-wrap";
     return;
   }
@@ -1532,6 +1536,12 @@ function fillMcpList() {
     resBtn.style.cssText = "margin-left:8px;padding:0 8px;font-size:11px";
     resBtn.onclick = () => toggleMcpRes(m, resBtn, row);
     row.append(resBtn);
+    const rm = el("button", "icon-btn");
+    rm.innerHTML = icon("trash");
+    rm.title = "remove from config";
+    rm.style.cssText = "width:22px;height:22px;flex:none";
+    rm.onclick = () => removeMcpServer(m.name, rm);
+    row.append(rm);
     box.append(row);
   }
   box.style.whiteSpace = "";
@@ -1810,20 +1820,125 @@ $("s-mcp-reconnect").onclick = async () => {
   }
 };
 
-$("s-save").onclick = async () => {
+/* add / remove mcp servers right from settings */
+
+function parseKVLines(text, sep) {
+  const out = {};
+  for (const line of (text || "").split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    const i = t.indexOf(sep);
+    if (i <= 0) continue;
+    out[t.slice(0, i).trim()] = t.slice(i + 1).trim();
+  }
+  return out;
+}
+
+function applyMcpType() {
+  const remote = $("sa-type").value === "remote";
+  $("sa-stdio-fields").classList.toggle("hidden", remote);
+  $("sa-remote-fields").classList.toggle("hidden", !remote);
+}
+
+$("s-mcp-add").onclick = () => {
+  for (const id of ["sa-name", "sa-command", "sa-args", "sa-env", "sa-cwd", "sa-url", "sa-headers", "sa-timeout"]) {
+    $(id).value = "";
+  }
+  $("sa-type").value = "stdio";
+  applyMcpType();
+  $("s-msg").textContent = "";
+  $("s-mcp-form").classList.remove("hidden");
+  $("sa-name").focus();
+};
+$("sa-type").onchange = applyMcpType;
+$("sa-cancel").onclick = () => $("s-mcp-form").classList.add("hidden");
+
+$("sa-save").onclick = async () => {
+  const name = $("sa-name").value.trim();
+  if (!name) {
+    $("s-msg").textContent = "name is required";
+    return;
+  }
+  if (((CFG && CFG.mcp) || []).some((m) => m.name === name)) {
+    $("s-msg").textContent = "a server with this name already exists";
+    return;
+  }
+  const remote = $("sa-type").value === "remote";
+  const entry = { name, type: remote ? "remote" : "stdio" };
+  if (remote) {
+    const url = $("sa-url").value.trim();
+    if (!url) {
+      $("s-msg").textContent = "url is required for remote servers";
+      return;
+    }
+    entry.url = url;
+    const headers = parseKVLines($("sa-headers").value, ":");
+    if (Object.keys(headers).length) entry.headers = headers;
+  } else {
+    const cmd = $("sa-command").value.trim();
+    if (!cmd) {
+      $("s-msg").textContent = "command is required for stdio servers";
+      return;
+    }
+    entry.command = cmd;
+    entry.args = $("sa-args").value.split("\n").map((s) => s.trim()).filter(Boolean);
+    const env = parseKVLines($("sa-env").value, "=");
+    if (Object.keys(env).length) entry.env = env;
+    const cwd = $("sa-cwd").value.trim();
+    if (cwd) entry.cwd = cwd;
+  }
+  const t = Number($("sa-timeout").value);
+  if ($("sa-timeout").value.trim() && Number.isFinite(t) && t > 0) entry.timeout = t;
+  const btn = $("sa-save");
+  btn.disabled = true;
+  $("s-msg").textContent = "";
+  try {
+    CFG = { ...(CFG || {}), mcp: [...((CFG && CFG.mcp) || []), entry] };
+    await invoke("save", { cfg: buildCfgPayload() });
+    const logs = await invoke("mcp_reconnect");
+    for (const l of logs) note(l);
+    fillMcpList();
+    $("s-mcp-form").classList.add("hidden");
+    $("s-msg").textContent = "server added";
+  } catch (e) {
+    $("s-msg").textContent = String(e);
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+async function removeMcpServer(name, btn) {
+  // two clicks: first arms, second deletes (same pattern as session delete)
+  if (!btn.classList.contains("confirm")) {
+    btn.classList.add("confirm");
+    btn.innerHTML = icon("check");
+    setTimeout(() => {
+      btn.classList.remove("confirm");
+      btn.innerHTML = icon("trash");
+    }, 2500);
+    return;
+  }
+  CFG = { ...(CFG || {}), mcp: ((CFG && CFG.mcp) || []).filter((x) => x.name !== name) };
+  try {
+    await invoke("save", { cfg: buildCfgPayload() });
+    const logs = await invoke("mcp_reconnect");
+    for (const l of logs) note(l);
+    note(`server ${name} removed from config`);
+  } catch (e) {
+    note(String(e));
+  }
+  fillMcpList();
+}
+
+function buildCfgPayload() {
   const num = (id) => {
     const v = $(id).value.trim();
     return v === "" ? null : Number(v);
   };
-  const model = $("s-model").value.trim();
-  if (!model) {
-    $("s-msg").textContent = "model is required";
-    return;
-  }
-  const cfg = {
+  return {
     provider: {
       type: $("s-type").value,
-      model,
+      model: $("s-model").value.trim(),
       base_url: $("s-base").value.trim() || null,
       api_key: $("s-key").value,
       max_tokens: num("s-max-tokens"),
@@ -1837,6 +1952,14 @@ $("s-save").onclick = async () => {
     agent: (CFG && CFG.agent) || undefined,
     permissions: (CFG && CFG.permissions) || undefined,
   };
+}
+
+$("s-save").onclick = async () => {
+  if (!$("s-model").value.trim()) {
+    $("s-msg").textContent = "model is required";
+    return;
+  }
+  const cfg = buildCfgPayload();
   try {
     await invoke("save", { cfg });
   } catch (e) {
@@ -2001,6 +2124,7 @@ function completeMention() {
 $("input").addEventListener("input", () => {
   autosize();
   showMention();
+  $("btn-send").classList.toggle("ready", $("input").value.trim().length > 0);
 });
 $("input").addEventListener("click", hideMention);
 
