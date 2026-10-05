@@ -475,6 +475,24 @@ fn log_level_rank(level: &str) -> Option<u8> {
     }
 }
 
+/// normalize a progressToken (number or string per spec) to a registry key
+fn token_key(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// display a progress number without a trailing .0
+fn trim_num(n: f64) -> String {
+    if n.fract() == 0.0 {
+        format!("{}", n as i64)
+    } else {
+        format!("{n}")
+    }
+}
+
 // ---------- transport ----------
 
 struct HttpCtx {
@@ -513,6 +531,9 @@ struct Shared {
     logging: AtomicBool,
     /// logging = false drops notifications/message from this server
     logging_on: bool,
+    /// in-flight progress tokens from tools/call _meta.progressToken:
+    /// normalized token -> tool label; unknown tokens are ignored
+    progress: std::sync::Mutex<BTreeMap<String, String>>,
 }
 
 type Pending = Arc<Mutex<BTreeMap<u64, tokio::sync::oneshot::Sender<Result<Value>>>>>;
@@ -750,6 +771,38 @@ fn handle_notification(shared: &Arc<Shared>, pending: &Pending, method: &str, pa
                         crate::provider::truncate(&data).trim_end()
                     )));
                 }
+            }
+        }
+        "notifications/progress" => {
+            let token = token_key(&params["progressToken"]);
+            if token.is_empty() {
+                return;
+            }
+            let label = shared
+                .progress
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&token)
+                .cloned();
+            let Some(label) = label else {
+                return;
+            };
+            let p = params["progress"].as_f64().unwrap_or(0.0);
+            let pos = params["total"]
+                .as_f64()
+                .filter(|t| *t > 0.0)
+                .map(|t| format!(" {}/{}", trim_num(p), trim_num(t)))
+                .unwrap_or_default();
+            let msg = params["message"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(|s| format!(" — {s}"))
+                .unwrap_or_default();
+            if let Some(tx) = &shared.hooks.notes {
+                let _ = tx.send(crate::provider::ApiEvent::Note(format!(
+                    "mcp {}: {label}{pos}{msg}",
+                    shared.name
+                )));
             }
         }
         _ => {}
@@ -1215,6 +1268,7 @@ impl McpServer {
                     subs: std::sync::Mutex::new(Vec::new()),
                     logging: AtomicBool::new(false),
                     logging_on: cfg.logging != Some(false),
+                    progress: std::sync::Mutex::new(BTreeMap::new()),
                 }),
                 Arc::new(Mutex::new(BTreeMap::new())),
                 None,
@@ -1253,6 +1307,7 @@ impl McpServer {
                     subs: std::sync::Mutex::new(Vec::new()),
                     logging: AtomicBool::new(false),
                     logging_on: cfg.logging != Some(false),
+                    progress: std::sync::Mutex::new(BTreeMap::new()),
                 }),
                 Arc::new(Mutex::new(BTreeMap::new())),
                 Some(child),
@@ -1434,13 +1489,27 @@ impl McpClient {
             bail!("mcp server not found: {server}");
         };
         let arguments: Value = serde_json::from_str(args).unwrap_or(json!({}));
+        // the token lets the server report live progress via notifications/progress
+        let token = s.shared.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let params = json!({
+            "name": tool,
+            "arguments": arguments,
+            "_meta": {"progressToken": token}
+        });
+        s.shared
+            .progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(token.to_string(), tool.to_string());
         let res = s
-            .request_t(
-                CALL_TIMEOUT,
-                "tools/call",
-                json!({"name": tool, "arguments": arguments}),
-            )
-            .await?;
+            .request_t(CALL_TIMEOUT, "tools/call", params)
+            .await;
+        s.shared
+            .progress
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&token.to_string());
+        let res = res?;
         let mut text = String::new();
         for b in res["content"].as_array().into_iter().flatten() {
             if b["type"].as_str() == Some("text") {
@@ -1825,6 +1894,21 @@ mod tests {
                     }
                 }
                 "tools/call" => {
+                    // progress for the in-flight token, then a stale token
+                    // the client must ignore; live refresh trigger last
+                    let tok = v["params"]["_meta"]["progressToken"].clone();
+                    let notes = [
+                        json!({"jsonrpc": "2.0", "method": "notifications/progress",
+                            "params": {"progressToken": tok, "progress": 1, "total": 2, "message": "halfway"}}),
+                        json!({"jsonrpc": "2.0", "method": "notifications/progress",
+                            "params": {"progressToken": tok, "progress": 1.5, "total": 2}}),
+                        json!({"jsonrpc": "2.0", "method": "notifications/progress",
+                            "params": {"progressToken": 987654, "progress": 1, "total": 1}}),
+                    ];
+                    for n in notes {
+                        writeln!(out, "{n}").unwrap();
+                    }
+                    out.flush().unwrap();
                     // live refresh trigger: notify before answering
                     let n = json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"});
                     writeln!(out, "{n}").unwrap();
@@ -2139,6 +2223,46 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(out.action, "cancel");
+    }
+
+    #[tokio::test]
+    async fn progress_notes_for_live_tool_calls() {
+        let (ntx, mut nrx) = tokio::sync::mpsc::unbounded_channel();
+        let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws"))).with_notes(ntx);
+        let cfg = child_cfg("1");
+        let s = McpServer::connect(&cfg, &hooks).await.unwrap();
+        let client = McpClient {
+            servers: Mutex::new(vec![s]),
+            hooks: hooks.clone(),
+        };
+
+        client.call("t__ping", "{}").await.unwrap();
+
+        // the two progress notifications for the in-flight token surfaced,
+        // the stale unknown token did not
+        let mut saw = Vec::new();
+        while let Ok(crate::provider::ApiEvent::Note(n)) = nrx.try_recv() {
+            if n.starts_with("mcp t: ping") {
+                saw.push(n);
+            }
+        }
+        assert_eq!(
+            saw,
+            vec![
+                "mcp t: ping 1/2 — halfway".to_string(),
+                "mcp t: ping 1.5/2".to_string(),
+            ],
+            "live progress notes, fractional progress kept, unknown token ignored"
+        );
+
+        // the token registry is cleaned up after the call
+        let servers = client.servers.lock().await;
+        assert!(servers[0]
+            .shared
+            .progress
+            .lock()
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
