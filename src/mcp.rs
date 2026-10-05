@@ -540,6 +540,20 @@ struct Shared {
     /// keepalive state: false while pings keep failing (transition notes fire
     /// only on flips, so a dead server never spams the chat)
     alive: AtomicBool,
+    /// per-server timeout override (timeout = <seconds> in config)
+    timeout: Option<Duration>,
+}
+
+fn req_to(shared: &Shared) -> Duration {
+    shared.timeout.unwrap_or(REQUEST_TIMEOUT)
+}
+
+fn call_to(shared: &Shared) -> Duration {
+    shared.timeout.unwrap_or(CALL_TIMEOUT)
+}
+
+fn cfg_connect_timeout(cfg: &McpConfig) -> Duration {
+    cfg.timeout.map(Duration::from_secs).unwrap_or(CONNECT_TIMEOUT)
 }
 
 type Pending = Arc<Mutex<BTreeMap<u64, tokio::sync::oneshot::Sender<Result<Value>>>>>;
@@ -553,6 +567,21 @@ struct McpServer {
     tools: Vec<McpTool>,
     resources: Vec<McpResource>,
     prompts: Vec<McpPrompt>,
+    /// server instructions from initialize, surfaced into the system prompt
+    instructions: Option<String>,
+}
+
+/// format per-server instructions as a system-prompt block; empty -> empty
+pub fn instructions_block(pairs: &[(String, String)]) -> String {
+    if pairs.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("<mcp_instructions>");
+    for (name, text) in pairs {
+        out.push_str(&format!("\n<server name=\"{name}\">\n{}\n</server>", text.trim()));
+    }
+    out.push_str("\n</mcp_instructions>");
+    out
 }
 
 impl McpServer {
@@ -576,7 +605,7 @@ impl McpServer {
             if let Some(c) = &cursor {
                 params["cursor"] = json!(c);
             }
-            let res = self.request_t(REQUEST_TIMEOUT, method, params).await?;
+            let res = self.request_t(req_to(&self.shared), method, params).await?;
             if let Some(arr) = res[key].as_array() {
                 out.extend(arr.clone());
             }
@@ -590,7 +619,7 @@ impl McpServer {
 
     async fn read_resource(&self, uri: &str) -> Result<String> {
         let res = self
-            .request_t(CALL_TIMEOUT, "resources/read", json!({"uri": uri}))
+            .request_t(call_to(&self.shared), "resources/read", json!({"uri": uri}))
             .await?;
         Ok(render_resource_contents(&res))
     }
@@ -599,7 +628,7 @@ impl McpServer {
     async fn get_prompt(&self, name: &str, args: &Value) -> Result<Vec<(String, String)>> {
         let res = self
             .request_t(
-                CALL_TIMEOUT,
+                call_to(&self.shared),
                 "prompts/get",
                 json!({"name": name, "arguments": args}),
             )
@@ -717,7 +746,7 @@ fn handle_notification(shared: &Arc<Shared>, pending: &Pending, method: &str, pa
                 let text = match request(
                     &shared,
                     &pending,
-                    CALL_TIMEOUT,
+                    call_to(&shared),
                     "resources/read",
                     json!({"uri": uri}),
                 )
@@ -873,7 +902,7 @@ async fn handle_server_request(shared: &Arc<Shared>, id: Value, method: &str, pa
                                     .unwrap_or(512)
                                     .clamp(1, MAX_SAMPLING_TOKENS as u64) as u32,
                             };
-                            match tokio::time::timeout(CALL_TIMEOUT, sampler(req)).await {
+                            match tokio::time::timeout(call_to(&shared), sampler(req)).await {
                                 Ok(Ok(out)) => Ok(json!({
                                     "role": "assistant",
                                     "model": out.model,
@@ -900,7 +929,7 @@ async fn handle_server_request(shared: &Arc<Shared>, id: Value, method: &str, pa
                             message: params["message"].as_str().unwrap_or("").to_string(),
                             schema: params["requestedSchema"].clone(),
                         };
-                        match tokio::time::timeout(CALL_TIMEOUT, el(req)).await {
+                        match tokio::time::timeout(call_to(&shared), el(req)).await {
                             Ok(Ok(out)) => {
                                 let mut r = json!({"action": out.action});
                                 if out.action == "accept" && !out.content.is_null() {
@@ -977,6 +1006,39 @@ async fn keepalive_loop(shared: Arc<Shared>, pending: Pending, interval: Duratio
                     shared.name
                 )
             }));
+        }
+    }
+}
+
+/// drain a stdio server's stderr into the shared log buffer as info entries
+/// with logger "stderr" (visible via /mcplog, never pops into the chat);
+/// skipped entirely when logging = false for the server
+async fn stderr_drain(err: impl tokio::io::AsyncRead + Unpin, shared: Arc<Shared>) {
+    let mut lines = tokio::io::BufReader::new(err).lines();
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                let line = line.trim_end();
+                if line.is_empty() || !shared.logging_on {
+                    continue;
+                }
+                let data: String = line.chars().take(2000).collect();
+                let mut g = shared
+                    .hooks
+                    .logs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                g.push_back(McpLogEntry {
+                    server: shared.name.clone(),
+                    level: "info".to_string(),
+                    logger: "stderr".to_string(),
+                    data,
+                });
+                while g.len() > MAX_LOGS {
+                    g.pop_front();
+                }
+            }
+            _ => break,
         }
     }
 }
@@ -1255,7 +1317,7 @@ impl McpServer {
             }
         }
         match self
-            .request_t(REQUEST_TIMEOUT, "resources/subscribe", json!({"uri": uri}))
+            .request_t(req_to(&self.shared), "resources/subscribe", json!({"uri": uri}))
             .await
         {
             Ok(_) => Ok(()),
@@ -1274,7 +1336,7 @@ impl McpServer {
             g.retain(|u| u != uri);
         }
         let _ = self
-            .request_t(REQUEST_TIMEOUT, "resources/unsubscribe", json!({"uri": uri}))
+            .request_t(req_to(&self.shared), "resources/unsubscribe", json!({"uri": uri}))
             .await;
         Ok(())
     }
@@ -1284,7 +1346,7 @@ impl McpServer {
             || (cfg.command.is_empty() && cfg.url.is_some());
         let sampling = hooks.sampler.is_some() && cfg.sampling != Some(false);
         let elicitation = hooks.eliciter.is_some() && cfg.elicitation != Some(false);
-        let (shared, pending, child, reader) = if remote {
+        let (shared, pending, child, reader, stderr) = if remote {
             let url = cfg.url.clone().context("mcp: url required")?;
             let http = reqwest::Client::builder().user_agent("hi-derola").build()?;
             (
@@ -1311,8 +1373,10 @@ impl McpServer {
                     logging_on: cfg.logging != Some(false),
                     progress: std::sync::Mutex::new(BTreeMap::new()),
                     alive: AtomicBool::new(true),
+                    timeout: cfg.timeout.map(Duration::from_secs),
                 }),
                 Arc::new(Mutex::new(BTreeMap::new())),
+                None,
                 None,
                 None,
             )
@@ -1326,11 +1390,14 @@ impl McpServer {
             let mut child = cmd
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
+                // stderr is piped so a chatty server cannot block on a full
+                // pipe; the drain task logs it (or discards it)
+                .stderr(std::process::Stdio::piped())
                 .spawn()
                 .with_context(|| format!("mcp {}: spawn {}", cfg.name, cfg.command))?;
             let stdin = child.stdin.take().context("mcp: no stdin")?;
             let stdout = child.stdout.take().context("mcp: no stdout")?;
+            let stderr = child.stderr.take();
             (
                 Arc::new(Shared {
                     name: cfg.name.clone(),
@@ -1351,10 +1418,12 @@ impl McpServer {
                     logging_on: cfg.logging != Some(false),
                     progress: std::sync::Mutex::new(BTreeMap::new()),
                     alive: AtomicBool::new(true),
+                    timeout: cfg.timeout.map(Duration::from_secs),
                 }),
                 Arc::new(Mutex::new(BTreeMap::new())),
                 Some(child),
                 Some(tokio::io::BufReader::new(stdout)),
+                stderr,
             )
         };
         let mut s = Self {
@@ -1365,7 +1434,15 @@ impl McpServer {
             tools: Vec::new(),
             resources: Vec::new(),
             prompts: Vec::new(),
+            instructions: None,
         };
+        // stderr of a stdio server lands in the shared log buffer (logger
+        // "stderr", info level — /mcplog shows it, the chat is not spammed);
+        // always drained so the child never blocks on a full pipe
+        if let Some(err) = stderr {
+            s.tasks
+                .push(tokio::spawn(stderr_drain(err, s.shared.clone())));
+        }
         // background traffic: stdio reader or the http live stream
         if let Some(reader) = reader {
             s.tasks.push(tokio::spawn(stdio_reader(
@@ -1401,7 +1478,7 @@ impl McpServer {
         }
         let init = s
             .request_t(
-                REQUEST_TIMEOUT,
+                req_to(&s.shared),
                 "initialize",
                 json!({
                     "protocolVersion": proto,
@@ -1411,6 +1488,11 @@ impl McpServer {
             )
             .await?;
         let caps = init["capabilities"].clone();
+        s.instructions = init["instructions"]
+            .as_str()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(String::from);
         s.shared.res_sub.store(
             caps["resources"]["subscribe"].is_object()
                 || caps["resources"]["subscribe"].as_bool() == Some(true),
@@ -1461,7 +1543,8 @@ pub async fn connect_all(
     let mut servers = Vec::new();
     let mut logs = Vec::new();
     for c in cfgs {
-        match tokio::time::timeout(CONNECT_TIMEOUT, McpServer::connect(c, hooks)).await {
+        let to = cfg_connect_timeout(c);
+        match tokio::time::timeout(to, McpServer::connect(c, hooks)).await {
             Ok(Ok(s)) => {
                 logs.push(format!("mcp {}: connected ({})", c.name, s.summary()));
                 servers.push(s);
@@ -1493,7 +1576,8 @@ pub async fn reconnect_one(
     let existing = slot.lock().unwrap().clone();
     if let Some(client) = existing {
         let mut logs = Vec::new();
-        match tokio::time::timeout(CONNECT_TIMEOUT, client.replace(cfg, hooks)).await {
+        let to = cfg_connect_timeout(cfg);
+        match tokio::time::timeout(to, client.replace(cfg, hooks)).await {
             Ok(Ok(sum)) => logs.push(format!("mcp {name}: connected ({sum})")),
             Ok(Err(e)) => logs.push(format!("mcp {name}: {e:#}")),
             Err(_) => logs.push(format!("mcp {name}: connect timeout")),
@@ -1532,6 +1616,24 @@ impl McpClient {
         out
     }
 
+    /// per-server instructions from initialize, paired with the server name;
+    /// a server whose every tool is denied by the permission rules stays quiet
+    pub async fn instructions(&self, perm: &crate::perm::PermCfg) -> Vec<(String, String)> {
+        let servers = self.servers.lock().await;
+        servers
+            .iter()
+            .filter(|s| s.instructions.is_some())
+            .filter(|s| {
+                let denied = |tool: &str| perm.check(tool, "{}") == crate::perm::Perm::Deny;
+                s.tools.is_empty()
+                    || s.tools
+                        .iter()
+                        .any(|t| !denied(&format!("mcp__{}__{}", s.shared.name, t.name)))
+            })
+            .map(|s| (s.shared.name.clone(), s.instructions.clone().unwrap()))
+            .collect()
+    }
+
     pub async fn call(&self, server_tool: &str, args: &str) -> Result<String> {
         let Some((server, tool)) = server_tool.split_once("__") else {
             bail!("bad mcp tool name: {server_tool}");
@@ -1554,7 +1656,7 @@ impl McpClient {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(token.to_string(), tool.to_string());
         let res = s
-            .request_t(CALL_TIMEOUT, "tools/call", params)
+            .request_t(call_to(&s.shared), "tools/call", params)
             .await;
         s.shared
             .progress
@@ -1575,6 +1677,15 @@ impl McpClient {
         }
         if res["isError"].as_bool().unwrap_or(false) {
             bail!("{}", if text.is_empty() { "tool error" } else { &text });
+        }
+        // structuredContent fallback: a server may answer with only
+        // structuredContent and no text blocks
+        if text.is_empty() {
+            if let Some(sc) = res.get("structuredContent") {
+                if !sc.is_null() {
+                    text = serde_json::to_string(sc).unwrap_or_default();
+                }
+            }
         }
         if text.is_empty() {
             text = "(empty result)".into();
@@ -1730,7 +1841,7 @@ impl McpClient {
             match request(
                 &s.shared,
                 &s.pending,
-                REQUEST_TIMEOUT,
+                req_to(&s.shared),
                 "logging/setLevel",
                 json!({"level": level}),
             )
@@ -1851,6 +1962,8 @@ mod tests {
         }
         let mode = std::env::var("HI_DEROLA_FAKE_MCP").unwrap_or_default();
         use std::io::{BufRead, Write};
+        // stderr probe: the client must pipe it into the log buffer
+        eprintln!("fake-mcp stderr line");
         let stdin = std::io::stdin();
         let mut out = std::io::stdout().lock();
         let mut caps_seen = Value::Null;
@@ -1931,7 +2044,7 @@ mod tests {
                     if mode == "min" {
                         json!({"capabilities": {}})
                     } else {
-                        json!({"capabilities": {"tools": {}, "resources": {"subscribe": true}, "prompts": {}, "logging": {}}})
+                        json!({"capabilities": {"tools": {}, "resources": {"subscribe": true}, "prompts": {}, "logging": {}}, "instructions": "always call ping twice"})
                     }
                 }
                 "tools/list" => {
@@ -1954,6 +2067,11 @@ mod tests {
                     }
                 }
                 "tools/call" => {
+                    if mode == "struct" {
+                        // no content blocks: the client must fall back to
+                        // structuredContent
+                        json!({"structuredContent": {"answer": 42}})
+                    } else {
                     // progress for the in-flight token, then a stale token
                     // the client must ignore; live refresh trigger last
                     let tok = v["params"]["_meta"]["progressToken"].clone();
@@ -1982,6 +2100,7 @@ mod tests {
                         "elicit_error": elicit_error,
                         "ping_reply": ping_reply,
                     }).to_string()}]})
+                    }
                 }
                 "resources/list" => {
                     if v["params"]["cursor"].as_str().is_none() {
@@ -2064,7 +2183,14 @@ mod tests {
             elicitation,
             logging,
             keepalive,
+            timeout: None,
         }
+    }
+
+    fn child_cfg_timeout(mode: &str, timeout: Option<u64>) -> McpConfig {
+        let mut c = child_cfg(mode);
+        c.timeout = timeout;
+        c
     }
 
     fn sampler_hooks() -> McpHooks {
@@ -2448,15 +2574,28 @@ mod tests {
             hooks: hooks.clone(),
         };
 
-        // the initialize-phase notifications/message is buffered, oldest first
+        // the initialize-phase notifications/message is buffered alongside
+        // the child's stderr probe line (drained into the same buffer)
+        let mut ready = false;
+        for _ in 0..100 {
+            let g = hooks.logs.lock().unwrap();
+            ready = g.iter().any(|e| e.logger == "stderr")
+                && g.iter().any(|e| e.logger == "db");
+            drop(g);
+            if ready {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(ready, "stderr probe and log entry must both drain");
         let logs = hooks.logs.lock().unwrap();
-        assert_eq!(logs.len(), 1);
-        assert_eq!(logs[0].server, "t");
-        assert_eq!(logs[0].level, "error");
-        assert_eq!(logs[0].logger, "db");
-        assert_eq!(logs[0].data, "boom");
+        let boom = logs.iter().find(|e| e.logger == "db").expect("log entry buffered");
+        assert_eq!(boom.server, "t");
+        assert_eq!(boom.level, "error");
+        assert_eq!(boom.data, "boom");
+        assert!(logs.len() >= 2, "stderr entry rides the same buffer");
         drop(logs);
-        assert_eq!(client.logs().len(), 1);
+        assert!(client.logs().len() >= 2);
 
         // error rank also surfaces as a chat note
         let mut saw_log_note = false;
@@ -2487,10 +2626,79 @@ mod tests {
         let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws"))).with_notes(ntx);
         let cfg = child_cfg_opts("1", None, Some(false));
         let _s = McpServer::connect(&cfg, &hooks).await.unwrap();
+        // the child's stderr probe must be dropped too, not just notifications/message
+        tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(
             hooks.logs.lock().unwrap().is_empty(),
-            "logging = false drops notifications/message"
+            "logging = false drops notifications/message and stderr"
         );
         assert!(nrx.try_recv().is_err(), "no notes when logging is off");
+    }
+
+    #[tokio::test]
+    async fn server_instructions_captured_and_formatted() {
+        let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws")));
+        let s = McpServer::connect(&child_cfg("1"), &hooks).await.unwrap();
+        assert_eq!(s.instructions.as_deref(), Some("always call ping twice"));
+
+        // min mode: initialize carries no instructions
+        let s = McpServer::connect(&child_cfg("min"), &hooks).await.unwrap();
+        assert!(s.instructions.is_none());
+
+        let block = instructions_block(&[("srv".into(), "  doc line\n".into())]);
+        assert!(block.starts_with("<mcp_instructions>"));
+        assert!(block.contains("<server name=\"srv\">\ndoc line\n</server>"));
+        assert!(block.ends_with("</mcp_instructions>"));
+        assert_eq!(instructions_block(&[]), "");
+    }
+
+    #[tokio::test]
+    async fn instructions_filtered_by_deny_rules() {
+        let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws")));
+        let s = McpServer::connect(&child_cfg("1"), &hooks).await.unwrap();
+        let client = McpClient {
+            servers: Mutex::new(vec![s]),
+            hooks: hooks.clone(),
+        };
+
+        // default permissions: instructions ride the prompt
+        let pairs = client.instructions(&crate::perm::PermCfg::default()).await;
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, "t");
+
+        // mcp = deny silences every server that has tools
+        let perm = crate::perm::PermCfg {
+            mcp: Some("deny".into()),
+            ..Default::default()
+        };
+        assert!(client.instructions(&perm).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn structured_content_fallback() {
+        let hooks = McpHooks::workspace(None);
+        let (client, _) = connect_all(&[child_cfg("struct")], &hooks).await;
+        let client = client.expect("struct server connects");
+        let out = client.call("t__ping", "{}").await.unwrap();
+        assert_eq!(out, r#"{"answer":42}"#);
+    }
+
+    #[tokio::test]
+    async fn per_server_timeout_applies() {
+        let hooks = McpHooks::workspace(None);
+        let s = McpServer::connect(&child_cfg_timeout("1", Some(5)), &hooks)
+            .await
+            .unwrap();
+        assert_eq!(s.shared.timeout, Some(Duration::from_secs(5)));
+        assert_eq!(req_to(&s.shared), Duration::from_secs(5));
+        assert_eq!(call_to(&s.shared), Duration::from_secs(5));
+        assert_eq!(cfg_connect_timeout(&child_cfg_timeout("1", Some(5))), Duration::from_secs(5));
+
+        // defaults stay untouched without the override
+        let s = McpServer::connect(&child_cfg("1"), &hooks).await.unwrap();
+        assert_eq!(s.shared.timeout, None);
+        assert_eq!(req_to(&s.shared), REQUEST_TIMEOUT);
+        assert_eq!(call_to(&s.shared), CALL_TIMEOUT);
+        assert_eq!(cfg_connect_timeout(&child_cfg("1")), CONNECT_TIMEOUT);
     }
 }

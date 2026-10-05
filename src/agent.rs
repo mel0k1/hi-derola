@@ -209,6 +209,15 @@ pub async fn run(
     let mut overflow_retries = 0usize;
     let mut continues = 0usize;
     let mut used: u64 = 0;
+    // server instructions from initialize ride the system prompt once per run
+    let m0 = mcp.lock().unwrap().clone();
+    if let Some(m) = &m0 {
+        let block = crate::mcp::instructions_block(&m.instructions(&cfg.perm).await);
+        if !block.is_empty() {
+            req.system.push_str("\n\n");
+            req.system.push_str(&block);
+        }
+    }
     loop {
         round += 1;
         let mcp_now = mcp.lock().unwrap().clone();

@@ -224,6 +224,10 @@ pub struct McpConfig {
     /// alive/unresponsive transitions in the chat (absent or 0 = off)
     #[serde(default)]
     pub keepalive: Option<u64>,
+    /// timeout = <seconds>: per-server request timeout (overrides the 15s
+    /// request / 120s tool-call / 30s connect defaults)
+    #[serde(default)]
+    pub timeout: Option<u64>,
 }
 
 impl McpConfig {
@@ -323,6 +327,16 @@ mod tests {
         assert_eq!(cfg.mcp[0].keepalive, Some(30));
         assert_eq!(cfg.mcp[1].keepalive, None, "absent keeps keepalive off");
         assert_eq!(cfg.mcp[2].keepalive, Some(0), "explicit 0 stays off");
+    }
+
+    #[test]
+    fn mcp_timeout_option() {
+        let raw = format!(
+            "{MINIMAL}[[mcp]]\nname = \"a\"\ncommand = \"x\"\ntimeout = 300\n\n[[mcp]]\nname = \"b\"\ncommand = \"y\"\n"
+        );
+        let cfg: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(cfg.mcp[0].timeout, Some(300), "per-server timeout override");
+        assert_eq!(cfg.mcp[1].timeout, None, "absent keeps the defaults");
     }
 
     #[test]
