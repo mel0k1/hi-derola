@@ -958,7 +958,7 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
         .unwrap_or((line, ""));
     match cmd {
         "/help" | "/h" => note(
-            "commands: /file <path> · /model <name> · /models · /plan · /undo · /redo · /init · /compact · /export [path] · /mcpadd <name> <url|command...> · /mcpconnect <name> · /mcpdisconnect <name> · /mcpres [server] · /mcpread <server> <uri> · /mcpsub <server> <uri> · /mcpunsub <server> <uri> · /mcpprompt [server] <name> [k=v] · /clear · /help\n\
+            "commands: /file <path> · /model <name> · /models · /plan · /undo · /redo · /init · /compact · /export [path] · /mcpadd <name> <url|command...> · /mcpconnect <name> · /mcpdisconnect <name> · /mcplogout <name> · /mcpres [server] · /mcpread <server> <uri> · /mcpsub <server> <uri> · /mcpunsub <server> <uri> · /mcpprompt [server] <name> [k=v] · /clear · /help\n\
              mutations (write/edit/bash/mcp) ask for confirmation, allow all skips further asks\n\
              custom commands: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)",
         ),
@@ -1073,6 +1073,18 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
                 let _ = tx.send(ApiEvent::Note(msg));
             });
             note(format!("disconnecting mcp {name}..."))
+        }
+        "/mcplogout" => {
+            if arg.is_empty() {
+                return note("usage: /mcplogout <name> — drop the stored oauth tokens; the next use starts a fresh auth flow");
+            }
+            let name = arg.trim().to_string();
+            let msg = if mcpauth::logout(&name) {
+                format!("mcp {name}: signed out (tokens cleared, a fresh auth flow starts on next use)")
+            } else {
+                format!("mcp {name}: no stored credentials")
+            };
+            note(msg)
         }
         "/mcpres" => {
             let mcp = sh.mcp.lock().unwrap().clone();

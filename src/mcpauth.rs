@@ -144,6 +144,17 @@ pub fn remove(name: &str) {
     let _ = save_all(&all);
 }
 
+/// drop the stored tokens for one server (client_info and a pending pkce
+/// flow stay); returns true when there were tokens to clear — the next
+/// request hits 401 and the normal authorize flow starts over
+pub fn logout(name: &str) -> bool {
+    let had = get(name).map(|e| e.tokens.is_some()).unwrap_or(false);
+    if had {
+        mutate(name, None, |e| e.tokens = None).ok();
+    }
+    had
+}
+
 pub fn is_expired(name: &str) -> Option<bool> {
     let t = get(name)?.tokens?;
     Some(t.expires_at.map(|e| e < now_secs()).unwrap_or(false))
@@ -1313,6 +1324,52 @@ mod tests {
         let t = tokens_from_json(&json!({"access_token": "x"})).unwrap();
         assert_eq!(t.expires_at, None);
         assert_eq!(t.refresh_token, None);
+    }
+
+    #[test]
+    fn logout_clears_tokens_keeps_client_info() {
+        let _g = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("mcpauth-logout-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("mcp-auth.json");
+        set_store_file(Some(file.clone()));
+
+        mutate("srv", Some("http://x/mcp"), |e| {
+            e.tokens = Some(Tokens {
+                access_token: "a".into(),
+                refresh_token: Some("r".into()),
+                expires_at: Some(now_secs() + 1000),
+                scope: Some("read".into()),
+            });
+            e.client_info = Some(ClientInfo {
+                client_id: "cid".into(),
+                client_secret: None,
+                client_secret_expires_at: None,
+            });
+            e.code_verifier = Some("verifier".into());
+        })
+        .unwrap();
+
+        assert!(logout("srv"), "tokens existed");
+        let e = get("srv").unwrap();
+        assert!(e.tokens.is_none(), "tokens cleared");
+        assert_eq!(
+            e.client_info.as_ref().unwrap().client_id,
+            "cid",
+            "dynamic client registration survives a logout"
+        );
+        assert_eq!(
+            e.code_verifier.as_deref(),
+            Some("verifier"),
+            "a pending pkce flow survives a logout"
+        );
+        assert_eq!(is_expired("srv"), None, "no tokens -> no expiry");
+
+        assert!(!logout("srv"), "second logout is a no-op");
+        assert!(!logout("ghost"), "unknown server is a no-op");
+
+        set_store_file(None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
