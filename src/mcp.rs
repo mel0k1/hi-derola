@@ -1588,6 +1588,47 @@ async fn http_post(
     }
 }
 
+/// notifications/cancelled is sent when a request future is dropped mid-wait
+/// (the chat turn was aborted) so the server stops the work too; the timeout
+/// paths leave it armed on purpose — the abandoned call must be told to stop
+/// (best-effort: a closed transport just swallows the send)
+struct CancelGuard {
+    shared: Arc<Shared>,
+    pending: Pending,
+    id: u64,
+    armed: bool,
+}
+
+impl CancelGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(h) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let shared = self.shared.clone();
+        let pending = self.pending.clone();
+        let id = self.id;
+        h.spawn(async move {
+            // the abandoned id can never be answered by this client again
+            pending.lock().await.remove(&id);
+            let msg = json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": {"requestId": id}
+            });
+            let _ = send_msg(&shared, &pending, &msg).await;
+        });
+    }
+}
+
 /// one request/response round trip; shared between McpServer and the
 /// notification-driven re-reads
 async fn request(
@@ -1602,12 +1643,25 @@ async fn request(
     pending.lock().await.insert(id, tx);
     let msg = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
     let sent = send_msg(shared, pending, &msg).await;
+    let mut guard = CancelGuard {
+        shared: shared.clone(),
+        pending: pending.clone(),
+        id,
+        armed: false,
+    };
+    // http replies come back inline, nothing stays in flight to cancel
+    if matches!(sent, Ok(_)) && !matches!(shared.reply, Reply::Http(_)) {
+        guard.armed = true;
+    }
     let res = match sent {
         Err(e) => Err(e),
         // http replies come back inline; stdio replies arrive via pending
         Ok(v) if matches!(shared.reply, Reply::Http(_)) => Ok(v),
         Ok(_) => match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(r)) => r,
+            Ok(Ok(r)) => {
+                guard.disarm();
+                r
+            }
             Ok(Err(_)) => bail!("mcp {}: server closed", shared.name),
             Err(_) => bail!("mcp {}: {method} timeout", shared.name),
         },
@@ -1640,6 +1694,15 @@ async fn request_reset(
     pending.lock().await.insert(id, tx);
     let msg = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
     let sent = send_msg(shared, pending, &msg).await;
+    let mut guard = CancelGuard {
+        shared: shared.clone(),
+        pending: pending.clone(),
+        id,
+        armed: false,
+    };
+    if matches!(sent, Ok(_)) && !matches!(shared.reply, Reply::Http(_)) {
+        guard.armed = true;
+    }
     let res = match sent {
         Err(e) => Err(e),
         // http replies come back inline; stdio/sse replies arrive via pending
@@ -1651,7 +1714,10 @@ async fn request_reset(
                     biased;
                     r = &mut rx => match r {
                         // the pending channel carries Result<Value> items
-                        Ok(Ok(r)) => break Ok(r),
+                        Ok(Ok(r)) => {
+                            guard.disarm();
+                            break Ok(r);
+                        }
                         Ok(Err(_)) | Err(_) => {
                             break Err(anyhow::anyhow!("mcp {}: server closed", shared.name))
                         }
@@ -2449,6 +2515,8 @@ mod tests {
         let mut elicit_error = false;
         let mut ping_reply = Value::Null;
         let mut tools_listed = 0u32;
+        // the tools/call request "hang" is currently ignoring
+        let mut hang_id: Option<u64> = None;
         for line in stdin.lock().lines() {
             let Ok(line) = line else { break };
             let Ok(v) = serde_json::from_str::<Value>(&line) else {
@@ -2483,6 +2551,21 @@ mod tests {
                 continue;
             }
             if method.starts_with("notifications/") {
+                // hang reports a cancelled call through the log buffer so the
+                // test can observe that notifications/cancelled arrived and
+                // matched the hanging request
+                if mode == "hang" && method == "notifications/cancelled" {
+                    let got = v["params"]["requestId"].as_u64().unwrap_or(0);
+                    let data = if Some(got) == hang_id {
+                        "cancelled:tools/call:match".to_string()
+                    } else {
+                        format!("cancelled:mismatch expected {hang_id:?} got {got}")
+                    };
+                    let note = json!({"jsonrpc": "2.0", "method": "notifications/message",
+                        "params": {"level": "info", "logger": "srv", "data": data}});
+                    writeln!(out, "{note}").unwrap();
+                    out.flush().unwrap();
+                }
                 continue;
             }
             // nopong mode keeps pings hanging: keepalive must time out
@@ -2565,6 +2648,7 @@ mod tests {
                     } else if mode == "hang" {
                         // never answered: the fixed timeout (or an aborted
                         // request) must clean up on the client side
+                        hang_id = Some(id);
                         continue;
                     } else {
                     // progress for the in-flight token, then a stale token
@@ -3283,6 +3367,47 @@ mod tests {
             err.to_string().contains("timeout"),
             "silent call must hit the fixed timeout: {err:#}"
         );
+    }
+
+    #[tokio::test]
+    async fn aborted_call_notifies_server() {
+        let hooks = McpHooks::workspace(None);
+        let s = McpServer::connect(&child_cfg("hang"), &hooks).await.unwrap();
+        let shared = s.shared.clone();
+        let pending = s.pending.clone();
+        let j = tokio::spawn(async move {
+            // mimics a tools/call running inside a chat turn
+            let _ = request(
+                &shared,
+                &pending,
+                Duration::from_secs(30),
+                "tools/call",
+                json!({"name": "ping", "arguments": {}}),
+            )
+            .await;
+        });
+        // let the request reach the server and hang
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        j.abort();
+        // the fake server answers notifications/cancelled through the log
+        // buffer; the requestId must match the hanging tools/call
+        let mut found = false;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let g = hooks
+                .logs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if g.iter().any(|e| e.data == "cancelled:tools/call:match") {
+                found = true;
+                break;
+            }
+        }
+        assert!(
+            found,
+            "server must observe notifications/cancelled for the hanging call"
+        );
+        drop(s);
     }
 
     /// read one http request (headers + content-length body) from a raw stream
