@@ -1790,6 +1790,7 @@ async fn http_post(
     let method = body["method"].as_str().unwrap_or("").to_string();
     let mut refreshed = false;
     let mut reinited = false;
+    let mut retries = 0u32;
     let resp = loop {
         let r = http_send(ctx, name, body, refreshed).await?;
         match r.status().as_u16() {
@@ -1812,6 +1813,24 @@ async fn http_post(
             404 | 400 if !reinited && method != "initialize" && can_reinit(ctx) => {
                 reinited = true;
                 http_reinit(shared, ctx).await?;
+                continue;
+            }
+            // transient failures on the connect/list phases: a short backoff
+            // retry (Retry-After honored when present); a real tools/call is
+            // never blindly replayed
+            s if is_transient(s) && retries < 2 && is_list_phase(&method) => {
+                retries += 1;
+                let wait = r
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+                    .unwrap_or(0)
+                    .min(5);
+                tokio::time::sleep(
+                    Duration::from_millis(400 * retries as u64) + Duration::from_secs(wait),
+                )
+                .await;
                 continue;
             }
             _ => break r,
@@ -1850,6 +1869,26 @@ async fn http_post(
 /// reinit guard: replaying initialize needs the params captured at connect
 fn can_reinit(ctx: &HttpCtx) -> bool {
     ctx.init_params.lock().unwrap().is_some()
+}
+
+/// server-side hiccups worth a retry: request timeout, throttling and any
+/// 5xx (gateway reboots, upstream blips)
+fn is_transient(status: u16) -> bool {
+    status == 408 || status == 429 || status >= 500
+}
+
+/// the phases a blind replay is safe in: transport selection and catalog
+/// discovery (opencode scopes their transient retries the same way) — a real
+/// tools/call must not run twice
+fn is_list_phase(method: &str) -> bool {
+    matches!(
+        method,
+        "initialize"
+            | "tools/list"
+            | "resources/list"
+            | "resources/templates/list"
+            | "prompts/list"
+    )
 }
 
 /// session-expiry reconnect: drop the stale session id, replay initialize +
@@ -2769,6 +2808,7 @@ pub struct McpPromptInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
 
     #[test]
     fn parse_helpers() {
@@ -3783,12 +3823,18 @@ mod tests {
     /// fake streamable http server with session semantics: a fresh
     /// mcp-session-id per initialize, DELETE recorded, GET refused (405);
     /// with expires = true the second catalog request answers 404 once,
-    /// forcing the client's session-expiry reconnect
-    fn spawn_fake_streamable(expires: bool) -> (u16, Arc<FakeHttpState>) {
+    /// forcing the client's session-expiry reconnect; fail_lists serves that
+    /// many 503s for list-phase methods (retried by the client), fail_calls
+    /// does the same for tools/call (which must NOT be retried)
+    fn spawn_fake_streamable(expires: bool, fail_lists: usize, fail_calls: usize) -> (u16, Arc<FakeHttpState>) {
         let state = Arc::new(FakeHttpState {
             inits: 0.into(),
             non_init: 0.into(),
             expires,
+            fail_lists: AtomicUsize::new(fail_lists),
+            fail_calls: AtomicUsize::new(fail_calls),
+            calls_seen: 0.into(),
+            list_503s: 0.into(),
             deletes: std::sync::Mutex::new(Vec::new()),
         });
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -3875,6 +3921,24 @@ mod tests {
                         );
                         return;
                     }
+                    if is_list_phase(&rpc_method) && st.fail_lists.load(Ordering::Relaxed) > 0 {
+                        st.fail_lists.fetch_sub(1, Ordering::Relaxed);
+                        st.list_503s.fetch_add(1, Ordering::Relaxed);
+                        let _ = s.write_all(
+                            b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot ready",
+                        );
+                        return;
+                    }
+                    if rpc_method == "tools/call" {
+                        st.calls_seen.fetch_add(1, Ordering::Relaxed);
+                        if st.fail_calls.load(Ordering::Relaxed) > 0 {
+                            st.fail_calls.fetch_sub(1, Ordering::Relaxed);
+                            let _ = s.write_all(
+                                b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: 4\r\nConnection: close\r\n\r\noop!",
+                            );
+                            return;
+                        }
+                    }
                     let result = match rpc_method.as_str() {
                         "tools/list" => json!({"tools": [
                             {"name": "ping", "description": "d", "inputSchema": {"type": "object"}}
@@ -3896,6 +3960,10 @@ mod tests {
         inits: std::sync::atomic::AtomicUsize,
         non_init: std::sync::atomic::AtomicUsize,
         expires: bool,
+        fail_lists: AtomicUsize,
+        fail_calls: AtomicUsize,
+        calls_seen: AtomicUsize,
+        list_503s: AtomicUsize,
         deletes: std::sync::Mutex<Vec<String>>,
     }
 
@@ -3924,7 +3992,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_session_expiry_reconnects_and_retries() {
-        let (port, state) = spawn_fake_streamable(true);
+        let (port, state) = spawn_fake_streamable(true, 0, 0);
         let (client, logs) = connect_all(&[remote_cfg(port)], &McpHooks::workspace(None)).await;
         let client = match client {
             Some(c) => c,
@@ -3941,7 +4009,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_terminate_sends_delete_on_drop() {
-        let (port, state) = spawn_fake_streamable(false);
+        let (port, state) = spawn_fake_streamable(false, 0, 0);
         let (client, logs) = connect_all(&[remote_cfg(port)], &McpHooks::workspace(None)).await;
         let client = match client {
             Some(c) => c,
@@ -3961,6 +4029,39 @@ mod tests {
             state.deletes.lock().unwrap().as_slice(),
             ["s1"],
             "DELETE carries the session id"
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_list_failures_are_retried() {
+        let (port, state) = spawn_fake_streamable(false, 2, 0);
+        let (client, logs) = connect_all(&[remote_cfg(port)], &McpHooks::workspace(None)).await;
+        let client = match client {
+            Some(c) => c,
+            None => panic!("transient 503s must not fail the connect: {logs:?}"),
+        };
+        assert_eq!(client.specs().await.len(), 1);
+        assert_eq!(
+            state.list_503s.load(Ordering::Relaxed),
+            2,
+            "both 503s served before a retry succeeded"
+        );
+    }
+
+    #[tokio::test]
+    async fn tools_call_is_not_retried_on_server_error() {
+        let (port, state) = spawn_fake_streamable(false, 0, 1);
+        let (client, logs) = connect_all(&[remote_cfg(port)], &McpHooks::workspace(None)).await;
+        let client = match client {
+            Some(c) => c,
+            None => panic!("server must connect: {logs:?}"),
+        };
+        let err = client.call("t__ping", "{}").await.unwrap_err();
+        assert!(err.to_string().contains("500"), "the 500 surfaces: {err:#}");
+        assert_eq!(
+            state.calls_seen.load(Ordering::Relaxed),
+            1,
+            "a real tools/call must never be blindly replayed"
         );
     }
 
