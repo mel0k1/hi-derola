@@ -53,6 +53,8 @@ stream = true
 # elicitation = false declines elicitation/create from this server
 # (by default the request surfaces as a question prompt — tui ask flow or
 # gui dialog; esc/skip cancels, the server gets decline/cancel)
+# keepalive = 30 pings the server every 30s; alive/unresponsive transitions
+# are noted in the chat once per flip (absent or 0 = off)
 
 # gui hotkeys, combos: enter, escape, tab, ctrl+x, shift+enter, alt+f, comma...
 # set to "none" to disable, unknown keys fall back to defaults

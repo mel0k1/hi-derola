@@ -220,6 +220,10 @@ pub struct McpConfig {
     /// logging = false drops notifications/message log entries from this server
     #[serde(default)]
     pub logging: Option<bool>,
+    /// keepalive = <seconds>: ping the server on an interval, note
+    /// alive/unresponsive transitions in the chat (absent or 0 = off)
+    #[serde(default)]
+    pub keepalive: Option<u64>,
 }
 
 impl McpConfig {
@@ -308,6 +312,17 @@ mod tests {
         let cfg: Config = toml::from_str(&raw).unwrap();
         assert_eq!(cfg.mcp[0].elicitation, Some(false));
         assert_eq!(cfg.mcp[1].elicitation, None, "absent keeps the default (enabled)");
+    }
+
+    #[test]
+    fn mcp_keepalive_flag() {
+        let raw = format!(
+            "{MINIMAL}[[mcp]]\nname = \"a\"\ncommand = \"x\"\nkeepalive = 30\n\n[[mcp]]\nname = \"b\"\ncommand = \"y\"\n\n[[mcp]]\nname = \"c\"\ncommand = \"z\"\nkeepalive = 0\n"
+        );
+        let cfg: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(cfg.mcp[0].keepalive, Some(30));
+        assert_eq!(cfg.mcp[1].keepalive, None, "absent keeps keepalive off");
+        assert_eq!(cfg.mcp[2].keepalive, Some(0), "explicit 0 stays off");
     }
 
     #[test]

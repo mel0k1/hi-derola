@@ -534,6 +534,9 @@ struct Shared {
     /// in-flight progress tokens from tools/call _meta.progressToken:
     /// normalized token -> tool label; unknown tokens are ignored
     progress: std::sync::Mutex<BTreeMap<String, String>>,
+    /// keepalive state: false while pings keep failing (transition notes fire
+    /// only on flips, so a dead server never spams the chat)
+    alive: AtomicBool,
 }
 
 type Pending = Arc<Mutex<BTreeMap<u64, tokio::sync::oneshot::Sender<Result<Value>>>>>;
@@ -542,8 +545,8 @@ struct McpServer {
     shared: Arc<Shared>,
     pending: Pending,
     child: Option<Child>,
-    /// background task routing server -> client traffic; aborted on drop
-    task: Option<tokio::task::JoinHandle<()>>,
+    /// background tasks (reader/live stream + optional keepalive); aborted on drop
+    tasks: Vec<tokio::task::JoinHandle<()>>,
     tools: Vec<McpTool>,
     resources: Vec<McpResource>,
     prompts: Vec<McpPrompt>,
@@ -635,7 +638,7 @@ impl McpServer {
 
 impl Drop for McpServer {
     fn drop(&mut self) {
-        if let Some(t) = self.task.take() {
+        for t in self.tasks.drain(..) {
             t.abort();
         }
         if let Some(c) = &mut self.child {
@@ -909,6 +912,7 @@ async fn handle_server_request(shared: &Arc<Shared>, id: Value, method: &str, pa
                 }
             }
         }
+        "ping" => Ok(json!({})),
         _ => Err((
             -32601,
             format!("method '{method}' is not supported by hi-derola"),
@@ -936,6 +940,40 @@ async fn reply_message(shared: &Arc<Shared>, msg: Value) {
         }
         Reply::Http(ctx) => {
             let _ = http_send(ctx, &shared.name, &msg, false).await;
+        }
+    }
+}
+
+/// periodic keepalive: ping the server on an interval, note the alive <->
+/// unresponsive transitions only (a dead server must not spam the chat)
+async fn keepalive_loop(shared: Arc<Shared>, pending: Pending, interval: Duration) {
+    loop {
+        tokio::time::sleep(interval).await;
+        if shared.closed.load(Ordering::Relaxed) {
+            return;
+        }
+        let ok = request(
+            &shared,
+            &pending,
+            interval.min(REQUEST_TIMEOUT),
+            "ping",
+            json!({}),
+        )
+        .await
+        .is_ok();
+        let was = shared.alive.swap(ok, Ordering::Relaxed);
+        if was == ok {
+            continue;
+        }
+        if let Some(tx) = &shared.hooks.notes {
+            let _ = tx.send(crate::provider::ApiEvent::Note(if ok {
+                format!("mcp {}: keepalive recovered", shared.name)
+            } else {
+                format!(
+                    "mcp {}: keepalive ping failed — server unresponsive",
+                    shared.name
+                )
+            }));
         }
     }
 }
@@ -1269,6 +1307,7 @@ impl McpServer {
                     logging: AtomicBool::new(false),
                     logging_on: cfg.logging != Some(false),
                     progress: std::sync::Mutex::new(BTreeMap::new()),
+                    alive: AtomicBool::new(true),
                 }),
                 Arc::new(Mutex::new(BTreeMap::new())),
                 None,
@@ -1308,6 +1347,7 @@ impl McpServer {
                     logging: AtomicBool::new(false),
                     logging_on: cfg.logging != Some(false),
                     progress: std::sync::Mutex::new(BTreeMap::new()),
+                    alive: AtomicBool::new(true),
                 }),
                 Arc::new(Mutex::new(BTreeMap::new())),
                 Some(child),
@@ -1318,22 +1358,31 @@ impl McpServer {
             shared,
             pending,
             child,
-            task: None,
+            tasks: Vec::new(),
             tools: Vec::new(),
             resources: Vec::new(),
             prompts: Vec::new(),
         };
         // background traffic: stdio reader or the http live stream
         if let Some(reader) = reader {
-            s.task = Some(tokio::spawn(stdio_reader(
+            s.tasks.push(tokio::spawn(stdio_reader(
                 reader,
                 s.shared.clone(),
                 s.pending.clone(),
             )));
         } else {
-            s.task = Some(tokio::spawn(http_live(
+            s.tasks.push(tokio::spawn(http_live(
                 s.shared.clone(),
                 s.pending.clone(),
+            )));
+        }
+        // optional keepalive: periodic pings note alive <-> unresponsive flips
+        let ka_secs = cfg.keepalive.unwrap_or(0);
+        if ka_secs > 0 {
+            s.tasks.push(tokio::spawn(keepalive_loop(
+                s.shared.clone(),
+                s.pending.clone(),
+                Duration::from_secs(ka_secs),
             )));
         }
         let proto = match s.shared.reply {
@@ -1807,6 +1856,7 @@ mod tests {
         let mut sampling_error = false;
         let mut elicit_reply = Value::Null;
         let mut elicit_error = false;
+        let mut ping_reply = Value::Null;
         let mut tools_listed = 0u32;
         for line in stdin.lock().lines() {
             let Ok(line) = line else { break };
@@ -1830,6 +1880,7 @@ mod tests {
                                 "count": {"type": "integer"}
                             }}
                         }}),
+                        json!({"jsonrpc": "2.0", "id": 504, "method": "ping", "params": {}}),
                         json!({"jsonrpc": "2.0", "method": "notifications/message",
                             "params": {"level": "error", "logger": "db", "data": "boom"}}),
                     ];
@@ -1843,11 +1894,15 @@ mod tests {
             if method.starts_with("notifications/") {
                 continue;
             }
+            // nopong mode keeps pings hanging: keepalive must time out
+            if method == "ping" && mode == "nopong" {
+                continue;
+            }
             let Some(id) = v.get("id").and_then(|x| x.as_u64()) else {
                 continue;
             };
             // replies to the server-initiated requests above
-            if (501..=503).contains(&id) {
+            if (501..=504).contains(&id) {
                 if v.get("error").is_some() {
                     if id == 503 {
                         elicit_error = true;
@@ -1860,8 +1915,10 @@ mod tests {
                     roots_reply = v["result"].clone();
                 } else if id == 502 {
                     sampling_reply = v["result"].clone();
-                } else {
+                } else if id == 503 {
                     elicit_reply = v["result"].clone();
+                } else {
+                    ping_reply = v["result"].clone();
                 }
                 continue;
             }
@@ -1920,6 +1977,7 @@ mod tests {
                         "sampling_error": sampling_error,
                         "elicitation": elicit_reply,
                         "elicit_error": elicit_error,
+                        "ping_reply": ping_reply,
                     }).to_string()}]})
                 }
                 "resources/list" => {
@@ -1973,6 +2031,16 @@ mod tests {
         logging: Option<bool>,
         elicitation: Option<bool>,
     ) -> McpConfig {
+        child_cfg_ka(mode, sampling, logging, elicitation, None)
+    }
+
+    fn child_cfg_ka(
+        mode: &str,
+        sampling: Option<bool>,
+        logging: Option<bool>,
+        elicitation: Option<bool>,
+        keepalive: Option<u64>,
+    ) -> McpConfig {
         let exe = std::env::current_exe().unwrap();
         let mut env = BTreeMap::new();
         env.insert("HI_DEROLA_FAKE_MCP".to_string(), mode.to_string());
@@ -1992,6 +2060,7 @@ mod tests {
             sampling,
             elicitation,
             logging,
+            keepalive,
         }
     }
 
@@ -2057,6 +2126,7 @@ mod tests {
         assert_eq!(dump["sampling"]["model"], "test-model");
         assert_eq!(dump["sampling"]["content"]["text"], "sampled:say hi");
         assert_eq!(dump["sampling_error"], false);
+        assert_eq!(dump["ping_reply"], json!({}), "server ping answered with empty result");
 
         // the ping reply was preceded by notifications/tools/list_changed:
         // the next specs() must re-list and see the second tool
@@ -2263,6 +2333,43 @@ mod tests {
             .lock()
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn keepalive_stays_silent_on_healthy_server() {
+        let (ntx, mut nrx) = tokio::sync::mpsc::unbounded_channel();
+        let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws"))).with_notes(ntx);
+        let cfg = child_cfg_ka("1", None, None, None, Some(1));
+        let _s = McpServer::connect(&cfg, &hooks).await.unwrap();
+        // two keepalive intervals with prompt ping answers: no keepalive notes
+        // (the mode-1 child does note its error log message, that one is fine)
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        while let Ok(crate::provider::ApiEvent::Note(n)) = nrx.try_recv() {
+            assert!(!n.contains("keepalive"), "healthy server must not note: {n}");
+        }
+    }
+
+    #[tokio::test]
+    async fn keepalive_notes_unresponsive_server_once() {
+        let (ntx, mut nrx) = tokio::sync::mpsc::unbounded_channel();
+        let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws"))).with_notes(ntx);
+        let cfg = child_cfg_ka("nopong", None, None, None, Some(1));
+        let _s = McpServer::connect(&cfg, &hooks).await.unwrap();
+        // pings hang, every ping times out after ~1s: exactly one transition note
+        tokio::time::sleep(Duration::from_millis(3500)).await;
+        let mut notes = Vec::new();
+        while let Ok(crate::provider::ApiEvent::Note(n)) = nrx.try_recv() {
+            notes.push(n);
+        }
+        assert_eq!(
+            notes
+                .iter()
+                .filter(|n| n.contains("keepalive ping failed"))
+                .count(),
+            1,
+            "one unresponsive note despite repeated failures, got {notes:?}"
+        );
+        assert!(notes.iter().all(|n| !n.contains("keepalive recovered")));
     }
 
     #[tokio::test]
