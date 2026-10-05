@@ -20,6 +20,109 @@ const CATALOG_TIMEOUT: Duration = Duration::from_secs(30);
 const EXECUTION_TIMEOUT: Duration = Duration::from_secs(3600);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_SAMPLING_TOKENS: u32 = 4096;
+
+/// newest protocol revision this client speaks (the 2026-07-28 bundle:
+/// url-mode elicitation, deprecated roots, explicit version negotiation)
+pub const LATEST_PROTOCOL_VERSION: &str = "2026-07-28";
+/// every revision the client can negotiate (versions are release dates, so
+/// lexicographic order = chronological order)
+const KNOWN_PROTOCOL_VERSIONS: [&str; 5] = [
+    "2024-11-05",
+    "2025-03-26",
+    "2025-06-18",
+    "2025-11-25",
+    "2026-07-28",
+];
+
+/// how the initialize handshake picks the protocolVersion it offers
+enum ProtoMode {
+    /// classic per-transport handshake (2024-11-05 stdio / 2025-03-26 http),
+    /// roots capability advertised, the server's answer trusted as-is —
+    /// today's behavior and the default
+    Legacy,
+    /// offer the newest known revision (2026-07-28), drop the deprecated
+    /// roots capability, validate the server's answer against the known list
+    Auto,
+    /// offer exactly this version; the roots capability is dropped when the
+    /// pin is 2026-07-28 or newer (roots are deprecated there); the answer
+    /// must match the pin or land in the known list
+    Pin(String),
+}
+
+fn proto_mode(cfg: &McpConfig) -> ProtoMode {
+    match cfg
+        .protocol_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        None | Some("legacy") => ProtoMode::Legacy,
+        Some("auto") => ProtoMode::Auto,
+        Some(v) => ProtoMode::Pin(v.to_string()),
+    }
+}
+
+/// the version string offered in the initialize request for one transport
+/// ("http" covers streamable and the legacy sse fallback)
+fn requested_version(mode: &ProtoMode, transport: &str) -> String {
+    match mode {
+        ProtoMode::Legacy => match transport {
+            "http" => "2025-03-26".to_string(),
+            _ => "2024-11-05".to_string(),
+        },
+        ProtoMode::Auto => LATEST_PROTOCOL_VERSION.to_string(),
+        ProtoMode::Pin(v) => v.clone(),
+    }
+}
+
+/// roots are deprecated in the 2026-07-28 revision: the capability is not
+/// advertised when the offered protocol speaks that revision or newer
+/// (lexicographic compare works because versions are YYYY-MM-DD dates);
+/// roots/list requests are still answered for back-compat
+fn roots_advertised(mode: &ProtoMode) -> bool {
+    match mode {
+        ProtoMode::Legacy => true,
+        ProtoMode::Auto => false,
+        ProtoMode::Pin(v) => v.as_str() < "2026-07-28",
+    }
+}
+
+/// validate the server's initialize answer and return the negotiated
+/// version: legacy trusts the answer unchanged (old servers may omit or
+/// bend the field), auto/pin require a known revision (or the exact pin)
+fn negotiated_version(mode: &ProtoMode, requested: &str, reply: &Value) -> Result<String> {
+    let got = reply["protocolVersion"].as_str().unwrap_or("").trim();
+    match mode {
+        ProtoMode::Legacy => Ok(if got.is_empty() {
+            requested.to_string()
+        } else {
+            got.to_string()
+        }),
+        ProtoMode::Auto => {
+            if KNOWN_PROTOCOL_VERSIONS.contains(&got) {
+                Ok(got.to_string())
+            } else {
+                anyhow::bail!(
+                    "mcp: server answered protocolVersion '{got}' which hi-derola does not support — set protocol_version = \"legacy\" (or pin a known version) for this server"
+                )
+            }
+        }
+        ProtoMode::Pin(v) => {
+            if got == v || KNOWN_PROTOCOL_VERSIONS.contains(&got) {
+                Ok(if got.is_empty() {
+                    v.clone()
+                } else {
+                    got.to_string()
+                })
+            } else {
+                anyhow::bail!(
+                    "mcp: pinned protocol_version = \"{v}\" but the server answered '{got}' — pin a known version or use protocol_version = \"legacy\""
+                )
+            }
+        }
+    }
+}
+
 /// hard cap on one jsonrpc frame / http body — a runaway server must not
 /// balloon client memory
 const FRAME_CAP: usize = 16 * 1024 * 1024;
@@ -771,6 +874,19 @@ fn trim_num(n: f64) -> String {
 
 // ---------- transport ----------
 
+/// attach the negotiated MCP-Protocol-Version header (absent until
+/// initialize settles the version; user-configured headers may override it —
+/// this runs before they are applied)
+fn with_proto(
+    req: reqwest::RequestBuilder,
+    proto: &std::sync::Mutex<Option<String>>,
+) -> reqwest::RequestBuilder {
+    match proto.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
+        Some(v) => req.header("MCP-Protocol-Version", v),
+        None => req,
+    }
+}
+
 struct HttpCtx {
     url: String,
     http: reqwest::Client,
@@ -780,6 +896,9 @@ struct HttpCtx {
     /// the initialize params used at connect; a session-expiry reconnect
     /// replays them (404/400 on a request = the server lost the session)
     init_params: std::sync::Mutex<Option<Value>>,
+    /// negotiated protocol version (set once initialize succeeds); rides
+    /// every later request as the MCP-Protocol-Version header
+    proto: std::sync::Mutex<Option<String>>,
 }
 
 /// legacy http + server-sent-events transport: one long GET stream carries
@@ -792,6 +911,9 @@ struct SseCtx {
     oauth: Option<crate::config::McpOAuthCfg>,
     /// message endpoint announced via the `endpoint` event
     endpoint: std::sync::Mutex<Option<String>>,
+    /// negotiated protocol version (set once initialize succeeds); rides
+    /// every later request as the MCP-Protocol-Version header
+    proto: std::sync::Mutex<Option<String>>,
 }
 
 /// how outgoing messages are delivered and how replies to server->client
@@ -848,6 +970,10 @@ struct Shared {
     req: Duration,
     catalog: Duration,
     execution: Duration,
+    /// whether the roots capability was advertised at connect (false for the
+    /// 2026-07-28 protocol and newer, where roots are deprecated); gates the
+    /// notifications/roots/list_changed fan-out
+    roots_cap: AtomicBool,
 }
 
 fn req_to(shared: &Shared) -> Duration {
@@ -917,6 +1043,7 @@ fn shared_for(
             .map(Duration::from_secs)
             .or(legacy)
             .unwrap_or(EXECUTION_TIMEOUT),
+        roots_cap: AtomicBool::new(roots_advertised(&proto_mode(cfg))),
     });
     (shared, Arc::new(Mutex::new(BTreeMap::new())))
 }
@@ -1355,7 +1482,7 @@ async fn handle_server_request(shared: &Arc<Shared>, id: Value, method: &str, pa
             if !shared.elicitation {
                 Ok(json!({"action": "decline"}))
             } else if params["mode"].as_str() == Some("url") {
-                // url mode (spec 2026-06-18+): the server wants the user to
+                // url mode (protocol 2026-07-28): the server wants the user to
                 // finish a flow in the browser; no form input is collected,
                 // so the reply is the empty result once the url is surfaced
                 Ok(url_mode_elicitation(shared, &params).await)
@@ -1683,7 +1810,12 @@ async fn connect_remote(
 ) -> Result<(Arc<Shared>, Pending, Value, Vec<tokio::task::JoinHandle<()>>)> {
     let url = cfg.url.clone().context("mcp: url required")?;
     let http = reqwest::Client::builder().user_agent("hi-derola").build()?;
-    let mut caps = json!({"roots": {"listChanged": true}});
+    let mode = proto_mode(cfg);
+    let requested = requested_version(&mode, "http");
+    let mut caps = json!({});
+    if roots_advertised(&mode) {
+        caps["roots"] = json!({"listChanged": true});
+    }
     if sampling {
         caps["sampling"] = json!({});
     }
@@ -1691,7 +1823,7 @@ async fn connect_remote(
         caps["elicitation"] = json!({});
     }
     let init_params = json!({
-        "protocolVersion": "2025-03-26",
+        "protocolVersion": requested,
         "capabilities": caps,
         "clientInfo": {"name": "hi-derola", "version": "0.1.0"}
     });
@@ -1709,11 +1841,19 @@ async fn connect_remote(
             oauth: cfg.oauth_cfg(),
             session: std::sync::Mutex::new(None),
             init_params: std::sync::Mutex::new(Some(init_params.clone())),
+            proto: std::sync::Mutex::new(None),
         })),
     );
     let to = cfg_connect_timeout(cfg);
     let first_err = match request(&http_shared, &pending, to, "initialize", init_params.clone()).await {
-        Ok(v) => return Ok((http_shared, pending, v, Vec::new())),
+        Ok(v) => {
+            let negotiated = negotiated_version(&mode, &requested, &v)?;
+            if let Reply::Http(ctx) = &http_shared.reply {
+                *ctx.proto.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(negotiated);
+            }
+            return Ok((http_shared, pending, v, Vec::new()));
+        }
         Err(e) => e,
     };
     if format!("{first_err:#}").contains("401 unauthorized") {
@@ -1733,12 +1873,20 @@ async fn connect_remote(
             headers: cfg.headers.clone(),
             oauth: cfg.oauth_cfg(),
             endpoint: std::sync::Mutex::new(None),
+            proto: std::sync::Mutex::new(None),
         })),
     );
     let mut tasks = Vec::new();
     tasks.push(tokio::spawn(sse_live(sse_shared.clone(), sse_pending.clone())));
     match request(&sse_shared, &sse_pending, to, "initialize", init_params).await {
-        Ok(v) => Ok((sse_shared, sse_pending, v, tasks)),
+        Ok(v) => {
+            let negotiated = negotiated_version(&mode, &requested, &v)?;
+            if let Reply::Sse(ctx) = &sse_shared.reply {
+                *ctx.proto.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(negotiated);
+            }
+            Ok((sse_shared, sse_pending, v, tasks))
+        }
         Err(_) => Err(first_err),
     }
 }
@@ -1781,6 +1929,7 @@ async fn sse_get_stream(ctx: &SseCtx, name: &str) -> Result<reqwest::Response> {
     if let Some(t) = &token {
         req = req.header("Authorization", format!("Bearer {t}"));
     }
+    req = with_proto(req, &ctx.proto);
     for (k, v) in ctx.headers.iter() {
         req = req.header(k.as_str(), v.as_str());
     }
@@ -1807,6 +1956,7 @@ async fn sse_post(ctx: &SseCtx, name: &str, ep: &str, body: &Value) -> Result<()
     if let Some(t) = &token {
         req = req.header("Authorization", format!("Bearer {t}"));
     }
+    req = with_proto(req, &ctx.proto);
     for (k, v) in ctx.headers.iter() {
         req = req.header(k.as_str(), v.as_str());
     }
@@ -1900,6 +2050,7 @@ async fn http_get_stream(ctx: &HttpCtx, name: &str) -> Result<reqwest::Response>
     if let Some(sid) = ctx.session.lock().unwrap().as_ref() {
         req = req.header("mcp-session-id", sid);
     }
+    req = with_proto(req, &ctx.proto);
     for (k, v) in ctx.headers.iter() {
         req = req.header(k.as_str(), v.as_str());
     }
@@ -1971,6 +2122,7 @@ async fn http_send(
     if let Some(sid) = ctx.session.lock().unwrap().as_ref() {
         req = req.header("mcp-session-id", sid);
     }
+    req = with_proto(req, &ctx.proto);
     for (k, v) in ctx.headers.iter() {
         req = req.header(k.as_str(), v.as_str());
     }
@@ -2187,6 +2339,7 @@ async fn http_terminate(ctx: &HttpCtx, name: &str) {
         req = req.header("Authorization", format!("Bearer {t}"));
     }
     req = req.header("mcp-session-id", sid);
+    req = with_proto(req, &ctx.proto);
     for (k, v) in ctx.headers.iter() {
         req = req.header(k.as_str(), v.as_str());
     }
@@ -2511,11 +2664,12 @@ impl McpServer {
                 Duration::from_secs(ka_secs),
             )));
         }
-        let proto = match s.shared.reply {
-            Reply::Http(_) => "2025-03-26",
-            Reply::Sse(_) | Reply::Stdio { .. } => "2024-11-05",
-        };
-        let mut client_caps = json!({"roots": {"listChanged": true}});
+        let mode = proto_mode(cfg);
+        let want_roots = roots_advertised(&mode);
+        let mut client_caps = json!({});
+        if want_roots {
+            client_caps["roots"] = json!({"listChanged": true});
+        }
         if sampling {
             client_caps["sampling"] = json!({});
         }
@@ -2523,20 +2677,25 @@ impl McpServer {
             client_caps["elicitation"] = json!({});
         }
         // remote transports already answered initialize during transport
-        // selection; stdio sends it here (bounded by the startup phase)
+        // selection (and validated the negotiation); stdio sends it here
+        // (bounded by the startup phase)
         let init = match init {
             Some(v) => v,
             None => {
-                s.request_t(
-                    cfg_connect_timeout(cfg),
-                    "initialize",
-                    json!({
-                        "protocolVersion": proto,
-                        "capabilities": client_caps,
-                        "clientInfo": {"name": "hi-derola", "version": "0.1.0"}
-                    }),
-                )
-                .await?
+                let requested = requested_version(&mode, "stdio");
+                let v = s
+                    .request_t(
+                        cfg_connect_timeout(cfg),
+                        "initialize",
+                        json!({
+                            "protocolVersion": requested,
+                            "capabilities": client_caps,
+                            "clientInfo": {"name": "hi-derola", "version": "0.1.0"}
+                        }),
+                    )
+                    .await?;
+                negotiated_version(&mode, &requested, &v)?;
+                v
             }
         };
         let caps = init["capabilities"].clone();
@@ -2928,13 +3087,18 @@ impl McpClient {
         s.get_prompt(name, args).await
     }
 
-    /// update the exposed roots and tell every live server
+    /// update the exposed roots and tell every live server that advertised
+    /// them (the 2026-07-28 protocol deprecates roots, so those servers are
+    /// not notified)
     pub async fn set_roots(&self, dirs: Vec<String>) {
         if let Ok(mut g) = self.hooks.roots.write() {
             *g = dirs;
         }
         let servers = self.servers.lock().await;
         for s in servers.iter() {
+            if !s.shared.roots_cap.load(Ordering::Relaxed) {
+                continue;
+            }
             let _ = s.notify_t("notifications/roots/list_changed").await;
         }
     }
@@ -3145,6 +3309,7 @@ mod tests {
         let stdin = std::io::stdin();
         let mut out = std::io::stdout().lock();
         let mut caps_seen = Value::Null;
+        let mut proto_seen = Value::Null;
         let mut roots_reply = Value::Null;
         let mut sampling_reply = Value::Null;
         let mut sampling_error = false;
@@ -3264,6 +3429,7 @@ mod tests {
             let result = match method.as_str() {
                 "initialize" => {
                     caps_seen = v["params"]["capabilities"].clone();
+                    proto_seen = v["params"]["protocolVersion"].clone();
                     if mode == "crash" {
                         // die with a non-zero code and some stderr noise: the
                         // client's error must carry both
@@ -3294,8 +3460,13 @@ mod tests {
                         json!({"capabilities": {}})
                     } else if mode == "min" {
                         json!({"capabilities": {}})
+                    } else if mode == "badproto" {
+                        // a revision this client never spoke: negotiation
+                        // must refuse it (auto/pin), legacy tolerates
+                        json!({"protocolVersion": "1999-01-01", "capabilities": {}})
                     } else {
-                        json!({"capabilities": {"tools": {}, "resources": {"subscribe": true}, "prompts": {}, "logging": {}}, "instructions": "always call ping twice"})
+                        // a well-behaved server accepts the offered version
+                        json!({"protocolVersion": v["params"]["protocolVersion"], "capabilities": {"tools": {}, "resources": {"subscribe": true}, "prompts": {}, "logging": {}}, "instructions": "always call ping twice"})
                     }
                 }
                 "tools/list" => {
@@ -3365,6 +3536,7 @@ mod tests {
                     out.flush().unwrap();
                     json!({"content": [{"type": "text", "text": json!({
                         "caps": caps_seen,
+                        "proto": proto_seen,
                         "roots": roots_reply,
                         "sampling": sampling_reply,
                         "sampling_error": sampling_error,
@@ -3466,6 +3638,7 @@ mod tests {
             execution_timeout: None,
             enabled: None,
             cwd: None,
+            protocol_version: None,
         }
     }
 
@@ -4292,6 +4465,7 @@ mod tests {
             calls_seen: 0.into(),
             list_503s: 0.into(),
             deletes: std::sync::Mutex::new(Vec::new()),
+            proto_hdrs: std::sync::Mutex::new(Vec::new()),
         });
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -4317,6 +4491,20 @@ mod tests {
                             None
                         }
                     });
+                    let proto_hdr = req.lines().find_map(|l| {
+                        let (k, v) = l.split_once(':')?;
+                        if k.trim().eq_ignore_ascii_case("mcp-protocol-version") {
+                            Some(v.trim().to_string())
+                        } else {
+                            None
+                        }
+                    });
+                    if method == "POST" {
+                        st.proto_hdrs
+                            .lock()
+                            .unwrap()
+                            .push(proto_hdr.unwrap_or_default());
+                    }
                     if method == "GET" && path == "/mcp" {
                         let _ = s.write_all(
                             b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
@@ -4351,7 +4539,7 @@ mod tests {
                         let n = st.inits.fetch_add(1, Ordering::Relaxed) + 1;
                         let result = reply_msg(
                             id.clone(),
-                            json!({"capabilities": {"tools": {}, "resources": {}, "prompts": {}}}),
+                            json!({"protocolVersion": v["params"]["protocolVersion"], "capabilities": {"tools": {}, "resources": {}, "prompts": {}}}),
                         );
                         let _ = s.write_all(
                             answer(
@@ -4421,6 +4609,8 @@ mod tests {
         calls_seen: AtomicUsize,
         list_503s: AtomicUsize,
         deletes: std::sync::Mutex<Vec<String>>,
+        /// MCP-Protocol-Version header of every POST (empty string = absent)
+        proto_hdrs: std::sync::Mutex<Vec<String>>,
     }
 
     fn remote_cfg(port: u16) -> McpConfig {
@@ -4443,6 +4633,7 @@ mod tests {
             execution_timeout: None,
             enabled: None,
             cwd: None,
+            protocol_version: None,
         }
     }
 
@@ -4461,6 +4652,107 @@ mod tests {
             2,
             "initialize replayed exactly once"
         );
+    }
+
+    /// connect the stdio fake with a protocol_version setting and return the
+    /// dump the fake echoes back (carries the offered version + client caps)
+    async fn neg_dump(pv: Option<&str>) -> Value {
+        let mut cfg = child_cfg("1");
+        cfg.protocol_version = pv.map(|s| s.to_string());
+        let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws")));
+        let s = McpServer::connect(&cfg, &hooks).await.unwrap();
+        let res = s
+            .request_t(
+                EXECUTION_TIMEOUT,
+                "tools/call",
+                json!({"name": "ping", "arguments": {}}),
+            )
+            .await
+            .unwrap();
+        serde_json::from_str(res["content"][0]["text"].as_str().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn protocol_negotiation_stdio_modes() {
+        // legacy (absent and explicit): classic stdio version, roots kept
+        let d = neg_dump(None).await;
+        assert_eq!(d["proto"], "2024-11-05", "default stays on the legacy handshake");
+        assert_eq!(d["caps"]["roots"]["listChanged"], true, "roots advertised");
+        let d = neg_dump(Some("legacy")).await;
+        assert_eq!(d["proto"], "2024-11-05");
+        assert_eq!(d["caps"]["roots"]["listChanged"], true);
+
+        // auto: newest revision offered, deprecated roots dropped
+        let d = neg_dump(Some("auto")).await;
+        assert_eq!(d["proto"], LATEST_PROTOCOL_VERSION);
+        assert!(d["caps"]["roots"].is_null(), "roots not advertised for 2026-07-28");
+        assert_eq!(d["caps"]["elicitation"], json!({}), "other caps untouched");
+
+        // pin: exact version; roots kept below the deprecation revision
+        let d = neg_dump(Some("2025-06-18")).await;
+        assert_eq!(d["proto"], "2025-06-18");
+        assert_eq!(d["caps"]["roots"]["listChanged"], true);
+        let d = neg_dump(Some("2026-07-28")).await;
+        assert_eq!(d["proto"], "2026-07-28");
+        assert!(d["caps"]["roots"].is_null(), "pin at the deprecation revision drops roots");
+    }
+
+    #[tokio::test]
+    async fn protocol_negotiation_validates_the_answer() {
+        // auto must refuse a revision it never spoke (the fake answers
+        // 1999-01-01), with a hint at the escape hatch
+        let mut cfg = child_cfg("badproto");
+        cfg.protocol_version = Some("auto".to_string());
+        let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws")));
+        let err = match McpServer::connect(&cfg, &hooks).await {
+            Err(e) => format!("{e:#}"),
+            Ok(_) => panic!("auto must reject the bogus version"),
+        };
+        assert!(err.contains("1999-01-01"), "error names the version: {err}");
+        assert!(err.contains("protocol_version"), "error hints at the config: {err}");
+
+        // legacy trusts the answer: the same server still connects
+        let mut cfg = child_cfg("badproto");
+        cfg.protocol_version = Some("legacy".to_string());
+        let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws")));
+        let s = McpServer::connect(&cfg, &hooks).await.unwrap();
+        let res = s
+            .request_t(
+                EXECUTION_TIMEOUT,
+                "tools/call",
+                json!({"name": "ping", "arguments": {}}),
+            )
+            .await
+            .unwrap();
+        let dump: Value =
+            serde_json::from_str(res["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(dump["proto"], "2024-11-05", "connect succeeded in legacy mode");
+    }
+
+    #[tokio::test]
+    async fn http_negotiated_version_rides_the_header() {
+        let (port, state) = spawn_fake_streamable(false, 0, 0);
+        let mut cfg = remote_cfg(port);
+        cfg.protocol_version = Some("auto".to_string());
+        let (client, logs) =
+            connect_all(&[cfg], &McpHooks::workspace(None)).await;
+        let client = match client {
+            Some(c) => c,
+            None => panic!("server must connect: {logs:?}"),
+        };
+        // exercise a real call: the negotiated version rides every later POST
+        let _ = client.call("t__ping", "{}").await.unwrap();
+        let hdrs = state.proto_hdrs.lock().unwrap().clone();
+        assert!(!hdrs.is_empty());
+        assert_eq!(
+            hdrs[0], "",
+            "the initialize request carries no version header yet"
+        );
+        assert!(
+            hdrs[1..].iter().all(|h| h == LATEST_PROTOCOL_VERSION),
+            "every later POST carries MCP-Protocol-Version: {hdrs:?}"
+        );
+        drop(client);
     }
 
     #[tokio::test]

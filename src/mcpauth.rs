@@ -1661,6 +1661,7 @@ mod tests {
             execution_timeout: None,
             enabled: None,
             cwd: None,
+            protocol_version: None,
         }];
 
         let rt = tokio::runtime::Builder::new_current_thread()

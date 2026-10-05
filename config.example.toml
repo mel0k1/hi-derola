@@ -68,6 +68,12 @@ stream = true
 # enabled = false skips this server at startup; /mcpconnect refuses it
 # until it is re-enabled
 # cwd = "/path/to/dir" sets the working directory of a local (stdio) server
+# protocol_version picks the initialize handshake: "legacy" (default) keeps
+# the classic per-transport versions (2024-11-05 stdio / 2025-03-26 http,
+# roots advertised, server answer trusted), "auto" offers 2026-07-28 (roots
+# capability dropped, server answer validated), any other value pins exactly
+# that version (roots dropped when the pin is 2026-07-28 or newer)
+# protocol_version = "auto"
 # servers can also be added at runtime from the chat:
 # /mcpadd <name> <url|command...> (saved here), /mcpconnect <name> reconnects,
 # /mcpdisconnect <name> drops the live connection without touching the config

@@ -252,6 +252,14 @@ pub struct McpConfig {
     /// working directory for a local (stdio) server
     #[serde(default)]
     pub cwd: Option<String>,
+    /// protocol version negotiation: "legacy" (default) keeps the classic
+    /// per-transport handshake (2024-11-05 stdio / 2025-03-26 http, roots
+    /// advertised, server answer trusted); "auto" asks for the newest
+    /// revision this client speaks (2026-07-28: roots capability dropped,
+    /// server answer validated); any other value pins exactly that version
+    /// (roots are dropped when the pin is 2026-07-28 or newer)
+    #[serde(default)]
+    pub protocol_version: Option<String>,
 }
 
 impl McpConfig {
@@ -392,6 +400,21 @@ mod tests {
         let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
         assert_eq!(back.mcp[0].enabled, Some(false));
         assert_eq!(back.mcp[0].cwd.as_deref(), Some("/tmp/ws"));
+    }
+
+    #[test]
+    fn mcp_protocol_version_roundtrip() {
+        let raw = format!(
+            "{MINIMAL}[[mcp]]\nname = \"a\"\ncommand = \"x\"\nprotocol_version = \"auto\"\n\n[[mcp]]\nname = \"b\"\ncommand = \"y\"\nprotocol_version = \"2025-06-18\"\n\n[[mcp]]\nname = \"c\"\ncommand = \"z\"\n"
+        );
+        let cfg: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(cfg.mcp[0].protocol_version.as_deref(), Some("auto"));
+        assert_eq!(cfg.mcp[1].protocol_version.as_deref(), Some("2025-06-18"));
+        assert_eq!(cfg.mcp[2].protocol_version, None, "absent = legacy handshake");
+        // round-trip keeps the field
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back.mcp[0].protocol_version.as_deref(), Some("auto"));
+        assert_eq!(back.mcp[1].protocol_version.as_deref(), Some("2025-06-18"));
     }
 
     #[test]
