@@ -1129,6 +1129,20 @@ function applyPlan() {
 
 /* ask */
 
+// a question may carry a raw json schema (mcp elicitation): render one
+// control per property instead of a single free-text input
+function elicitForm(q) {
+  const props = q.schema && q.schema.properties;
+  if (!props || typeof props !== "object") return null;
+  const names = Object.keys(props);
+  if (!names.length) return null;
+  return {
+    props,
+    names,
+    required: Array.isArray(q.schema.required) ? q.schema.required : [],
+  };
+}
+
 function openAsk(args) {
   let qs = [];
   try {
@@ -1139,7 +1153,18 @@ function openAsk(args) {
     return;
   }
   askOpen = true;
-  askState = { qs, sel: qs.map(() => new Set()), custom: qs.map(() => "") };
+  const forms = qs.map((q) => {
+    const f = elicitForm(q);
+    if (!f) return null;
+    const vals = {};
+    f.names.forEach((n) => {
+      const d = f.props[n] || {};
+      if (d.default !== undefined) vals[n] = d.type === "boolean" ? !!d.default : d.default;
+      else if (d.type === "boolean") vals[n] = false;
+    });
+    return { ...f, vals };
+  });
+  askState = { qs, sel: qs.map(() => new Set()), custom: qs.map(() => ""), forms };
   const body = $("ask-body");
   body.replaceChildren();
   qs.forEach((q, i) => {
@@ -1147,61 +1172,166 @@ function openAsk(args) {
     const header = (q.header || "").trim();
     if (header) wrap.appendChild(el("div", "q-header", header));
     wrap.appendChild(el("div", "q-text", q.question || ""));
-    const opts = el("div", "ask-opts");
-    (q.options || []).forEach((o, j) => {
-      const b = el("button", "ask-opt");
-      b.type = "button";
-      b.appendChild(el("span", "o-label", o.label || ""));
-      if (o.description) b.appendChild(el("span", "o-desc", o.description));
-      b.onclick = () => {
-        const set = askState.sel[i];
-        if (q.multiple) {
-          set.has(j) ? set.delete(j) : set.add(j);
-          b.classList.toggle("sel", set.has(j));
+    const form = forms[i];
+    if (form) {
+      const grid = el("div", "ask-form");
+      form.names.forEach((name) => {
+        const def = form.props[name] || {};
+        const desc = (def.description || "").trim();
+        const req = form.required.includes(name);
+        const row = el("div", "ask-field");
+        const lab = el("div", "f-lab");
+        const nameSpan = el("span", "f-name", name);
+        if (req) nameSpan.appendChild(el("span", "f-req", " *"));
+        lab.appendChild(nameSpan);
+        if (desc) {
+          lab.title = desc;
+          lab.appendChild(el("span", "f-desc", desc));
+        }
+        row.appendChild(lab);
+        const ctl = document.createElement("div");
+        ctl.className = "f-ctl";
+        const record = (v) => { form.vals[name] = v; row.classList.remove("f-missing"); };
+        if (Array.isArray(def.enum) && def.enum.length) {
+          const sel = document.createElement("select");
+          const empty = document.createElement("option");
+          empty.value = "";
+          empty.textContent = req ? "— pick —" : "— none —";
+          sel.appendChild(empty);
+          def.enum.forEach((v, k) => {
+            const o = document.createElement("option");
+            o.value = k;
+            o.textContent = v === null ? "null" : String(v);
+            if (def.default !== undefined && String(def.default) === String(v)) o.selected = true;
+            sel.appendChild(o);
+          });
+          sel.dataset.enum = name;
+          sel.onchange = () => {
+            record(sel.value === "" ? "" : def.enum[Number(sel.value)]);
+          };
+          if (def.default !== undefined) record(def.default);
+          ctl.appendChild(sel);
+        } else if (def.type === "boolean") {
+          const box = document.createElement("input");
+          box.type = "checkbox";
+          box.checked = !!form.vals[name];
+          box.onchange = () => record(box.checked);
+          ctl.appendChild(box);
+        } else if (def.type === "integer" || def.type === "number") {
+          const inp = document.createElement("input");
+          inp.type = "number";
+          if (def.type === "integer") inp.step = "1";
+          if (def.default !== undefined) inp.value = String(def.default);
+          inp.placeholder = def.type;
+          inp.oninput = () => record(inp.value === "" ? "" : Number(inp.value));
+          ctl.appendChild(inp);
         } else {
-          set.clear();
-          set.add(j);
-          [...opts.children].forEach((c, k) => c.classList.toggle("sel", k === j));
+          const inp = document.createElement("input");
+          inp.type = "text";
+          if (def.default !== undefined) inp.value = String(def.default);
+          inp.spellcheck = false;
+          inp.placeholder = "value";
+          inp.oninput = () => record(inp.value);
+          inp.onkeydown = (e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              submitAsk();
+            }
+          };
+          ctl.appendChild(inp);
+        }
+        row.appendChild(ctl);
+        grid.appendChild(row);
+      });
+      wrap.appendChild(grid);
+    } else {
+      const opts = el("div", "ask-opts");
+      (q.options || []).forEach((o, j) => {
+        const b = el("button", "ask-opt");
+        b.type = "button";
+        b.appendChild(el("span", "o-label", o.label || ""));
+        if (o.description) b.appendChild(el("span", "o-desc", o.description));
+        b.onclick = () => {
+          const set = askState.sel[i];
+          if (q.multiple) {
+            set.has(j) ? set.delete(j) : set.add(j);
+            b.classList.toggle("sel", set.has(j));
+          } else {
+            set.clear();
+            set.add(j);
+            [...opts.children].forEach((c, k) => c.classList.toggle("sel", k === j));
+          }
+        };
+        opts.appendChild(b);
+      });
+      wrap.appendChild(opts);
+      const inp = document.createElement("input");
+      inp.placeholder = "type your own answer";
+      inp.spellcheck = false;
+      inp.oninput = () => { askState.custom[i] = inp.value; };
+      inp.onkeydown = (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          submitAsk();
         }
       };
-      opts.appendChild(b);
-    });
-    wrap.appendChild(opts);
-    const inp = document.createElement("input");
-    inp.placeholder = "type your own answer";
-    inp.spellcheck = false;
-    inp.oninput = () => { askState.custom[i] = inp.value; };
-    inp.onkeydown = (e) => {
-      if (e.key === "Enter") {
-        e.preventDefault();
-        submitAsk();
-      }
-    };
-    wrap.appendChild(inp);
+      wrap.appendChild(inp);
+    }
     body.appendChild(wrap);
   });
   $("ask-overlay").classList.remove("hidden");
   $("input").blur();
-  const first = body.querySelector("input");
+  const first = body.querySelector(".ask-form input, .ask-form select, input");
   if (first) first.focus();
 }
 
 function composeAsk() {
-  const { qs, sel, custom } = askState;
+  const { qs, sel, custom, forms } = askState;
   const lines = [];
-  qs.forEach((q, i) => {
+  for (let i = 0; i < qs.length; i++) {
+    const q = qs[i];
+    const form = forms[i];
+    if (form) {
+      // schema form: submit a json object, empty required fields block submit
+      for (const name of form.names) {
+        const v = form.vals[name];
+        const missing =
+          form.required.includes(name) &&
+          (v === undefined || v === "" || v === null);
+        if (missing) {
+          const row = [...document.querySelectorAll("#ask-body .ask-field")].find(
+            (r) => r.querySelector(".f-name") && r.querySelector(".f-name").textContent.trim() === name
+          );
+          if (row) {
+            row.classList.add("f-missing");
+            const c = row.querySelector("input, select");
+            if (c) c.focus();
+          }
+          return null;
+        }
+      }
+      const obj = {};
+      for (const name of form.names) {
+        const v = form.vals[name];
+        if (v === undefined || v === "" || v === null) continue;
+        obj[name] = v;
+      }
+      if (Object.keys(obj).length) lines.push(JSON.stringify(obj));
+      continue;
+    }
     const labels = [...sel[i]].map((j) => ((q.options || [])[j] || {}).label).filter(Boolean);
     const customText = (custom[i] || "").trim();
     let ans = customText || labels.join(", ");
-    if (!ans) return;
+    if (!ans) continue;
     const header = (q.header || "").trim();
     lines.push(header ? header + ": " + ans : ans);
-  });
+  }
   return lines.join("\n");
 }
 
 function submitAsk() {
   const text = composeAsk();
+  if (text === null) return; // required fields are highlighted, stay open
   closeAsk();
   invoke("answer", { text });
   note(text ? "answered" : "no answer given");

@@ -414,6 +414,9 @@ pub fn default_eliciter(
                     "header": format!("mcp {}", req.server),
                     "question": question,
                     "options": opts,
+                    // raw requestedSchema: the gui renders it as a form, the
+                    // tui ignores it and keeps the free-text answer
+                    "schema": req.schema,
                 }]
             })
             .to_string();
@@ -2260,17 +2263,24 @@ mod tests {
     async fn default_eliciter_uses_ask_flow() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let el = default_eliciter(tx);
+        let schema = json!({"type": "object", "properties": {
+            "color": {"type": "string", "enum": ["red", "green"]}
+        }});
+        let expected = schema.clone();
         tokio::spawn(async move {
-            if let Some(crate::provider::ApiEvent::Ask { rx: arx, .. }) = rx.recv().await {
+            if let Some(crate::provider::ApiEvent::Ask { args, rx: arx, .. }) = rx.recv().await {
+                let v: Value = serde_json::from_str(&args).unwrap();
+                assert_eq!(
+                    v["questions"][0]["schema"], expected,
+                    "gui gets the raw schema to render a form"
+                );
                 let _ = arx.send("green".to_string());
             }
         });
         let out = el(ElicitReq {
             server: "t".into(),
             message: "pick".into(),
-            schema: json!({"type": "object", "properties": {
-                "color": {"type": "string", "enum": ["red", "green"]}
-            }}),
+            schema,
         })
         .await
         .unwrap();

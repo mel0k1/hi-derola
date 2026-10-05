@@ -352,6 +352,24 @@ pre.diff .ctx { color: var(--dim); }
 .ask-opt:hover { border-color: var(--accent); }
 .ask-opt.sel { border-color: var(--accent); background: var(--accent-dim, rgba(122,162,247,.12)); }
 .ask-opt .o-desc { display: block; color: var(--dim); font-size: 12px; margin-top: 2px; }
+.ask-form {
+  display: flex; flex-direction: column; gap: 10px; margin: 4px 0 10px;
+  padding: 10px 12px; background: var(--panel2); border: 1px solid var(--border); border-radius: 10px;
+}
+.ask-field { display: flex; flex-direction: column; gap: 4px; }
+.ask-field .f-lab { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.ask-field .f-name { font: 12.5px var(--mono); color: var(--accent); }
+.ask-field .f-req { color: var(--del); }
+.ask-field .f-desc { color: var(--dim); font-size: 12px; }
+.ask-field .f-ctl input[type="text"], .ask-field .f-ctl input[type="number"], .ask-field .f-ctl select {
+  width: 100%; box-sizing: border-box;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+  color: var(--fg); font: 13px var(--mono); padding: 7px 10px; outline: none;
+}
+.ask-field .f-ctl input:focus, .ask-field .f-ctl select:focus { border-color: var(--accent-dim); }
+.ask-field .f-ctl input[type="checkbox"] { accent-color: var(--accent); width: 15px; height: 15px; }
+.ask-field.f-missing { outline: 1px solid var(--del); border-radius: 8px; }
+.ask-field.f-missing .f-name::after { content: " (required)"; color: var(--del); font-size: 11px; }
 .ask-q input {
   width: 100%; box-sizing: border-box; background: var(--bg); border: 1px solid var(--border);
   border-radius: 8px; color: var(--fg); padding: 8px 10px; font: inherit;
