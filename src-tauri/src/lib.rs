@@ -7,7 +7,7 @@ use hi_derola::mcpauth;
 use hi_derola::provider::{self, ApiEvent, ChatRequest, ConfirmReply, Provider};
 use hi_derola::sessions::{self, ChangeRec as SessionChange, SessionMeta, StoredSession};
 use hi_derola::todo::Todo;
-use hi_derola::{fmt, lsp, models, snapshot, tools};
+use hi_derola::{fmt, lsp, models, sandbox, snapshot, tools};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -703,6 +703,51 @@ async fn mcp_get_prompt(
             .collect()),
         Err(e) => Err(format!("{e:#}")),
     }
+}
+
+// ---- sandbox: local QEMU VMs for isolated agent work ----
+
+#[tauri::command]
+async fn sandbox_detect() -> Result<sandbox::QemuInfo, String> {
+    tokio::task::spawn_blocking(sandbox::detect_qemu)
+        .await
+        .map_err(|e| format!("{e}"))
+}
+
+#[tauri::command]
+async fn sandbox_list() -> Result<Value, String> {
+    let m = sandbox::SandboxManager::global();
+    Ok(json!({
+        "dir": m.dir().display().to_string(),
+        "sandboxes": m.list(),
+    }))
+}
+
+#[tauri::command]
+async fn sandbox_create(spec: sandbox::NewSandbox) -> Result<sandbox::SandboxStatus, String> {
+    let m = sandbox::SandboxManager::global().clone();
+    tokio::task::spawn_blocking(move || m.create(&spec))
+        .await
+        .map_err(|e| format!("{e}"))?
+        .map_err(|e| format!("{e:#}"))
+}
+
+/// action: start | stop | delete; start/stop return the fresh status,
+/// delete returns null (the caller refreshes the list)
+#[tauri::command]
+async fn sandbox_action(id: String, action: String) -> Result<Value, String> {
+    let m = sandbox::SandboxManager::global().clone();
+    tokio::task::spawn_blocking(move || match action.as_str() {
+        "start" => m
+            .start(&id)
+            .and_then(|s| Ok(serde_json::to_value(s)?)),
+        "stop" => m.stop(&id).and_then(|s| Ok(serde_json::to_value(s)?)),
+        "delete" => m.delete(&id).map(|_| Value::Null),
+        other => Err(anyhow::anyhow!("unknown sandbox action \"{other}\"")),
+    })
+    .await
+    .map_err(|e| format!("{e}"))?
+    .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -1720,7 +1765,8 @@ pub fn run() -> Result<()> {
         .invoke_handler(tauri::generate_handler![
             init, save, send, confirm, answer, allow_all, stop, list_models, mcp_reconnect,
             mcp_auth, mcp_resources, mcp_read_resource, mcp_subscribe, mcp_unsubscribe, mcp_prompts,
-            mcp_templates, mcp_subscriptions, mcp_get_prompt, undo,
+            mcp_templates, mcp_subscriptions, mcp_get_prompt, sandbox_detect, sandbox_list,
+            sandbox_create, sandbox_action, undo,
             redo, list_sessions, new_session, open_session, delete_session, list_dir, attach_path,
             detach, set_theme, list_project_files, set_plan, task_kill, list_agents
         ])

@@ -27,6 +27,10 @@ let reviewExpanded = new Set();
 let paletteOpen = false;
 let paletteItems = [];
 let paletteIdx = 0;
+let sandboxOpen = false;
+let SBX = { qemu: null, dir: "", list: [], lastJson: "" };
+let SBXW = null;
+let sbxTimer = null;
 
 let streamRaw = null;
 let streamBody = null;
@@ -55,6 +59,11 @@ const ICONS = {
   x: '<path d="M18 6L6 18"/><path d="M6 6l12 12"/>',
   up: '<path d="M12 19V5"/><path d="M5 12l7-7 7 7"/>',
   check: '<path d="M20 6L9 17l-5-5"/>',
+  box: '<path d="M21 8l-9-5-9 5v8l9 5 9-5z"/><path d="M3 8l9 5 9-5"/><path d="M12 13v9"/>',
+  play: '<path d="M7 4l13 8-13 8z"/>',
+  stop: '<rect x="6" y="6" width="12" height="12" rx="1.5"/>',
+  download: '<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>',
+  warn: '<path d="M12 3L2 21h20z"/><path d="M12 10v5"/><path d="M12 18h.01"/>',
 };
 
 function icon(name) {
@@ -749,6 +758,7 @@ function paletteBuildItems() {
     items.push({ icon: "command", label, hint, run: () => runCmd(cmd) });
   }
   items.push({ icon: "sun", label: "toggle theme", hint: "dark / light", run: toggleTheme });
+  items.push({ icon: "box", label: "open sandbox", hint: "local VMs, isolated agent workspace", run: () => toggleSandboxView(true) });
   items.push({ icon: "sliders", label: "open settings", hint: "provider, hotkeys, mcp, permissions", run: openSettings });
   items.push({ icon: "diff", label: "review session changes", hint: "changed files and diffs", run: openReview });
   items.push({ icon: "menu", label: "toggle sidebar", hint: "history panel", run: toggleSidebar });
@@ -985,7 +995,7 @@ async function handleEvent(ev) {
 async function doSend() {
   const input = $("input");
   const text = input.value.trim();
-  if (!text || confirmOpen || askOpen || settingsOpen || filesOpen) return;
+  if (!text || confirmOpen || askOpen || settingsOpen || filesOpen || sandboxOpen) return;
   hideMention();
   input.value = "";
   autosize();
@@ -1977,9 +1987,435 @@ $("s-save").onclick = async () => {
 $("s-cancel").onclick = closeSettings;
 $("settings-close").onclick = closeSettings;
 
+/* sandbox tab: local QEMU VMs for isolated agent work */
+
+const SBX_IMAGES = [
+  {
+    id: "debian-trixie",
+    label: "Debian 13 (trixie) minimal",
+    size: "~700 MiB download",
+    hint: "small official cloud image, boots fast; a cloud-init seed (login + ssh key) arrives in a later update — bring your own ISO to install manually today",
+  },
+  {
+    id: "nixos",
+    label: "NixOS minimal",
+    size: "~1 GiB download",
+    hint: "declarative and reproducible; configure it from the VM console via configuration.nix",
+  },
+  {
+    id: "custom",
+    label: "own image",
+    size: "no download",
+    hint: "an .iso boots as install media; a qcow2 / raw disk image boots directly",
+  },
+];
+
+function toggleSandboxView(force) {
+  const on = force === undefined ? !sandboxOpen : !!force;
+  if (on === sandboxOpen && !on) return;
+  sandboxOpen = on;
+  $("sandbox-view").classList.toggle("hidden", !on);
+  $("chat").classList.toggle("hidden", on);
+  $("chips").classList.toggle("hidden", on);
+  $("inputbar").classList.toggle("hidden", on);
+  $("btn-sandbox").classList.toggle("on", on);
+  if (on) {
+    SBX.qemu = null; // re-detect every time the tab opens (QEMU may be installed meanwhile)
+    closeWizard();
+    showSbxMsg("");
+    refreshSandbox();
+  } else {
+    stopSbxPoll();
+    $("input").focus();
+  }
+}
+
+function showSbxMsg(text) {
+  const box = $("sbx-msg");
+  box.textContent = text || "";
+  box.classList.toggle("hidden", !text);
+}
+
+async function refreshSandbox() {
+  try {
+    const [qemu, list] = await Promise.all([
+      SBX.qemu ? Promise.resolve(SBX.qemu) : invoke("sandbox_detect"),
+      invoke("sandbox_list"),
+    ]);
+    SBX.qemu = qemu;
+    SBX.dir = list.dir || "";
+    SBX.list = list.sandboxes || [];
+    SBX.lastJson = JSON.stringify(SBX.list);
+    renderSbxQemu();
+    renderSbxList();
+    startSbxPoll();
+  } catch (e) {
+    showSbxMsg(String(e));
+  }
+}
+
+function startSbxPoll() {
+  if (sbxTimer) return;
+  sbxTimer = setInterval(async () => {
+    if (!sandboxOpen) return;
+    try {
+      const list = await invoke("sandbox_list");
+      const j = JSON.stringify(list.sandboxes || []);
+      if (j !== SBX.lastJson) {
+        SBX.lastJson = j;
+        SBX.list = list.sandboxes || [];
+        renderSbxList();
+      }
+    } catch {}
+  }, 900);
+}
+
+function stopSbxPoll() {
+  if (sbxTimer) {
+    clearInterval(sbxTimer);
+    sbxTimer = null;
+  }
+}
+
+function sbxKindLabel(kind) {
+  const img = SBX_IMAGES.find((i) => i.id === kind);
+  return img ? img.label : kind;
+}
+
+function renderSbxQemu() {
+  const box = $("sbx-qemu");
+  const q = SBX.qemu;
+  if (!q) {
+    box.classList.add("hidden");
+    return;
+  }
+  box.classList.remove("hidden");
+  if (q.system_path && q.img_path) {
+    const v = (q.system_version || "qemu found").replace(/^QEMU emulator version\s*/i, "v").trim();
+    box.className = "sbx-qemu ok";
+    box.innerHTML = `<span class="ic sm">${icon("check")}</span> qemu ${esc(v)} &middot; accel: ${esc(q.accel || "tcg")} &middot; qemu-img ok`;
+  } else {
+    box.className = "sbx-qemu warn";
+    box.innerHTML = `<span class="ic sm">${icon("warn")}</span> <span>QEMU not found — install it (<b>winget install Software.QEMU</b> or <b>choco install qemu</b>, then restart the app) and the sandbox tab comes alive.</span>`;
+  }
+}
+
+function renderSbxList() {
+  const box = $("sbx-list");
+  box.replaceChildren();
+  if (!SBX.list.length) {
+    const empty = el("div", "sbx-empty");
+    empty.innerHTML = `no sandboxes yet — create one and keep the host clean.<br/>the agent works inside the VM while your files stay untouched.`;
+    box.appendChild(empty);
+    return;
+  }
+  for (const s of SBX.list) box.appendChild(sbxCard(s));
+}
+
+function fmtGiB(mib) {
+  const g = mib / 1024;
+  return (Number.isInteger(g) ? g : g.toFixed(1)) + " GiB";
+}
+
+function sbxCard(s) {
+  const card = el("div", "sbx-card");
+  card.title = s.dir;
+
+  const head = el("div", "sbx-card-head");
+  head.appendChild(el("div", "sbx-name", s.spec.name));
+  head.insertAdjacentHTML("beforeend", `<span class="sbx-state ${s.state}">${s.state}</span>`);
+  card.appendChild(head);
+
+  const meta = el("div", "sbx-meta");
+  meta.insertAdjacentHTML("beforeend", `<span class="sbx-kind">${esc(sbxKindLabel(s.spec.kind))}</span>`);
+  meta.insertAdjacentHTML(
+    "beforeend",
+    `<span>${s.spec.disk_gib} GiB disk</span><span>${fmtGiB(s.spec.ram_mib)} ram</span><span>${s.spec.cpus} vcpu</span><span>ssh :${s.spec.ssh_port}</span><span>${s.spec.root ? "root allowed" : "no root"}</span>`
+  );
+  card.appendChild(meta);
+
+  if (s.state === "downloading" && s.download) {
+    const pct = s.download.total
+      ? Math.min(100, Math.round((s.download.downloaded * 100) / s.download.total))
+      : null;
+    const bar = el("div", "sbx-progress" + (pct === null ? " indet" : ""));
+    bar.innerHTML = `<div class="fill" style="width:${pct === null ? 40 : pct}%"></div>`;
+    card.appendChild(bar);
+    const line = el("div", "sbx-progress-label");
+    line.textContent =
+      pct === null
+        ? `downloading\u2026 ${(s.download.downloaded / 1048576).toFixed(1)} MiB`
+        : `${pct}% \u00b7 ${(s.download.downloaded / 1048576).toFixed(1)} / ${(s.download.total / 1048576).toFixed(1)} MiB`;
+    card.appendChild(line);
+  }
+
+  if (s.error) card.appendChild(el("div", "sbx-error", s.error));
+
+  const actions = el("div", "sbx-card-actions");
+  const primary = el("button", "ghost sbx-btn");
+  if (s.state === "running") primary.innerHTML = `${icon("stop")} stop`;
+  else if (s.state === "downloading") primary.innerHTML = `${icon("x")} cancel`;
+  else primary.innerHTML = `${icon("play")} ${s.state === "failed" ? "retry" : "start"}`;
+  primary.onclick = async () => {
+    primary.disabled = true;
+    const action =
+      s.state === "running" ? "stop" : s.state === "downloading" ? "delete" : "start";
+    try {
+      await invoke("sandbox_action", { id: s.spec.id, action });
+      await refreshSandbox();
+    } catch (e) {
+      showSbxMsg(String(e));
+      primary.disabled = false;
+    }
+  };
+  actions.appendChild(primary);
+
+  const del = el("button", "icon-btn sbx-del");
+  del.innerHTML = icon("trash");
+  del.title = s.state === "downloading" ? "cancel and delete" : "delete sandbox (two clicks)";
+  del.onclick = () => sbxDelete(s, del);
+  actions.appendChild(del);
+  card.appendChild(actions);
+  return card;
+}
+
+function sbxDelete(s, btn) {
+  // two clicks: first arms, second deletes (same pattern as mcp servers)
+  if (!btn.classList.contains("confirm")) {
+    btn.classList.add("confirm");
+    btn.innerHTML = icon("check");
+    setTimeout(() => {
+      btn.classList.remove("confirm");
+      btn.innerHTML = icon("trash");
+    }, 2500);
+    return;
+  }
+  invoke("sandbox_action", { id: s.spec.id, action: "delete" })
+    .then(refreshSandbox)
+    .catch((e) => showSbxMsg(String(e)));
+}
+
+/* sandbox wizard: image -> resources -> create */
+
+function openWizard() {
+  const used = new Set(SBX.list.map((s) => s.spec.ssh_port));
+  let port = 2222;
+  while (used.has(port)) port++;
+  SBXW = { step: 1, kind: "debian-trixie", iso: "", name: "", disk: 20, ram: 2048, cpus: 2, root: false, port };
+  $("sbx-wizard").classList.remove("hidden");
+  renderWizard();
+}
+
+function closeWizard() {
+  SBXW = null;
+  $("sbx-wizard").classList.add("hidden");
+  $("sbxw-body").replaceChildren();
+}
+
+function renderWizard() {
+  document.querySelectorAll("#sbx-wizard .sbxw-step").forEach((n) => {
+    const step = +n.dataset.step;
+    n.classList.toggle("active", step === SBXW.step);
+    n.classList.toggle("done", step < SBXW.step);
+  });
+  const body = $("sbxw-body");
+  body.replaceChildren();
+  if (SBXW.step === 1) renderWizardStep1(body);
+  else if (SBXW.step === 2) renderWizardStep2(body);
+  else renderWizardStep3(body);
+}
+
+function sbxwField(label, build) {
+  const lab = el("label", "sbxw-field");
+  lab.appendChild(el("span", null, label));
+  build(lab);
+  return lab;
+}
+
+function sbxwNumField(label, val, min, max, set) {
+  return sbxwField(label, (lab) => {
+    const inp = el("input");
+    inp.type = "number";
+    inp.min = min;
+    inp.max = max;
+    inp.value = val;
+    inp.oninput = () => {
+      const n = Number(inp.value);
+      if (inp.value !== "" && Number.isFinite(n)) set(n);
+    };
+    lab.appendChild(inp);
+  });
+}
+
+function renderWizardStep1(body) {
+  const grid = el("div", "sbxw-images");
+  for (const img of SBX_IMAGES) {
+    const card = el("button", "sbxw-image" + (SBXW.kind === img.id ? " sel" : ""));
+    card.type = "button";
+    card.innerHTML = `<span class="sbxw-img-label">${img.label}</span><span class="sbxw-img-size">${img.size}</span><span class="sbxw-img-hint">${img.hint}</span>`;
+    card.onclick = () => {
+      SBXW.kind = img.id;
+      renderWizard();
+    };
+    grid.appendChild(card);
+  }
+  body.appendChild(grid);
+  if (SBXW.kind === "custom") {
+    const lab = sbxwField("image file path (iso or qcow2)", (lab) => {
+      const inp = el("input");
+      inp.value = SBXW.iso;
+      inp.placeholder = "C:\\images\\debian-13-amd64.iso";
+      inp.spellcheck = false;
+      inp.oninput = () => {
+        SBXW.iso = inp.value;
+      };
+      lab.appendChild(inp);
+      setTimeout(() => inp.focus(), 0);
+    });
+    body.appendChild(lab);
+  }
+  sbxwNav(body, 1);
+}
+
+function renderWizardStep2(body) {
+  const grid = el("div", "grid3");
+  grid.appendChild(sbxwNumField("disk, GiB", SBXW.disk, 5, 512, (v) => (SBXW.disk = v)));
+  grid.appendChild(sbxwNumField("ram, MiB", SBXW.ram, 256, 65536, (v) => (SBXW.ram = v)));
+  grid.appendChild(sbxwNumField("cpu cores", SBXW.cpus, 1, 32, (v) => (SBXW.cpus = v)));
+  body.appendChild(grid);
+  const grid2 = el("div", "grid3");
+  grid2.appendChild(sbxwNumField("ssh port on the host", SBXW.port, 1024, 65535, (v) => (SBXW.port = v)));
+  body.appendChild(grid2);
+
+  const nameLab = sbxwField("name", (lab) => {
+    const inp = el("input");
+    inp.value = SBXW.name;
+    inp.placeholder = "my-sandbox";
+    inp.spellcheck = false;
+    inp.oninput = () => {
+      SBXW.name = inp.value;
+    };
+    lab.appendChild(inp);
+  });
+  body.appendChild(nameLab);
+
+  const rootLab = el("label", "sbxw-check");
+  const chk = el("input");
+  chk.type = "checkbox";
+  chk.checked = SBXW.root;
+  chk.onchange = () => {
+    SBXW.root = chk.checked;
+  };
+  rootLab.appendChild(chk);
+  rootLab.insertAdjacentHTML(
+    "beforeend",
+    `<span>allow root inside the sandbox <span class="hint">(used by the agent profile in a later update)</span></span>`
+  );
+  body.appendChild(rootLab);
+  sbxwNav(body, 2);
+}
+
+function renderWizardStep3(body) {
+  const sum = el("div", "sbxw-summary");
+  const rows = [
+    ["image", sbxKindLabel(SBXW.kind)],
+    ...(SBXW.kind === "custom" ? [["file", SBXW.iso]] : []),
+    ["disk", `${SBXW.disk} GiB`],
+    ["ram", fmtGiB(SBXW.ram)],
+    ["cpu", `${SBXW.cpus} vcpu`],
+    ["ssh", `:${SBXW.port}`],
+    ["root", SBXW.root ? "allowed" : "denied"],
+  ];
+  for (const [k, v] of rows) {
+    const row = el("div");
+    row.appendChild(el("span", null, k));
+    const b = el("b", null, v);
+    row.appendChild(b);
+    sum.appendChild(row);
+  }
+  body.appendChild(sum);
+
+  const hint = el("div", "hint sbxw-hint");
+  hint.textContent =
+    SBXW.kind === "debian-trixie"
+      ? "downloads the official Debian cloud image on create; the VM opens its own window, guest ssh is forwarded to the host port above"
+      : SBXW.kind === "nixos"
+        ? "downloads the NixOS minimal image on create; the VM opens its own window, guest ssh is forwarded to the host port above"
+        : "boots from your file as-is; the VM opens its own window, guest ssh is forwarded to the host port above";
+  body.appendChild(hint);
+
+  const create = el("button", "accent");
+  create.innerHTML = `${icon("download")} create sandbox`;
+  create.onclick = async () => {
+    if (!SBXW.name.trim()) {
+      showSbxMsg("name is required");
+      SBXW.step = 2;
+      renderWizard();
+      return;
+    }
+    create.disabled = true;
+    try {
+      await invoke("sandbox_create", {
+        spec: {
+          name: SBXW.name.trim(),
+          kind: SBXW.kind,
+          iso_path: SBXW.kind === "custom" ? SBXW.iso.trim() : null,
+          disk_gib: SBXW.disk,
+          ram_mib: SBXW.ram,
+          cpus: SBXW.cpus,
+          root: SBXW.root,
+          ssh_port: SBXW.port,
+        },
+      });
+      closeWizard();
+      await refreshSandbox();
+    } catch (e) {
+      showSbxMsg(String(e));
+      create.disabled = false;
+    }
+  };
+  sbxwNav(body, 3, create);
+}
+
+function sbxwNav(body, step, primaryBtn) {
+  const row = el("div", "sbxw-nav");
+  if (step > 1) {
+    const back = el("button", "ghost");
+    back.textContent = "back";
+    back.onclick = () => {
+      SBXW.step--;
+      renderWizard();
+    };
+    row.appendChild(back);
+  }
+  row.appendChild(el("span", "sbxw-fill"));
+  if (step < 3) {
+    const next = el("button", "accent");
+    next.textContent = "next";
+    next.onclick = () => {
+      if (SBXW.step === 1 && SBXW.kind === "custom" && !SBXW.iso.trim()) {
+        showSbxMsg("pick an image file path first");
+        return;
+      }
+      showSbxMsg("");
+      SBXW.step++;
+      renderWizard();
+    };
+    row.appendChild(next);
+  } else if (primaryBtn) {
+    row.appendChild(primaryBtn);
+  }
+  body.appendChild(row);
+}
+
 /* buttons */
 
 $("btn-settings").onclick = openSettings;
+$("btn-sandbox").onclick = () => toggleSandboxView();
+$("sbx-new").onclick = () => {
+  showSbxMsg("");
+  openWizard();
+};
 $("btn-plan").onclick = togglePlan;
 $("btn-new").onclick = newChat;
 $("btn-undo").onclick = () => runCmd("/undo");
@@ -2157,6 +2593,11 @@ window.addEventListener("keydown", (e) => {
       e.preventDefault();
       resolveConfirm(true, true);
     }
+    return;
+  }
+  if (sandboxOpen && e.key === "Escape" && SBXW && !confirmOpen && !askOpen && !settingsOpen && !filesOpen && !paletteOpen) {
+    e.preventDefault();
+    closeWizard();
     return;
   }
   if (filesOpen) {

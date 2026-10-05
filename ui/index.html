@@ -31,6 +31,7 @@
         <button id="btn-plan" class="ghost plan-btn" title="plan mode: read-only research, the agent proposes a plan (ctrl+shift+p)">plan</button>
         <select id="model-select" title="model"></select>
         <button id="btn-review" class="icon-btn hidden" title="review session changes"><span class="ic" data-icon="diff"></span><span id="review-badge" class="badge hidden"></span></button>
+        <button id="btn-sandbox" class="icon-btn" title="sandbox - local QEMU VMs for isolated agent work"><span class="ic" data-icon="box"></span></button>
         <button id="btn-palette" class="icon-btn" title="command palette (ctrl+k)"><span class="ic" data-icon="command"></span></button>
         <button id="btn-undo" class="icon-btn" title="undo file changes (ctrl+z)"><span class="ic" data-icon="undo"></span></button>
         <button id="btn-redo" class="icon-btn" title="redo (ctrl+shift+z)"><span class="ic" data-icon="redo"></span></button>
@@ -47,6 +48,31 @@
         </div>
       </div>
     </main>
+
+    <section id="sandbox-view" class="hidden">
+      <div id="sandbox-col">
+        <div class="sbx-head">
+          <div>
+            <div class="sbx-title"><span class="ic" data-icon="box"></span>sandbox</div>
+            <div class="sbx-sub">disposable QEMU machines &mdash; move the agent and the code off your host</div>
+          </div>
+          <button id="sbx-new" class="accent"><span class="ic sm" data-icon="plus"></span> new sandbox</button>
+        </div>
+        <div id="sbx-msg" class="hidden"></div>
+        <div id="sbx-qemu" class="hidden"></div>
+        <div id="sbx-wizard" class="hidden">
+          <div class="sbxw-steps">
+            <span class="sbxw-step" data-step="1"><b>1</b> image</span>
+            <span class="sbxw-sep"></span>
+            <span class="sbxw-step" data-step="2"><b>2</b> resources</span>
+            <span class="sbxw-sep"></span>
+            <span class="sbxw-step" data-step="3"><b>3</b> create</span>
+          </div>
+          <div id="sbxw-body"></div>
+        </div>
+        <div id="sbx-list"></div>
+      </div>
+    </section>
 
     <div id="chips"><div id="chips-inner"></div></div>
 

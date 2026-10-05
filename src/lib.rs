@@ -22,6 +22,7 @@ pub mod provider;
 pub mod search;
 pub mod sessions;
 pub mod skills;
+pub mod sandbox;
 pub mod snapshot;
 pub mod todo;
 pub mod tools;
