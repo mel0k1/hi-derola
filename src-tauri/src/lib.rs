@@ -1391,6 +1391,8 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
             let slot = sh.mcp.clone();
             let tx = sh.tx.clone();
             tauri::async_runtime::spawn(async move {
+                // shadow with clones — the trailing note() still needs the names
+                let name = name.clone();
                 let existing = slot.lock().unwrap().clone();
                 let msg = match existing {
                     Some(m) => match m.add(&cfg, &hooks).await {
@@ -1420,6 +1422,7 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
             let slot = sh.mcp.clone();
             let tx = sh.tx.clone();
             tauri::async_runtime::spawn(async move {
+                let name = name.clone();
                 for l in mcp::reconnect_one(&slot, &cfgs, &hooks, &name).await {
                     let _ = tx.send(ApiEvent::Note(l));
                 }
@@ -1437,6 +1440,7 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
             };
             let tx = sh.tx.clone();
             tauri::async_runtime::spawn(async move {
+                let name = name.clone();
                 let msg = m.disconnect(&name).await.unwrap_or_else(|e| format!("error: {e:#}"));
                 let _ = tx.send(ApiEvent::Note(msg));
             });
@@ -1550,6 +1554,8 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
             let mcp = sh.mcp.lock().unwrap().clone();
             let tx = sh.tx.clone();
             tauri::async_runtime::spawn(async move {
+                let server = server.clone();
+                let uri = uri.clone();
                 let Some(c) = mcp else {
                     let _ = tx.send(ApiEvent::Note("mcp is not configured".into()));
                     return;
@@ -1612,6 +1618,8 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
                     }
                 }
                 tauri::async_runtime::spawn(async move {
+                    let server = server.clone();
+                    let name = name.clone();
                     let Some(c) = mcp else {
                         let _ = tx.send(ApiEvent::Note("mcp is not configured".into()));
                         return;
@@ -1681,6 +1689,8 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
                 let mcp = sh.mcp.lock().unwrap().clone();
                 let tx = sh.tx.clone();
                 tauri::async_runtime::spawn(async move {
+                    let server = server.clone();
+                    let level = level.clone();
                     let Some(c) = mcp else {
                         let _ = tx.send(ApiEvent::Note("mcp is not configured".into()));
                         return;

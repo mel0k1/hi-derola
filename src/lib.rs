@@ -4,7 +4,7 @@ pub mod app;
 pub mod bg;
 pub mod chat;
 pub mod codemode;
-mod commands;
+pub mod commands;
 pub mod config;
 pub mod diff;
 pub mod doctor;
