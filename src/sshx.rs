@@ -147,7 +147,15 @@ pub fn ssh_argv(t: &SshTarget, force_pty: bool, remote: &[&str]) -> Vec<String> 
 /// the full ssh argv for a user-visible terminal window (interactive shell,
 /// or the agent TUI when `agent` is set)
 pub fn terminal_cmdline(t: &SshTarget, agent: bool) -> Vec<String> {
-    ssh_argv(t, agent, if agent { &["~/.cargo/bin/hi-derola"] } else { &[] })
+    ssh_argv(
+        t,
+        agent,
+        if agent {
+            &["~/.cargo/bin/hi-derola"]
+        } else {
+            &[]
+        },
+    )
 }
 
 /// true while the ssh child should keep running
@@ -269,12 +277,15 @@ pub fn exec(
 
 /// pipe `stdin_data` through a remote shell command ("sh -s" for the install
 /// script, "cat > file" for uploads), forwarding every output line to
-/// `on_line` as it arrives. Returns the remote exit code.
+/// `on_line` as it arrives. Returns the remote exit code. `timeout` kills
+/// the child when elapsed (Duration::ZERO = wait forever — the agent
+/// install runs for many minutes and must not be cut short).
 pub fn stream(
     bin: &Path,
     t: &SshTarget,
     remote: &str,
     stdin_data: Option<&[u8]>,
+    timeout: Duration,
     cancel: &AtomicBool,
     mut on_line: impl FnMut(&str),
 ) -> Result<i32, String> {
@@ -300,6 +311,7 @@ pub fn stream(
     // both pipes -> one channel of lines (interleaving between them is fine
     // for a progress log); the loop ends when both pumps disconnect, which
     // happens after the remote side closed its stdout/stderr
+    let started = Instant::now();
     let (tx, rx) = mpsc::channel::<String>();
     fn pump<R: Read + Send + 'static>(pipe: R, tx: mpsc::Sender<String>) {
         std::thread::spawn(move || {
@@ -332,7 +344,16 @@ pub fn stream(
         }
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(line) => on_line(&line),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if !timeout.is_zero() && started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "remote command timed out after {}s",
+                        timeout.as_secs()
+                    ));
+                }
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
     }
@@ -395,11 +416,7 @@ pub fn spawn_terminal(bin: &Path, ssh_args: &[String]) -> Result<(), String> {
         let child = silent(&mut Command::new("cmd"))
             .args([
                 "/C",
-                &format!(
-                    "start \"hi-derola sandbox\" \"{}\" {}",
-                    bin.display(),
-                    line
-                ),
+                &format!("start \"hi-derola sandbox\" \"{}\" {}", bin.display(), line),
             ])
             .spawn()
             .map_err(|e| format!("spawn terminal: {e}"))?;
@@ -424,7 +441,11 @@ pub fn spawn_terminal(bin: &Path, ssh_args: &[String]) -> Result<(), String> {
                 continue;
             };
             // `-e` for the classic emulators, `--` for gnome-terminal
-            let sep = if *name == "gnome-terminal" { "--" } else { "-e" };
+            let sep = if *name == "gnome-terminal" {
+                "--"
+            } else {
+                "-e"
+            };
             let mut argv: Vec<String> = vec![
                 term.display().to_string(),
                 sep.to_string(),
@@ -473,7 +494,10 @@ mod tests {
         let a = ssh_argv(&t, true, &[]);
         let s = a.join(" ");
         assert!(s.contains(" -t"));
-        assert!(!s.contains("--"), "interactive session carries no remote command");
+        assert!(
+            !s.contains("--"),
+            "interactive session carries no remote command"
+        );
         assert_eq!(a.last().unwrap(), "derola@127.0.0.1");
 
         let a = ssh_argv(&t, true, &["~/.cargo/bin/hi-derola"]);
@@ -485,7 +509,10 @@ mod tests {
     fn terminal_cmdline_agent_and_shell() {
         let t = target();
         let shell = terminal_cmdline(&t, false);
-        assert!(!shell.iter().any(|a| a == "-t"), "plain shell needs no forced pty");
+        assert!(
+            !shell.iter().any(|a| a == "-t"),
+            "plain shell needs no forced pty"
+        );
         assert!(!shell.iter().any(|a| a.contains("hi-derola")));
         let agent = terminal_cmdline(&t, true);
         assert!(agent.iter().any(|a| a == "-t"));

@@ -6,7 +6,7 @@ use crate::files::{self, WriteBlock};
 use crate::mcp::McpClient;
 use crate::provider::ToolSpec;
 
-const MAX_LIST: usize = 500;
+pub(crate) const MAX_LIST: usize = 500;
 const MAX_CAPTURE: usize = 256 * 1024;
 const READ_LIMIT: usize = 2000;
 /// how long a timed-out process tree may finish dying after SIGTERM
@@ -659,20 +659,30 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
     let v: Value = serde_json::from_str(args).unwrap_or(Value::Null);
     match name {
         "read_file" => {
-            let Some(path) = v["path"].as_str() else {
+            let Some(path) = v["path"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
                 bail!("read_file: path required");
             };
             let offset = v["offset"].as_u64().unwrap_or(1).max(1) as usize;
             let limit = v["limit"].as_u64().unwrap_or(READ_LIMIT as u64).max(1) as usize;
-            read_numbered(path, offset, limit)
+            if crate::sandbox::shell_route().is_some() {
+                let path = path.to_string();
+                return vm_tool(move || crate::sandbox::guest_read(&path, offset, limit)).await;
+            }
+            let bytes = std::fs::read(path).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
+            format_numbered(path, bytes, offset, limit)
         }
         "write_file" => {
-            let Some(path) = v["path"].as_str() else {
+            let Some(path) = v["path"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
                 bail!("write_file: path required");
             };
             let Some(content) = v["content"].as_str() else {
                 bail!("write_file: content required");
             };
+            if crate::sandbox::shell_route().is_some() {
+                let path = path.to_string();
+                let content = content.to_string();
+                return vm_tool(move || crate::sandbox::guest_write(&path, &content)).await;
+            }
             let n = files::apply(&WriteBlock {
                 path: path.to_string(),
                 content: content.to_string(),
@@ -683,6 +693,11 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
             let Some(patch) = v["patch"].as_str() else {
                 bail!("apply_patch: patch required");
             };
+            if crate::sandbox::shell_route().is_some() {
+                bail!(
+                    "apply_patch is not available while a sandbox VM is attached — use write_file/edit (they run inside the VM) or the bash tool"
+                );
+            }
             let ops = crate::patch::parse(patch)?;
             let planned = crate::patch::plan(ops)?;
             let items = planned.items.clone();
@@ -697,7 +712,7 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
             Ok(out)
         }
         "edit" => {
-            let Some(path) = v["path"].as_str() else {
+            let Some(path) = v["path"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
                 bail!("edit: path required");
             };
             let Some(old) = v["old_str"].as_str() else {
@@ -710,6 +725,13 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
                 bail!("edit: old_str is empty");
             }
             let replace_all = v["replace_all"].as_bool().unwrap_or(false);
+            if crate::sandbox::shell_route().is_some() {
+                let path = path.to_string();
+                let old = old.to_string();
+                let new = new.to_string();
+                return vm_tool(move || crate::sandbox::guest_edit(&path, &old, &new, replace_all))
+                    .await;
+            }
             let content =
                 std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
             let (updated, count) = apply_edit(&content, old, new, replace_all)
@@ -723,6 +745,10 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
         }
         "list_files" => {
             let dir = v["path"].as_str().unwrap_or(".");
+            if crate::sandbox::shell_route().is_some() {
+                let dir = dir.to_string();
+                return vm_tool(move || crate::sandbox::guest_list_files(&dir)).await;
+            }
             let out = list_tree(dir);
             if out.is_empty() {
                 return Ok(format!("{dir}: empty"));
@@ -734,6 +760,11 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
                 bail!("glob: pattern required");
             };
             let dir = v["path"].as_str().unwrap_or(".");
+            if crate::sandbox::shell_route().is_some() {
+                let dir = dir.to_string();
+                let pattern = pattern.to_string();
+                return vm_tool(move || crate::sandbox::guest_glob(&dir, &pattern)).await;
+            }
             let files = crate::search::glob(dir, pattern)?;
             if files.is_empty() {
                 return Ok(format!("{pattern}: no files found"));
@@ -753,6 +784,15 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
             };
             let dir = v["path"].as_str().unwrap_or(".");
             let include = v["include"].as_str();
+            if crate::sandbox::shell_route().is_some() {
+                let dir = dir.to_string();
+                let pattern = pattern.to_string();
+                let include = include.map(str::to_string);
+                return vm_tool(move || {
+                    crate::sandbox::guest_grep(&dir, &pattern, include.as_deref())
+                })
+                .await;
+            }
             let hits = crate::search::grep(dir, pattern, include)?;
             if hits.is_empty() {
                 return Ok(format!("{pattern}: no matches"));
@@ -875,6 +915,15 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
         }
         _ if crate::jstools::has(name) => crate::jstools::run_tool(name, args).await,
         _ => bail!("unknown tool: {name}"),
+    }
+}
+
+/// run a blocking sandbox tool call off the async workers (the system ssh
+/// client blocks) — used by every routed tool, not just bash
+async fn vm_tool(f: impl FnOnce() -> anyhow::Result<String> + Send + 'static) -> Result<String> {
+    match tokio::task::spawn_blocking(f).await {
+        Ok(res) => res,
+        Err(e) => bail!("sandbox tool: {e}"),
     }
 }
 
@@ -1021,7 +1070,7 @@ fn norm(p: &str) -> String {
     crate::files::norm(p)
 }
 
-const MAX_ATTACH_BYTES: u64 = 128 * 1024;
+pub(crate) const MAX_ATTACH_BYTES: u64 = 128 * 1024;
 
 fn normalize_eol(s: &str) -> String {
     s.replace("\r\n", "\n")
@@ -1363,8 +1412,15 @@ fn restore_eol(text: &str, crlf: bool) -> String {
     }
 }
 
-fn read_numbered(path: &str, offset: usize, limit: usize) -> Result<String> {
-    let bytes = std::fs::read(path).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
+/// format file bytes as the numbered read_file output (header with the total
+/// line count, 1-based line numbers, continuation hint). Shared with the
+/// sandbox reader, which fetches the same bytes over ssh from the VM.
+pub(crate) fn format_numbered(
+    path: &str,
+    bytes: Vec<u8>,
+    offset: usize,
+    limit: usize,
+) -> Result<String> {
     if bytes.len() as u64 > MAX_ATTACH_BYTES {
         bail!("{path}: too large ({} bytes)", bytes.len());
     }
@@ -1794,14 +1850,17 @@ mod tests {
         let p = dir.join("t.txt");
         std::fs::write(&p, "one\ntwo\nthree\nfour\nfive\n").unwrap();
         let path = p.display().to_string();
+        let read = |path: &str, offset: usize, limit: usize| {
+            format_numbered(path, std::fs::read(path).unwrap(), offset, limit).unwrap()
+        };
 
-        let out = read_numbered(&path, 1, 100).unwrap();
+        let out = read(&path, 1, 100);
         assert!(out.starts_with(&format!("{path} (5 lines)")));
         assert!(out.contains("1\u{2192}one"));
         assert!(out.contains("5\u{2192}five"));
         assert!(!out.contains("more lines"));
 
-        let out = read_numbered(&path, 2, 2).unwrap();
+        let out = read(&path, 2, 2);
         assert!(out.contains("2\u{2192}two"));
         assert!(out.contains("3\u{2192}three"));
         assert!(!out.contains("4\u{2192}four"));
@@ -1809,11 +1868,11 @@ mod tests {
 
         let bin = dir.join("b.bin");
         std::fs::write(&bin, [0x89, 0x50, 0x00, 0x4e]).unwrap();
-        let out = read_numbered(&bin.display().to_string(), 1, 10).unwrap();
+        let out = read(&bin.display().to_string(), 1, 10);
         assert!(out.contains("binary file"));
 
         std::fs::write(&p, b"\xff\xfe\x00bad").unwrap();
-        let out = read_numbered(&path, 1, 10).unwrap();
+        let out = read(&path, 1, 10);
         assert!(out.contains("binary file"));
 
         let _ = std::fs::remove_dir_all(&dir);

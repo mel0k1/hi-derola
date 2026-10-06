@@ -28,7 +28,7 @@ let paletteOpen = false;
 let paletteItems = [];
 let paletteIdx = 0;
 let sandboxOpen = false;
-let SBX = { qemu: null, dir: "", list: [], lastJson: "" };
+let SBX = { qemu: null, dir: "", list: [], attached: null, lastJson: "" };
 let SBXW = null;
 let sbxTimer = null;
 
@@ -2061,6 +2061,7 @@ async function refreshSandbox() {
     SBX.qemu = qemu;
     SBX.dir = list.dir || "";
     SBX.list = list.sandboxes || [];
+    SBX.attached = list.attached || null;
     SBX.lastJson = JSON.stringify(SBX.list);
     renderSbxQemu();
     renderSbxList();
@@ -2076,10 +2077,11 @@ function startSbxPoll() {
     if (!sandboxOpen) return;
     try {
       const list = await invoke("sandbox_list");
-      const j = JSON.stringify(list.sandboxes || []);
+      const j = JSON.stringify([list.sandboxes || [], list.attached || null]);
       if (j !== SBX.lastJson) {
         SBX.lastJson = j;
         SBX.list = list.sandboxes || [];
+        SBX.attached = list.attached || null;
         renderSbxList();
       }
     } catch {}
@@ -2141,6 +2143,12 @@ function sbxCard(s) {
   const head = el("div", "sbx-card-head");
   head.appendChild(el("div", "sbx-name", s.spec.name));
   head.insertAdjacentHTML("beforeend", `<span class="sbx-state ${s.state}">${s.state}</span>`);
+  if (SBX.attached === s.spec.id) {
+    head.insertAdjacentHTML(
+      "beforeend",
+      `<span class="sbx-state running" title="the chat's bash and file tools execute inside this VM">\u2190 bash here</span>`
+    );
+  }
   card.appendChild(head);
 
   const meta = el("div", "sbx-meta");
@@ -2197,6 +2205,23 @@ function sbxCard(s) {
       inst.onclick = () => sbxInstall(s);
     }
     actions.appendChild(inst);
+    const att = el("button", "ghost sbx-btn");
+    if (SBX.attached === s.spec.id) {
+      att.innerHTML = `${icon("x")} detach chat`;
+      att.title = "stop routing the chat's bash + file tools into this VM";
+      att.onclick = () =>
+        invoke("sandbox_detach")
+          .then(refreshSandbox)
+          .catch((e) => showSbxMsg(String(e)));
+    } else {
+      att.innerHTML = `${icon("box")} attach chat`;
+      att.title = "run the chat's bash + file tools inside this VM over ssh";
+      att.onclick = () =>
+        invoke("sandbox_attach", { id: s.spec.id })
+          .then(refreshSandbox)
+          .catch((e) => showSbxMsg(String(e)));
+    }
+    actions.appendChild(att);
   }
 
   const primary = el("button", "ghost sbx-btn");
@@ -2459,7 +2484,7 @@ function renderWizardStep3(body) {
   const hint = el("div", "hint sbxw-hint");
   hint.textContent =
     ["debian-trixie", "debian-trixie-std", "ubuntu-24.04", "ubuntu-24.04-std"].includes(SBXW.kind)
-      ? "downloads the official cloud image and generates a cloud-init seed (your login + a generated ssh key); the first boot sets the user up and the card shows when ssh is ready — then you can open a terminal, install the agent inside, or attach the chat with /sandbox attach in the TUI"
+      ? "downloads the official cloud image and generates a cloud-init seed (your login + a generated ssh key); the first boot sets the user up and the card shows when ssh is ready — then you can open a terminal, install the agent inside, or attach the chat to this VM (the attach button on the card, or /sandbox attach in the TUI)"
       : "boots from your file as-is; the VM opens its own window, guest ssh is forwarded to the host port above";
   body.appendChild(hint);
 

@@ -40,7 +40,14 @@ pub struct Shared {
 }
 
 fn system_prompt(model: &str) -> String {
-    hi_derola::base_prompt("on the user's machine", model)
+    let mut s = hi_derola::base_prompt("on the user's machine", model);
+    // while a sandbox VM is attached (the sandbox tab attach button), the
+    // bash AND file tools run inside it — the model must know that
+    if let Some(add) = sandbox::shell_route_addendum() {
+        s.push_str("\n\n");
+        s.push_str(&add);
+    }
+    s
 }
 
 fn diff_json(rows: Vec<hi_derola::diff::Row>) -> Value {
@@ -714,12 +721,66 @@ async fn sandbox_detect() -> Result<sandbox::QemuInfo, String> {
         .map_err(|e| format!("{e}"))
 }
 
+/// rebuild the live session system prompt after attach/detach so the model
+/// immediately sees (or loses) the sandbox addendum — same as the TUI refresh
+fn refresh_session_prompt(sh: &Shared) {
+    let model = sh.cfg.lock().unwrap().provider.model.clone();
+    sh.session.lock().unwrap().system = system_prompt(&model);
+}
+
+/// route the bash + file tools of the chat into a running sandbox VM
+/// (the gui counterpart of the TUI `/sandbox attach`)
+#[tauri::command]
+async fn sandbox_attach(sh: State<'_, Arc<Shared>>, id: String) -> Result<String, String> {
+    let m = sandbox::SandboxManager::global();
+    let st = m
+        .list()
+        .into_iter()
+        .find(|s| s.spec.id == id)
+        .ok_or_else(|| format!("no sandbox with id \"{id}\""))?;
+    if st.state != sandbox::VmState::Running {
+        return Err(format!(
+            "sandbox \"{}\" is {} — start it first",
+            st.spec.name,
+            format!("{:?}", st.state).to_lowercase()
+        ));
+    }
+    let ready = st
+        .ssh
+        .as_ref()
+        .map(|x| x.state == sandbox::SshState::Ready)
+        .unwrap_or(false);
+    if !ready {
+        return Err(
+            "ssh is not ready yet — wait for the ready badge on the card, then attach".into(),
+        );
+    }
+    sandbox::set_shell_route(Some(id.clone()));
+    refresh_session_prompt(&sh);
+    Ok(format!(
+        "bash and file tools now run inside \"{}\" — your host files stay out of reach",
+        st.spec.name
+    ))
+}
+
+/// stop routing the chat tools into the VM (back to the host)
+#[tauri::command]
+async fn sandbox_detach(sh: State<'_, Arc<Shared>>) -> Result<(), String> {
+    if sandbox::shell_route().is_none() {
+        return Err("no sandbox attached — tools already run on the host".into());
+    }
+    sandbox::set_shell_route(None);
+    refresh_session_prompt(&sh);
+    Ok(())
+}
+
 #[tauri::command]
 async fn sandbox_list() -> Result<Value, String> {
     let m = sandbox::SandboxManager::global();
     Ok(json!({
         "dir": m.dir().display().to_string(),
         "sandboxes": m.list(),
+        "attached": sandbox::shell_route(),
     }))
 }
 
@@ -1805,8 +1866,8 @@ pub fn run() -> Result<()> {
             init, save, send, confirm, answer, allow_all, stop, list_models, mcp_reconnect,
             mcp_auth, mcp_resources, mcp_read_resource, mcp_subscribe, mcp_unsubscribe, mcp_prompts,
             mcp_templates, mcp_subscriptions, mcp_get_prompt, sandbox_detect, sandbox_list,
-            sandbox_create, sandbox_action, sandbox_ssh_exec, sandbox_agent_install,
-            sandbox_ssh_terminal, undo,
+            sandbox_create, sandbox_action, sandbox_attach, sandbox_detach, sandbox_ssh_exec,
+            sandbox_agent_install, sandbox_ssh_terminal, undo,
             redo, list_sessions, new_session, open_session, delete_session, list_dir, attach_path,
             detach, set_theme, list_project_files, set_plan, task_kill, list_agents
         ])

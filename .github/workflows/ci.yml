@@ -1,0 +1,51 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["README.md", "**.md"]
+  pull_request:
+    branches: [main]
+    paths-ignore: ["README.md", "**.md"]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # the core crate (TUI + agent): tests run on linux without system deps
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: test
+        run: cargo test --quiet
+
+  # the vanilla js frontend: syntax gate only, no build step by design
+  ui:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: js syntax
+        run: |
+          node --check ui/app.js
+          node --check ui/mock.js
+
+  # the tauri shell never compiles in a bare sandbox; catch gui breakage on
+  # windows (the platform the app is actually built and shipped from)
+  gui:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: check
+        run: cargo check --quiet
+        working-directory: src-tauri

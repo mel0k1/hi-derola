@@ -1371,6 +1371,7 @@ impl SandboxManager {
                         &target,
                         remote,
                         Some(cfg.as_bytes()),
+                        Duration::ZERO,
                         cancel,
                         |_| {},
                     ) {
@@ -1399,6 +1400,7 @@ impl SandboxManager {
                 &target,
                 "sh -s 2>&1",
                 Some(crate::sshx::INSTALL_SH.as_bytes()),
+                Duration::ZERO,
                 cancel,
                 |line| live.push_log(line),
             );
@@ -1474,6 +1476,46 @@ impl SandboxManager {
         )
         .map_err(|e| anyhow!("{e}"))
     }
+
+    /// pipe stdin bytes into a remote command (`cat > file` style writes);
+    /// returns (exit code, tail of the remote output for error messages)
+    pub fn ssh_stream(
+        &self,
+        id: &str,
+        command: &str,
+        stdin: &[u8],
+        timeout_secs: Option<u64>,
+    ) -> Result<(i32, String)> {
+        let (spec, dir, live) = self
+            .ssh_parts(id)
+            .ok_or_else(|| anyhow!("sandbox \"{id}\" has no ssh session"))?;
+        if live.info.lock().unwrap().state != SshState::Ready {
+            bail!("ssh is not ready yet");
+        }
+        let bin = crate::sshx::find_ssh().ok_or_else(|| anyhow!("no ssh client on the host"))?;
+        let target = Self::ssh_target(&dir, &spec);
+        let cancel = AtomicBool::new(false);
+        let mut tail: Vec<String> = Vec::new();
+        let code = crate::sshx::stream(
+            &bin,
+            &target,
+            command,
+            Some(stdin),
+            Duration::from_secs(timeout_secs.unwrap_or(30).clamp(1, 300)),
+            &cancel,
+            |line| {
+                if line.trim().is_empty() {
+                    return;
+                }
+                if tail.len() >= 8 {
+                    tail.remove(0);
+                }
+                tail.push(line.to_string());
+            },
+        )
+        .map_err(|e| anyhow!("{e}"))?;
+        Ok((code, tail.join("\n")))
+    }
 }
 
 // ------------------------------------------------------------- shell route
@@ -1502,25 +1544,37 @@ fn clear_shell_route_if(id: &str) {
     }
 }
 
+/// resolve the attached sandbox for any routed tool call: (id, display
+/// name), detaching first when the VM is gone or not running so a stale
+/// route cannot wedge the agent
+fn route_target() -> Result<(String, String)> {
+    let id = shell_route().ok_or_else(|| anyhow!("no sandbox attached"))?;
+    let m = SandboxManager::global();
+    let Some(st) = m.list().into_iter().find(|s| s.spec.id == id) else {
+        clear_shell_route_if(&id);
+        bail!("attached sandbox \"{id}\" no longer exists — routing detached");
+    };
+    if st.state != VmState::Running {
+        clear_shell_route_if(&id);
+        bail!(
+            "sandbox \"{}\" is not running — routing detached",
+            st.spec.name
+        );
+    }
+    Ok((id, st.spec.name))
+}
+
 /// run one bash-tool command inside the attached VM over ssh and format the
 /// result like the local bash tool does (stdout+stderr combined, "(no
 /// output)" for silence, exit code appended on failure). Detaches itself
 /// when the VM is gone so a stale route cannot wedge the agent.
 pub fn sandbox_bash(cmd: &str, timeout_secs: Option<u64>) -> Result<String> {
-    let id = shell_route().ok_or_else(|| anyhow!("no sandbox attached"))?;
-    let m = SandboxManager::global();
-    let Some(st) = m.list().into_iter().find(|s| s.spec.id == id) else {
-        clear_shell_route_if(&id);
-        bail!("attached sandbox \"{id}\" no longer exists — shell routing detached");
-    };
-    if st.state != VmState::Running {
-        clear_shell_route_if(&id);
-        bail!(
-            "sandbox \"{}\" is not running — shell routing detached",
-            st.spec.name
-        );
-    }
-    let out = m.ssh_exec(&id, cmd, Some(timeout_secs.unwrap_or(120).clamp(1, 300)))?;
+    let (id, _) = route_target()?;
+    let out = SandboxManager::global().ssh_exec(
+        &id,
+        cmd,
+        Some(timeout_secs.unwrap_or(120).clamp(1, 300)),
+    )?;
     let mut text = out.stdout;
     if !out.stderr.trim().is_empty() {
         if !text.is_empty() && !text.ends_with('\n') {
@@ -1538,7 +1592,7 @@ pub fn sandbox_bash(cmd: &str, timeout_secs: Option<u64>) -> Result<String> {
 }
 
 /// system-prompt addendum while the shell route is active: the model must
-/// know its commands run inside a linux VM, not on the host
+/// know its commands AND file tools run inside a linux VM, not on the host
 pub fn shell_route_addendum() -> Option<String> {
     let id = shell_route()?;
     let st = SandboxManager::global()
@@ -1546,16 +1600,258 @@ pub fn shell_route_addendum() -> Option<String> {
         .into_iter()
         .find(|s| s.spec.id == id)?;
     Some(format!(
-        "SANDBOX MODE is active: bash commands execute INSIDE the sandbox VM \"{}\" \
-         ({}, linux {}) over ssh, not on the host. Use unix paths and unix commands; \
-         the workdir parameter does not apply. Background bash is unavailable in the \
-         VM — run commands in the foreground. Your file tools (read_file, write_file, \
-         edit, glob, grep, list_files) still operate on the host working directory, \
-         not inside the VM; use bash (cat, tee, sed, find, grep) for VM files.",
+        "SANDBOX MODE is active: bash AND the file tools (read_file, write_file, edit, \
+         glob, grep, list_files) execute INSIDE the sandbox VM \"{}\" ({}, linux {}) \
+         over ssh, not on the host. Use unix paths and unix commands; relative paths \
+         resolve against the VM user's home directory. Background bash and apply_patch \
+         are unavailable in the VM — run commands in the foreground and change files \
+         with write_file/edit. read_file returns text only (no image preview); the \
+         formatter, LSP and diagnostics do not apply to VM files. Everything you \
+         create stays inside the VM; the host working directory is out of reach.",
         st.spec.name,
         st.spec.kind.label(),
         std::env::consts::ARCH
     ))
+}
+
+// -------------------------------------------------------- guest file tools
+//
+// While a sandbox is attached, the agent's file tools execute inside the VM
+// over the same ssh channel as the bash tool. Transports: `base64 -w0` for
+// reads (byte-exact, survives any encoding) and `cat > file` through the
+// ssh stdin pipe for writes. Matching/searching (glob, grep) runs with the
+// guest's GNU find/grep and is filtered/formatted host-side so the model
+// sees the exact same output shapes as with the host tools.
+
+/// quote one string for a remote shell command line (the ssh exec argument
+/// is parsed by the guest login shell)
+fn sq(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// paths as the model sees them: relative to the guest home, printed without
+/// the noisy "./" prefix and with the search root trimmed when given
+fn guest_rel(line: &str, dir: &str) -> String {
+    let l = line.strip_prefix("./").unwrap_or(line);
+    if dir == "." || dir.is_empty() {
+        return l.to_string();
+    }
+    let d = dir.trim_end_matches('/');
+    l.strip_prefix(d)
+        .map(|r| r.trim_start_matches('/').to_string())
+        .unwrap_or_else(|| l.to_string())
+}
+
+/// fetch one file's bytes from the VM (size-capped, base64 over ssh)
+fn guest_fetch(id: &str, path: &str) -> Result<Vec<u8>> {
+    let m = SandboxManager::global();
+    let out = m.ssh_exec(id, &format!("wc -c < {}", sq(path)), Some(30))?;
+    if out.code != 0 {
+        bail!("{path}: {}", one_line(&out.stderr, out.code));
+    }
+    let size: u64 = out.stdout.trim().parse().unwrap_or(0);
+    if size > crate::tools::MAX_ATTACH_BYTES {
+        bail!("{path}: too large ({size} bytes)");
+    }
+    let out = m.ssh_exec(id, &format!("base64 -w0 -- {}", sq(path)), Some(60))?;
+    if out.code != 0 {
+        bail!("{path}: {}", one_line(&out.stderr, out.code));
+    }
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(out.stdout.trim())
+        .map_err(|e| anyhow!("{path}: base64 decode failed: {e}"))
+}
+
+/// push bytes into a VM file (parent dirs created), `cat >` over ssh stdin
+fn guest_push(id: &str, path: &str, bytes: &[u8]) -> Result<()> {
+    let dir = match path.rsplit_once('/') {
+        Some((d, _)) if !d.is_empty() => d,
+        _ => ".",
+    };
+    let remote = format!("mkdir -p -- {} && cat > {}", sq(dir), sq(path));
+    let (code, msg) = SandboxManager::global().ssh_stream(id, &remote, bytes, Some(60))?;
+    if code != 0 {
+        bail!(
+            "{path}: {}",
+            if msg.trim().is_empty() {
+                format!("write failed (exit {code})")
+            } else {
+                msg.trim().to_string()
+            }
+        );
+    }
+    Ok(())
+}
+
+/// read_file inside the VM: same numbered format as the host reader
+pub fn guest_read(path: &str, offset: usize, limit: usize) -> Result<String> {
+    let (id, _) = route_target()?;
+    let bytes = guest_fetch(&id, path)?;
+    crate::tools::format_numbered(path, bytes, offset, limit)
+}
+
+/// write_file inside the VM
+pub fn guest_write(path: &str, content: &str) -> Result<String> {
+    let (id, _) = route_target()?;
+    guest_push(&id, path, content.as_bytes())?;
+    Ok(format!("wrote {path} ({} lines)", content.lines().count()))
+}
+
+/// edit inside the VM: fetch, string-replace with the host matching rules
+/// (crlf/bom/unicode/fuzzy tolerance), push back
+pub fn guest_edit(path: &str, old: &str, new: &str, replace_all: bool) -> Result<String> {
+    let (id, _) = route_target()?;
+    let bytes = guest_fetch(&id, path)?;
+    let content = String::from_utf8(bytes).map_err(|_| anyhow!("{path}: not valid utf-8"))?;
+    let (updated, count) = crate::tools::apply_edit(&content, old, new, replace_all)
+        .map_err(|e| anyhow!("edit: {e:#} in {path}"))?;
+    guest_push(&id, path, updated.as_bytes())?;
+    Ok(format!(
+        "edited {path} ({} replacement{})",
+        count,
+        if count == 1 { "" } else { "s" }
+    ))
+}
+
+/// list_files inside the VM: 3 levels of `find -printf`, dirs marked with /
+pub fn guest_list_files(dir: &str) -> Result<String> {
+    let (id, _) = route_target()?;
+    let max = crate::tools::MAX_LIST;
+    let remote = format!(
+        "find {} -maxdepth 3 -mindepth 1 \\( -type d -printf '%p/\\n' -o -type f -printf '%p\\n' \\) 2>/dev/null \
+         | LC_ALL=C sort | head -n {}",
+        sq(dir),
+        max + 1
+    );
+    let out = SandboxManager::global().ssh_exec(&id, &remote, Some(30))?;
+    if out.code != 0 {
+        bail!("{dir}: {}", one_line(&out.stderr, out.code));
+    }
+    let mut entries: Vec<String> = out
+        .stdout
+        .lines()
+        .map(|l| guest_rel(l, dir))
+        .filter(|l| !l.is_empty())
+        .collect();
+    if entries.is_empty() {
+        return Ok(format!("{dir}: empty"));
+    }
+    let truncated = entries.len() > max;
+    entries.truncate(max);
+    if truncated {
+        entries.push(format!("... truncated at {max} entries"));
+    }
+    Ok(entries.join("\n"))
+}
+
+/// glob inside the VM: the guest lists files with find, host-side glob
+/// matching picks the winners (same pattern dialect as the local tool)
+pub fn guest_glob(dir: &str, pattern: &str) -> Result<String> {
+    use crate::search::{glob_match, MAX_RESULTS};
+    let (id, _) = route_target()?;
+    let pats = crate::search::expand_braces(pattern);
+    let remote = format!(
+        "find {} -type f -not -path '*/.git/*' 2>/dev/null | head -n 20001",
+        sq(dir)
+    );
+    let out = SandboxManager::global().ssh_exec(&id, &remote, Some(60))?;
+    if out.code != 0 {
+        bail!("{dir}: {}", one_line(&out.stderr, out.code));
+    }
+    let mut files: Vec<String> = out.stdout.lines().map(|l| guest_rel(l, dir)).collect();
+    files.sort();
+    let mut matched = Vec::new();
+    for f in &files {
+        if pats.iter().any(|p| glob_match(p, f)) {
+            matched.push(f.clone());
+            if matched.len() >= MAX_RESULTS {
+                break;
+            }
+        }
+    }
+    if matched.is_empty() {
+        return Ok(format!("{pattern}: no files found"));
+    }
+    let mut s = matched.join("\n");
+    if matched.len() >= MAX_RESULTS {
+        s.push_str(&format!("\n... truncated at {MAX_RESULTS} results"));
+    }
+    Ok(s)
+}
+
+/// grep inside the VM: GNU grep -rInE in the guest, output parsed and
+/// grouped host-side exactly like the local tool. The regex crate validates
+/// the pattern first so error messages match the host tool; \d/\D are
+/// translated to their ERE spellings.
+pub fn guest_grep(dir: &str, pattern: &str, include: Option<&str>) -> Result<String> {
+    use crate::search::MAX_RESULTS;
+    if let Err(e) = regex::Regex::new(pattern) {
+        bail!("grep: {e}");
+    }
+    let (id, _) = route_target()?;
+    let ere = pattern.replace(r"\d", "[0-9]").replace(r"\D", "[^0-9]");
+    let mut remote = String::from("set -o pipefail; grep -rInE");
+    if let Some(inc) = include {
+        for p in crate::search::expand_braces(inc) {
+            remote.push_str(&format!(" --include={}", sq(&p)));
+        }
+    }
+    remote.push_str(&format!(
+        " -- {} {} 2>/dev/null | head -n 400",
+        sq(&ere),
+        sq(dir)
+    ));
+    let out = SandboxManager::global().ssh_exec(&id, &remote, Some(60))?;
+    if out.code > 1 {
+        bail!("grep: {}", one_line(&out.stderr, out.code));
+    }
+    let mut hits: Vec<(String, usize, String)> = Vec::new();
+    let mut more = false;
+    for line in out.stdout.lines() {
+        // "path:line:text" — the line number sits between the first two colons
+        let Some(a) = line.find(':') else { continue };
+        let rest = &line[a + 1..];
+        let Some(b) = rest.find(':') else { continue };
+        let Ok(n) = rest[..b].parse::<usize>() else {
+            continue;
+        };
+        if hits.len() >= MAX_RESULTS {
+            more = true;
+            break;
+        }
+        hits.push((
+            guest_rel(&line[..a], dir),
+            n,
+            rest[b + 1..].chars().take(200).collect(),
+        ));
+    }
+    if hits.is_empty() {
+        return Ok(format!("{pattern}: no matches"));
+    }
+    let mut s = format!("Found {} matches", hits.len());
+    if more {
+        s.push_str(" (more matches available)");
+    }
+    let mut cur = String::new();
+    for (path, n, text) in hits {
+        if path != cur {
+            cur = path.clone();
+            s.push_str(&format!("\n{cur}:"));
+        }
+        s.push_str(&format!("\n  Line {n}: {text}"));
+    }
+    Ok(s)
+}
+
+/// compact single-line ssh error for tool output
+fn one_line(stderr: &str, code: i32) -> String {
+    let msg = stderr.trim();
+    if msg.is_empty() {
+        format!("command failed (exit {code})")
+    } else {
+        msg.lines().last().unwrap_or(msg).to_string()
+    }
 }
 
 /// last `max` bytes of a file, char-boundary safe, as one trimmed line block
@@ -1702,6 +1998,53 @@ fn platform_kill(pid: u32) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sq_quotes_for_the_guest_shell() {
+        assert_eq!(sq("plain"), "'plain'");
+        assert_eq!(sq("a'b"), "'a'\\''b'");
+        assert_eq!(sq("$(rm -rf ~)"), "'$(rm -rf ~)'");
+        assert_eq!(sq(""), "''");
+        // the escaping round-trips: sh -c would see the original string back
+        let quoted = sq("it's \"ok\"");
+        assert!(quoted.starts_with('\'') && quoted.ends_with('\''));
+        assert!(quoted.contains(r"'\'"));
+    }
+
+    #[test]
+    fn guest_rel_strips_dot_slash_and_root() {
+        assert_eq!(guest_rel("./src/lib.rs", "."), "src/lib.rs");
+        assert_eq!(guest_rel("src/lib.rs", "."), "src/lib.rs");
+        assert_eq!(guest_rel("/home/u/src/lib.rs", "/home/u"), "src/lib.rs");
+        assert_eq!(guest_rel("/home/u/src/lib.rs", "/home/u/"), "src/lib.rs");
+        // outside the root: returned untouched
+        assert_eq!(guest_rel("/etc/passwd", "/home/u"), "/etc/passwd");
+    }
+
+    #[test]
+    fn one_line_compact_errors() {
+        assert_eq!(one_line("", 2), "command failed (exit 2)");
+        assert_eq!(one_line("  \n", 1), "command failed (exit 1)");
+        let err = "bash: line 1: /tmp: Is a directory\nbash: error: x";
+        assert_eq!(one_line(err, 1), "bash: error: x");
+    }
+
+    #[test]
+    fn guest_read_uses_the_shared_numbered_formatter() {
+        // format_numbered is the shared read_file formatter for host and VM
+        let out = crate::tools::format_numbered("t.rs", b"fn a() {}\nfn b() {}\n".to_vec(), 1, 1)
+            .unwrap();
+        assert!(out.starts_with("t.rs (2 lines)\n"));
+        assert!(out.contains("1\u{2192}fn a() {}"));
+        assert!(out.contains("... (+1 more lines, use offset 2)"));
+        // binary detection survives the base64 round trip by construction
+        let bin = vec![0u8, 1, 2, 3];
+        let out = crate::tools::format_numbered("t.bin", bin, 1, 10).unwrap();
+        assert!(out.contains("binary file (4 bytes)"));
+        // oversize is rejected before any formatting
+        let big = vec![b'x'; (crate::tools::MAX_ATTACH_BYTES + 1) as usize];
+        assert!(crate::tools::format_numbered("big", big, 1, 10).is_err());
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("hiderola-sbx-{}-{}", tag, std::process::id()));
