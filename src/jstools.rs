@@ -410,8 +410,13 @@ mod tests {
         d
     }
 
+    // every test below mutates the shared DIR_OVERRIDE/CACHE globals; run
+    // them one at a time or they reload each other's tool dirs mid-test
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn load_execute_and_logs() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir("main");
         std::fs::write(
             dir.join("slug.js"),
@@ -462,6 +467,7 @@ mod tests {
 
     #[test]
     fn console_logs_and_async_execute() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir("logs");
         std::fs::write(
             dir.join("logged.js"),
@@ -499,6 +505,7 @@ mod tests {
 
     #[test]
     fn broken_files_are_skipped_with_reasons() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir("broken");
         std::fs::write(dir.join("syntax.js"), "module.exports = {").unwrap();
         std::fs::write(
@@ -547,6 +554,7 @@ mod tests {
 
     #[test]
     fn duplicate_names_project_wins() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir("dup2");
         std::fs::write(
             dir.join("tool.js"),
@@ -563,6 +571,7 @@ mod tests {
 
     #[test]
     fn runtime_error_and_missing_tool() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir("runtime");
         std::fs::write(
             dir.join("boom.js"),
@@ -580,6 +589,7 @@ mod tests {
 
     #[test]
     fn infinite_loop_aborts() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir("loop");
         std::fs::write(
             dir.join("spin.js"),
@@ -595,6 +605,7 @@ mod tests {
 
     #[test]
     fn summary_lists_tools() {
+        let _g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = temp_dir("summary");
         std::fs::write(
             dir.join("s1.js"),
