@@ -19,11 +19,14 @@ use windows_sys::Win32::System::JobObjects::{
 /// obvious.
 pub struct Job(HANDLE);
 
-// HANDLE is a raw *mut c_void and therefore !Send, but a kernel object handle
-// is process-wide, not thread-affine: TerminateJobObject / CloseHandle are
-// thread-safe. Without this, every future that touches an MCP client or a
-// bash run (both keep a Job inside a Send state) stops being Send on windows.
+// HANDLE is a raw *mut c_void and therefore !Send/!Sync, but a kernel object
+// handle is process-wide, not thread-affine: TerminateJobObject / CloseHandle
+// are thread-safe. Without this, every future that touches an MCP client or a
+// bash run (both keep a Job inside a Send state) stops being Send on windows,
+// and `&McpServer` stops being Send because McpServer (holding a Job) would
+// not be Sync.
 unsafe impl Send for Job {}
+unsafe impl Sync for Job {}
 
 impl Job {
     /// Places the process behind `proc` (a spawned Child's raw handle) into a
