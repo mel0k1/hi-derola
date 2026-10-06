@@ -1315,6 +1315,7 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
         }
         "/models" => {
             let cfg = sh.cfg.lock().unwrap().clone();
+            let eff = cfg.effective_provider();
             let key = cfg.api_key().unwrap_or_default();
             let tx = sh.tx.clone();
             tauri::async_runtime::spawn(async move {

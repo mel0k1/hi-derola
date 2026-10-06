@@ -36,7 +36,9 @@ toml = "0.8"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_JobObjects"] }
+# Win32_Security is required: CreateJobObjectW takes a *const SECURITY_ATTRIBUTES
+# and windows-sys only compiles it when the type's feature is on
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects"] }
 
 [profile.release]
 strip = true
