@@ -83,7 +83,7 @@ pub struct App {
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
-const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /sessions      list saved sessions\n  /resume [id]   switch to a saved session (latest by default)\n  /mcpauth [name] mcp OAuth status, or authorize a remote server in browser; /mcpauth <name> <code> finishes a flow with a pasted authorization code (resume after a restart)\n  /mcpres [server]  list mcp resources and uri templates\n  /mcpstatus     per-server status: connected/failed/needs auth/crashed\n  /mcpread <server> <uri> read an mcp resource into the chat\n  /mcpprompt [server] <name> [k=v] use an mcp prompt (no args lists prompts)\n  /mcpsub <server> <uri> subscribe to mcp resource updates (land in chat)\n  /mcpunsub <server> <uri> stop the subscription\n  /mcplog [server]  recent mcp log messages; /mcplog set <server|all> <level> sets the minimum level\n  /mcpadd <name> <url|command...> add a server at runtime (saved to config) and connect it\n  /mcpconnect <name> (re)connect a configured server\n  /mcpdisconnect <name> drop the live connection (config untouched)\n  /mcplogout <name> drop the stored oauth tokens; a fresh /mcpauth flow starts on next use\n  /jstools [reload] list user JS tools (.hi-derola/tools/), optional rescan\n  /doctor        environment self-check: config/provider, ssh, qemu+accel, lsp servers, formatters, mcp, sandbox\n  /sandbox       local VM sandboxes: bare = list; /sandbox start|stop|attach|detach <id|name>; /sandbox new <name> [debian|debian-std|ubuntu|ubuntu-std|custom=<path>] [ram=2048] [cpus=2] [disk=20] [login=x] [root=on|off]; /sandbox fetch|push <id|name> <path> [dest]; /sandbox term <id|name> [agent] — attach routes bash into the VM over ssh\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch/mcp_resource + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
+const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config (into the active profile when one is set)\n  /model         show current model\n  /models        list models available for the api key\n  /profile [name] switch provider profile (bare = list, \"none\" = back to the base [provider] section)\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /sessions      list saved sessions\n  /resume [id]   switch to a saved session (latest by default)\n  /mcpauth [name] mcp OAuth status, or authorize a remote server in browser; /mcpauth <name> <code> finishes a flow with a pasted authorization code (resume after a restart)\n  /mcpres [server]  list mcp resources and uri templates\n  /mcpstatus     per-server status: connected/failed/needs auth/crashed\n  /mcpread <server> <uri> read an mcp resource into the chat\n  /mcpprompt [server] <name> [k=v] use an mcp prompt (no args lists prompts)\n  /mcpsub <server> <uri> subscribe to mcp resource updates (land in chat)\n  /mcpunsub <server> <uri> stop the subscription\n  /mcplog [server]  recent mcp log messages; /mcplog set <server|all> <level> sets the minimum level\n  /mcpadd <name> <url|command...> add a server at runtime (saved to config) and connect it\n  /mcpconnect <name> (re)connect a configured server\n  /mcpdisconnect <name> drop the live connection (config untouched)\n  /mcplogout <name> drop the stored oauth tokens; a fresh /mcpauth flow starts on next use\n  /jstools [reload] list user JS tools (.hi-derola/tools/), optional rescan\n  /doctor        environment self-check: config/provider, ssh, qemu+accel, lsp servers, formatters, mcp, sandbox\n  /sandbox       local VM sandboxes: bare = list; /sandbox start|stop|attach|detach <id|name>; /sandbox new <name> [debian|debian-std|ubuntu|ubuntu-std|custom=<path>] [ram=2048] [cpus=2] [disk=20] [login=x] [root=on|off]; /sandbox fetch|push <id|name> <path> [dest]; /sandbox term <id|name> [agent] — attach routes bash into the VM over ssh\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch/mcp_resource + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
 
 pub fn help_text() -> &'static str {
     HELP
@@ -204,6 +204,41 @@ impl App {
         if let Some(add) = crate::sandbox::shell_route_addendum() {
             self.session.system.push_str("\n\n");
             self.session.system.push_str(&add);
+        }
+    }
+
+    /// switch the provider profile at runtime (or drop back to the base
+    /// [provider] section with None): rebuild the provider from the effective
+    /// config, refresh model/status/system prompt, persist the choice;
+    /// a failed build or a missing key keeps the previous profile
+    fn apply_profile(&mut self, name: Option<String>) {
+        let prev = self.cfg.provider.active.clone();
+        self.cfg.provider.active = name.clone();
+        let eff = self.cfg.effective_provider();
+        let outcome = match self.cfg.api_key() {
+            None => Err(anyhow::anyhow!(
+                "no api key for {} — set api_key in the profile or the matching env var",
+                name.as_deref().unwrap_or("the base [provider]")
+            )),
+            Some(k) => crate::provider::build(&eff.kind, eff.base_url.clone(), k),
+        };
+        match outcome {
+            Err(e) => {
+                self.cfg.provider.active = prev;
+                self.info(format!("profile not switched: {e:#}"));
+            }
+            Ok(p) => {
+                self.provider = p;
+                self.model = eff.model.clone();
+                self.refresh_system_prompt();
+                self.status = self.status_line();
+                let label = name.unwrap_or_else(|| "base [provider]".into());
+                let msg = format!("profile: {} — {} · {}", label, eff.kind, eff.model);
+                match self.cfg.save() {
+                    Ok(_) => self.info(msg),
+                    Err(e) => self.info(format!("{msg} (not saved: {e:#})")),
+                }
+            }
         }
     }
 
@@ -538,6 +573,7 @@ impl App {
 
     /// client hooks for mcp: workspace root (cwd) + sampling via our provider
     fn mcp_hooks(&self) -> mcp::McpHooks {
+        let eff = self.cfg.effective_provider();
         mcp::McpHooks::workspace(std::env::current_dir().ok())
             .with_notes(self.tx.clone())
             .with_session(self.mcp_session.clone())
@@ -546,7 +582,7 @@ impl App {
             .with_sampler(mcp::default_sampler(
                 self.provider.clone(),
                 self.model.clone(),
-                self.cfg.provider.temperature,
+                eff.temperature,
                 self.tx.clone(),
             ))
     }
@@ -1096,6 +1132,7 @@ impl App {
             return;
         }
         // manual subagent invocation: "@explore find the parser"
+        let eff = self.cfg.effective_provider();
         if let Some((agent_name, rest)) = crate::agents::split_mention(&text) {
             self.input.clear();
             if !matches!(self.phase, Phase::Idle) {
@@ -1110,9 +1147,9 @@ impl App {
                 None,
                 Some(&self.sid),
                 &self.model,
-                self.cfg.provider.max_tokens,
-                self.cfg.provider.temperature,
-                self.cfg.provider.top_p,
+                eff.max_tokens,
+                eff.temperature,
+                eff.top_p,
             ) {
                 Ok(r) => r,
                 Err(e) => {
@@ -1227,6 +1264,7 @@ impl App {
         self.status = self.status_line();
         self.scroll_up = 0;
         crate::snapshot::begin_turn();
+        let eff = self.cfg.effective_provider();
         if self.title.is_none() {
             if let Some(m) = self
                 .session
@@ -1261,10 +1299,10 @@ impl App {
             system: self.session.system.clone(),
             messages: self.session.messages.clone(),
             model: self.model.clone(),
-            max_tokens: self.cfg.provider.max_tokens,
-            temperature: self.cfg.provider.temperature,
-            top_p: self.cfg.provider.top_p,
-            stream: self.cfg.provider.stream,
+            max_tokens: eff.max_tokens,
+            temperature: eff.temperature,
+            top_p: eff.top_p,
+            stream: eff.stream,
             tools: Vec::new(),
         };
         if self.plan {
@@ -1385,14 +1423,18 @@ impl App {
             }
             "/model" => {
                 if arg.is_empty() {
-                    self.info(format!(
+                    let mut s = format!(
                         "model: {}\nconfig: {}",
                         self.model,
                         crate::config::config_path().display()
-                    ));
+                    );
+                    if let Some(a) = &self.cfg.provider.active {
+                        s.push_str(&format!("\nprofile: {a}"));
+                    }
+                    self.info(s);
                 } else {
                     self.model = arg.to_string();
-                    self.cfg.provider.model = arg.to_string();
+                    self.cfg.set_model(&arg);
                     self.refresh_system_prompt();
                     match self.cfg.save() {
                         Ok(_) => self.info(format!("model: {}", self.model)),
@@ -1400,14 +1442,38 @@ impl App {
                     }
                 }
             }
+            "/profile" => {
+                if arg.is_empty() {
+                    self.info(self.cfg.profiles_summary());
+                } else if arg == "none" || arg == "off" {
+                    if self.cfg.provider.active.is_none() {
+                        self.info("already on the base [provider] section");
+                    } else {
+                        self.apply_profile(None);
+                    }
+                } else if self.cfg.profiles.contains_key(arg) {
+                    self.apply_profile(Some(arg.to_string()));
+                } else {
+                    let mut msg = format!("no profile \"{arg}\"");
+                    if self.cfg.profiles.is_empty() {
+                        msg.push_str(" — define [profiles.<name>] tables in config.toml");
+                    } else {
+                        let names: Vec<&str> =
+                            self.cfg.profiles.keys().map(String::as_str).collect();
+                        msg.push_str(&format!(" — defined: {}", names.join(", ")));
+                    }
+                    self.info(msg);
+                }
+            }
             "/models" => {
-                let kind = self.cfg.provider.kind.clone();
-                let base = self.cfg.provider.base_url.clone();
+                let eff = self.cfg.effective_provider();
                 let key = self.cfg.api_key().unwrap_or_default();
                 let tx = self.tx.clone();
                 self.info("fetching models...");
                 tokio::spawn(async move {
-                    match crate::provider::list_models(&kind, base.as_deref(), &key).await {
+                    match crate::provider::list_models(&eff.kind, eff.base_url.as_deref(), &key)
+                        .await
+                    {
                         Ok(list) if list.is_empty() => {
                             let _ = tx.send(ApiEvent::Note("no models found".into()));
                         }
@@ -1884,8 +1950,9 @@ impl App {
                 }
             }
             "/doctor" => {
+                let eff = self.cfg.effective_provider();
                 let input = crate::doctor::DoctorInput {
-                    provider_kind: self.cfg.provider.kind.clone(),
+                    provider_kind: eff.kind,
                     model: self.model.clone(),
                     has_api_key: self.cfg.api_key().is_some(),
                     config_path: crate::config::config_path().display().to_string(),
@@ -1964,13 +2031,14 @@ impl App {
                     self.info("nothing to compact yet");
                     return;
                 }
+                let eff = self.cfg.effective_provider();
                 let req = ChatRequest {
                     system: self.session.system.clone(),
                     messages: self.session.messages.clone(),
                     model: self.model.clone(),
-                    max_tokens: self.cfg.provider.max_tokens,
-                    temperature: self.cfg.provider.temperature,
-                    top_p: self.cfg.provider.top_p,
+                    max_tokens: eff.max_tokens,
+                    temperature: eff.temperature,
+                    top_p: eff.top_p,
                     stream: false,
                     tools: Vec::new(),
                 };

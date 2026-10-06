@@ -25,6 +25,19 @@ stream = true
 # temperature = 0.7
 # top_p = 0.9
 
+# provider profiles: named presets switched with /profile <name> in the chat
+# (fields present in a profile override the [provider] section, everything
+# else is inherited — a profile can be as small as a model override or as
+# complete as a whole second provider; /profile alone lists them, the choice
+# is saved here as provider.active; /profile none returns to the base section)
+# [profiles.cheap]
+# model = "anthropic/claude-3.5-haiku"
+# [profiles.local]
+# type = "openai"
+# model = "qwen3:8b"
+# base_url = "http://localhost:11434/v1"
+# api_key = "ollama"
+
 # mcp servers, tools exposed as mcp__<name>__<tool>, calls ask y/n/a
 # local server over stdio
 # [[mcp]]

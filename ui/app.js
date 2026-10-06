@@ -1780,7 +1780,12 @@ function openSettings() {
   $("s-top-p").value = p.top_p ?? "";
   $("s-stream").checked = p.stream !== false;
   $("s-model-status").textContent = "";
-  $("s-msg").textContent = "";
+  if (p.active) {
+    $("s-msg").textContent =
+      `profile "${p.active}" is active — its fields override the values below (switch with /profile in the chat)`;
+  } else {
+    $("s-msg").textContent = "";
+  }
   buildKeysGrid(KEYS);
   fillMcpList();
   fillPermList();
@@ -1956,7 +1961,11 @@ function buildCfgPayload() {
       temperature: num("s-temperature"),
       top_p: num("s-top-p"),
       stream: $("s-stream").checked,
+      // provider profiles are managed in config.toml (/profile in the chat);
+      // pass them through untouched so saving settings keeps them
+      active: (CFG && CFG.provider && CFG.provider.active) || null,
     },
+    profiles: (CFG && CFG.profiles) || undefined,
     mcp: (CFG && CFG.mcp) || [],
     keys: readKeysGrid(),
     ui: { theme: document.body.dataset.theme },

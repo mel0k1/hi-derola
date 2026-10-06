@@ -15,6 +15,7 @@ A high-performance, lightweight chat and autonomous coding assistant written in 
 - multi-provider: any OpenAI-compatible endpoint (OpenAI, OpenRouter, ...) + native Anthropic
 - streaming responses and reasoning in a separate collapsible thinking block (GUI)
 - api key, endpoint and model are editable right in the GUI settings; the model dropdown is filled from the provider's `/models` endpoint; mcp servers can be added or removed in the same settings — name, type (stdio or remote), command/args/env/working dir or url/headers, optional timeout — saved to config.toml and connected on the spot (removal asks twice)
+- provider profiles: named presets in `[profiles.<name>]` config tables — every field present overrides the base `[provider]` section, the rest is inherited (a one-line model override or a complete second provider with its own type/key/endpoint); `/profile` lists them with resolved type+model, `/profile <name>` switches live in both frontends (provider, model, key, sampling are rebuilt on the spot, the system prompt and status line follow), `/profile none` returns to the base section, the choice persists as `provider.active` in config.toml; `/model` while a profile is active writes into that profile so the switch is not shadowed on the next start
 - configurable hotkeys (`[keys]` in config or capture fields in GUI settings)
 - tool calling: read_file (line numbers, offset/limit, images come back as native image parts), write_file, edit (tolerant to CRLF/LF, BOM, trailing whitespace; a third pass normalizes smart quotes/dashes for unicode-mangled files; a final fuzzy pass salvages near-miss blocks — at least 2 lines, >=85% line similarity — and re-indents the replacement to the matched block), apply_patch (multi-file V4A patches — nothing is written unless every hunk matches), list_files, glob, grep, bash (workdir, timeout, tail output, background tasks), webfetch (http/https, html converted to markdown/text), websearch (DuckDuckGo, no key needed), codesearch (Exa code/docs search, no key needed) + MCP servers
 - custom JS tools: drop `.js` files into `.hi-derola/tools/` (project) or `~/.config/hi-derola/tools/` (global) — each exports `{ name, description, parameters, execute(input) }` and runs in the same confined boa sandbox as the code tool (no fs/network/process access, console.log captured, 30s budget); list them with `/jstools` (TUI and GUI, `/jstools reload` rescans)
@@ -207,8 +208,9 @@ permission = "allow"
 
 ```
 /file <path>   attach file to next message
-/model <name>  switch model, saved to config
+/model <name>  switch model, saved to config (into the active profile when one is set)
 /models        list models available for the api key
+/profile [name] switch provider profile (bare = list, "none" = base [provider] section)
 /plan          toggle plan mode (read-only research)
 /undo /redo    revert or reapply file changes of a turn
 /init          create or improve AGENTS.md for this project

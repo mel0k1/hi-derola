@@ -122,6 +122,7 @@ fn launch(sh: &Arc<Shared>) -> Result<(), String> {
         return Err("no api key: open settings and add one".into());
     };
     let cfg = sh.cfg.lock().unwrap().clone();
+    let eff = cfg.effective_provider();
     let (system, messages) = {
         let ses = sh.session.lock().unwrap();
         (ses.system.clone(), ses.messages.clone())
@@ -129,11 +130,11 @@ fn launch(sh: &Arc<Shared>) -> Result<(), String> {
     let req = ChatRequest {
         system,
         messages,
-        model: cfg.provider.model.clone(),
-        max_tokens: cfg.provider.max_tokens,
-        temperature: cfg.provider.temperature,
-        top_p: cfg.provider.top_p,
-        stream: cfg.provider.stream,
+        model: eff.model.clone(),
+        max_tokens: eff.max_tokens,
+        temperature: eff.temperature,
+        top_p: eff.top_p,
+        stream: eff.stream,
         tools: Vec::new(),
     };
     let mcp = sh.mcp.clone();
@@ -228,6 +229,7 @@ fn autotitle(app: &AppHandle, sh: &Arc<Shared>, msgs: &[hi_derola::chat::Message
         return;
     }
     let cfg = sh.cfg.lock().unwrap().clone();
+    let eff = cfg.effective_provider();
     let req = ChatRequest {
         system: "You generate short chat session titles. Reply with only the title: 2-6 words in the language of the message, no quotes, no trailing punctuation.".into(),
         messages: vec![hi_derola::chat::Message::new(
@@ -238,10 +240,10 @@ fn autotitle(app: &AppHandle, sh: &Arc<Shared>, msgs: &[hi_derola::chat::Message
                 clip_chars(&bot_text, 400)
             ),
         )],
-        model: cfg.provider.model.clone(),
-        max_tokens: cfg.provider.max_tokens,
-        temperature: cfg.provider.temperature,
-        top_p: cfg.provider.top_p,
+        model: eff.model.clone(),
+        max_tokens: eff.max_tokens,
+        temperature: eff.temperature,
+        top_p: eff.top_p,
         stream: false,
         tools: Vec::new(),
     };
@@ -331,17 +333,18 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                 } => {
                     let (model, kind, ctx_limit) = {
                         let cfg = sh.cfg.lock().unwrap();
+                        let eff = cfg.effective_provider();
                         let limit = if cfg.agent.context_limit > 0 {
                             cfg.agent.context_limit
                         } else {
-                            let w = models::lookup(&cfg.provider.model).window;
+                            let w = models::lookup(&eff.model).window;
                             if w > 0 {
                                 w / 10 * 9
                             } else {
                                 0
                             }
                         };
-                        (cfg.provider.model.clone(), cfg.provider.kind.clone(), limit)
+                        (eff.model.clone(), eff.kind.clone(), limit)
                     };
                     let disc = if kind == "anthropic" { 0.1 } else { 0.5 };
                     let delta = models::cost_cached(&model, input, output, cached, disc);
@@ -443,8 +446,9 @@ async fn init(sh: State<'_, Arc<Shared>>) -> Result<Value, String> {
 
 #[tauri::command]
 async fn save(sh: State<'_, Arc<Shared>>, app: AppHandle, cfg: Config) -> Result<Value, String> {
+    let eff = cfg.effective_provider();
     let p = match cfg.api_key() {
-        Some(k) => match provider::build(&cfg.provider.kind, cfg.provider.base_url.clone(), k) {
+        Some(k) => match provider::build(&eff.kind, eff.base_url.clone(), k) {
             Ok(p) => Some(p),
             Err(e) => return Err(format!("{e:#}")),
         },
@@ -454,8 +458,8 @@ async fn save(sh: State<'_, Arc<Shared>>, app: AppHandle, cfg: Config) -> Result
     lsp::set_enabled(cfg.lsp.enabled);
     fmt::set_enabled(cfg.formatters.enabled);
     hi_derola::tools::set_shell(cfg.agent.shell.clone());
-    let model = cfg.provider.model.clone();
-    let kind = cfg.provider.kind.clone();
+    let model = eff.model.clone();
+    let kind = eff.kind.clone();
     let theme = cfg.ui.theme.clone();
     *sh.cfg.lock().unwrap() = cfg;
     *sh.provider.lock().unwrap() = p;
@@ -482,12 +486,13 @@ async fn list_models(
     api_key: Option<String>,
 ) -> Result<Vec<String>, String> {
     let cfg = sh.cfg.lock().unwrap().clone();
+    let eff = cfg.effective_provider();
     let kind = kind
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or(cfg.provider.kind.clone());
+        .unwrap_or(eff.kind.clone());
     let base = base_url
         .filter(|s| !s.trim().is_empty())
-        .or(cfg.provider.base_url.clone());
+        .or(eff.base_url.clone());
     let key = api_key
         .filter(|s| !s.trim().is_empty())
         .or_else(|| cfg.api_key())
@@ -591,12 +596,13 @@ fn mcp_hooks(
         .with_session(session)
         .with_eliciter(hi_derola::mcp::default_eliciter(tx.clone()))
         .with_mcp_timeout(cfg.agent.mcp_timeout);
+    let eff = cfg.effective_provider();
     match cfg.api_key() {
-        Some(k) => match provider::build(&cfg.provider.kind, cfg.provider.base_url.clone(), k) {
+        Some(k) => match provider::build(&eff.kind, eff.base_url.clone(), k) {
             Ok(p) => hooks.with_sampler(hi_derola::mcp::default_sampler(
                 p,
-                cfg.provider.model.clone(),
-                cfg.provider.temperature,
+                eff.model.clone(),
+                eff.temperature,
                 tx,
             )),
             Err(_) => hooks,
@@ -1201,6 +1207,45 @@ fn note(s: impl Into<String>) -> Value {
     json!({"cmd": true, "note": s.into()})
 }
 
+/// switch the provider profile at runtime (or drop back to the base
+/// [provider] section with None): rebuild the provider from the effective
+/// config and persist the choice; a failed build or a missing key keeps
+/// the previous profile — the TUI twin lives in app.rs::apply_profile
+fn apply_profile(sh: &Arc<Shared>, app: &AppHandle, name: Option<String>) -> Value {
+    let mut cfg = sh.cfg.lock().unwrap();
+    let prev = cfg.provider.active.clone();
+    cfg.provider.active = name.clone();
+    let eff = cfg.effective_provider();
+    let outcome = match cfg.api_key() {
+        Some(k) => provider::build(&eff.kind, eff.base_url.clone(), k),
+        None => Err(anyhow::anyhow!(
+            "no api key for {} — set api_key in the profile or the matching env var",
+            name.as_deref().unwrap_or("the base [provider]")
+        )),
+    };
+    match outcome {
+        Err(e) => {
+            cfg.provider.active = prev;
+            note(format!("profile not switched: {e:#}"))
+        }
+        Ok(p) => {
+            let saved = cfg.save();
+            drop(cfg);
+            *sh.provider.lock().unwrap() = Some(p);
+            let _ = app.emit(
+                "ev",
+                json!({"t": "model", "name": eff.model.clone(), "kind": eff.kind.clone()}),
+            );
+            let label = name.unwrap_or_else(|| "base [provider]".into());
+            let msg = format!("profile: {} — {} · {}", label, eff.kind, eff.model);
+            match saved {
+                Ok(_) => note(msg),
+                Err(e) => note(format!("{msg} (not saved: {e:#})")),
+            }
+        }
+    }
+}
+
 fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
     let (cmd, arg) = line
         .split_once(' ')
@@ -1208,7 +1253,7 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
         .unwrap_or((line, ""));
     match cmd {
         "/help" | "/h" => note(
-            "commands: /file <path> · /model <name> · /models · /plan · /undo · /redo · /init · /compact · /export [path] · /mcpadd <name> <url|command...> · /mcpconnect <name> · /mcpdisconnect <name> · /mcplogout <name> · /mcpres [server] · /mcpstatus · /mcpread <server> <uri> · /mcpsub <server> <uri> · /mcpunsub <server> <uri> · /mcpprompt [server] <name> [k=v] · /mcplog [server] (/mcplog set <server|all> <level>) · /jstools [reload] · /clear · /help\n\
+            "commands: /file <path> · /model <name> · /models · /profile [name] · /plan · /undo · /redo · /init · /compact · /export [path] · /mcpadd <name> <url|command...> · /mcpconnect <name> · /mcpdisconnect <name> · /mcplogout <name> · /mcpres [server] · /mcpstatus · /mcpread <server> <uri> · /mcpsub <server> <uri> · /mcpunsub <server> <uri> · /mcpprompt [server] <name> [k=v] · /mcplog [server] (/mcplog set <server|all> <level>) · /jstools [reload] · /clear · /help\n\
              mutations (write/edit/bash/mcp) ask for confirmation, allow all skips further asks\n\
              custom commands: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)",
         ),
@@ -1219,15 +1264,19 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
         "/model" => {
             if arg.is_empty() {
                 let cfg = sh.cfg.lock().unwrap();
-                note(format!(
+                let mut s = format!(
                     "model: {}\nconfig: {}",
-                    cfg.provider.model,
+                    cfg.effective_provider().model,
                     hi_derola::config::config_path().display()
-                ))
+                );
+                if let Some(a) = &cfg.provider.active {
+                    s.push_str(&format!("\nprofile: {a}"));
+                }
+                note(s)
             } else {
                 {
                     let mut cfg = sh.cfg.lock().unwrap();
-                    cfg.provider.model = arg.to_string();
+                    cfg.set_model(arg);
                 }
                 let saved = sh.cfg.lock().unwrap().save();
                 let _ = app.emit("ev", json!({"t": "model", "name": arg}));
@@ -1237,12 +1286,39 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
                 }
             }
         }
+        "/profile" => {
+            if arg.is_empty() {
+                let cfg = sh.cfg.lock().unwrap();
+                note(cfg.profiles_summary())
+            } else if arg == "none" || arg == "off" {
+                let active = sh.cfg.lock().unwrap().provider.active.clone();
+                match active {
+                    None => note("already on the base [provider] section"),
+                    Some(_) => apply_profile(sh, &app, None),
+                }
+            } else {
+                let defined = sh.cfg.lock().unwrap().profiles.contains_key(arg);
+                if defined {
+                    apply_profile(sh, &app, Some(arg.to_string()))
+                } else {
+                    let cfg = sh.cfg.lock().unwrap();
+                    let mut msg = format!("no profile \"{arg}\"");
+                    if cfg.profiles.is_empty() {
+                        msg.push_str(" — define [profiles.<name>] tables in config.toml");
+                    } else {
+                        let names: Vec<&str> = cfg.profiles.keys().map(String::as_str).collect();
+                        msg.push_str(&format!(" — defined: {}", names.join(", ")));
+                    }
+                    note(msg)
+                }
+            }
+        }
         "/models" => {
             let cfg = sh.cfg.lock().unwrap().clone();
             let key = cfg.api_key().unwrap_or_default();
             let tx = sh.tx.clone();
             tauri::async_runtime::spawn(async move {
-                let msg = match provider::list_models(&cfg.provider.kind, cfg.provider.base_url.as_deref(), &key).await {
+                let msg = match provider::list_models(&eff.kind, eff.base_url.as_deref(), &key).await {
                     Ok(list) if list.is_empty() => "no models found".into(),
                     Ok(list) => format!("models ({}):\n{}", list.len(), list.join("\n")),
                     Err(e) => format!("error: {e:#}"),
@@ -1641,6 +1717,7 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
                 return note("nothing to compact yet");
             }
             let cfg = sh.cfg.lock().unwrap().clone();
+            let eff = cfg.effective_provider();
             let Some(provider) = sh.provider.lock().unwrap().clone() else {
                 return note("no provider configured");
             };
@@ -1651,10 +1728,10 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
             let req = ChatRequest {
                 system,
                 messages: msgs_now,
-                model: cfg.provider.model.clone(),
-                max_tokens: cfg.provider.max_tokens,
-                temperature: cfg.provider.temperature,
-                top_p: cfg.provider.top_p,
+                model: eff.model.clone(),
+                max_tokens: eff.max_tokens,
+                temperature: eff.temperature,
+                top_p: eff.top_p,
                 stream: false,
                 tools: Vec::new(),
             };
@@ -1745,6 +1822,7 @@ async fn send(sh: State<'_, Arc<Shared>>, app: AppHandle, text: String) -> Resul
             return Err("no api key: open settings and add one".into());
         };
         let cfg = sh.cfg.lock().unwrap().clone();
+        let eff = cfg.effective_provider();
         let (blocks, _ok, _miss) = hi_derola::files::mentions(&rest);
         let prompt = format!("{blocks}{rest}");
         let parent_sid = sh.sid.lock().unwrap().clone();
@@ -1753,10 +1831,10 @@ async fn send(sh: State<'_, Arc<Shared>>, app: AppHandle, text: String) -> Resul
             &prompt,
             None,
             Some(&parent_sid),
-            &cfg.provider.model,
-            cfg.provider.max_tokens,
-            cfg.provider.temperature,
-            cfg.provider.top_p,
+            &eff.model,
+            eff.max_tokens,
+            eff.temperature,
+            eff.top_p,
         ) {
             Ok(r) => r,
             Err(e) => return Err(e),
@@ -1860,9 +1938,10 @@ pub fn run() -> Result<()> {
         .setup(move |app| {
             let (tx, rx) = mpsc::unbounded_channel::<ApiEvent>();
             let cfg = (*cfg).clone();
-            let provider = cfg.api_key().and_then(|k| {
-                provider::build(&cfg.provider.kind, cfg.provider.base_url.clone(), k).ok()
-            });
+            let eff = cfg.effective_provider();
+            let provider = cfg
+                .api_key()
+                .and_then(|k| provider::build(&eff.kind, eff.base_url.clone(), k).ok());
             let restore = sessions::latest();
             let (sid, title, created, session) = match &restore {
                 Some(st) => (
@@ -1871,7 +1950,7 @@ pub fn run() -> Result<()> {
                     st.created,
                     Session {
                         system: if st.system.trim().is_empty() {
-                            system_prompt(&cfg.provider.model)
+                            system_prompt(&eff.model)
                         } else {
                             st.system.clone()
                         },
@@ -1882,7 +1961,7 @@ pub fn run() -> Result<()> {
                     sessions::new_id(),
                     String::new(),
                     0,
-                    Session::new(system_prompt(&cfg.provider.model)),
+                    Session::new(system_prompt(&eff.model)),
                 ),
             };
             let sh = Arc::new(Shared {

@@ -13,7 +13,8 @@ fn main() -> Result<()> {
     let key = cfg
         .api_key()
         .context("no api key: set api_key in config or HI_DEROLA_API_KEY")?;
-    let provider = provider::build(&cfg.provider.kind, cfg.provider.base_url.clone(), key)?;
+    let eff = cfg.effective_provider();
+    let provider = provider::build(&eff.kind, eff.base_url.clone(), key)?;
     let has_display = cfg!(windows)
         || std::env::var_os("DISPLAY").is_some()
         || std::env::var_os("WAYLAND_DISPLAY").is_some();

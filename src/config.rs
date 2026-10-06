@@ -22,6 +22,11 @@ pub struct Config {
     pub formatters: Toggle,
     #[serde(default)]
     pub permissions: crate::perm::PermCfg,
+    /// named provider presets: [profiles.<name>] tables in config.toml;
+    /// /profile <name> switches at runtime, profile fields override the
+    /// base [provider] section when present, the rest is inherited
+    #[serde(default)]
+    pub profiles: BTreeMap<String, ProfileConfig>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -171,6 +176,33 @@ pub struct ProviderConfig {
     pub max_tokens: Option<u32>,
     #[serde(default = "default_true")]
     pub stream: bool,
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(default)]
+    pub top_p: Option<f64>,
+    /// name of the currently active [profiles.<name>] preset; set by
+    /// /profile, an unknown name silently falls back to the base section
+    #[serde(default)]
+    pub active: Option<String>,
+}
+
+/// a named provider preset: every field is optional and overrides the
+/// base [provider] section only when present, so a profile can be as
+/// small as a model override or as complete as a whole second provider
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ProfileConfig {
+    #[serde(rename = "type", default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub stream: Option<bool>,
     #[serde(default)]
     pub temperature: Option<f64>,
     #[serde(default)]
@@ -494,6 +526,120 @@ mod tests {
             c.auth_server_metadata_url
         );
     }
+
+    const PROFILED: &str = concat!(
+        "[provider]\ntype = \"openai\"\nmodel = \"base-model\"\napi_key = \"base-key\"\ntemperature = 0.5\n",
+        "\n[profiles.cheap]\nmodel = \"cheap-model\"\n",
+        "\n[profiles.local]\ntype = \"anthropic\"\nmodel = \"claude-x\"\nbase_url = \"http://localhost:8080\"\napi_key = \"local-key\"\nstream = false\nmax_tokens = 512\ntemperature = 0.1\ntop_p = 0.9\n",
+    );
+
+    #[test]
+    fn profiles_merge_over_base_section() {
+        let cfg: Config = toml::from_str(PROFILED).unwrap();
+        assert_eq!(cfg.profiles.len(), 2);
+
+        // no active profile: the base section as-is
+        let eff = cfg.effective_provider();
+        assert_eq!(eff.kind, "openai");
+        assert_eq!(eff.model, "base-model");
+        assert_eq!(eff.api_key.as_deref(), Some("base-key"));
+        assert_eq!(eff.temperature, Some(0.5));
+
+        // a partial profile only overrides what it sets, the rest is inherited
+        let mut cfg: Config = toml::from_str(PROFILED).unwrap();
+        cfg.provider.active = Some("cheap".into());
+        let eff = cfg.effective_provider();
+        assert_eq!(eff.kind, "openai", "type inherited from the base section");
+        assert_eq!(eff.model, "cheap-model");
+        assert_eq!(eff.api_key.as_deref(), Some("base-key"), "key inherited");
+        assert_eq!(eff.temperature, Some(0.5), "sampling inherited");
+
+        // a complete profile overrides every field it carries
+        cfg.provider.active = Some("local".into());
+        let eff = cfg.effective_provider();
+        assert_eq!(eff.kind, "anthropic");
+        assert_eq!(eff.model, "claude-x");
+        assert_eq!(eff.base_url.as_deref(), Some("http://localhost:8080"));
+        assert_eq!(eff.api_key.as_deref(), Some("local-key"));
+        assert!(!eff.stream);
+        assert_eq!(eff.max_tokens, Some(512));
+        assert_eq!(eff.temperature, Some(0.1));
+        assert_eq!(eff.top_p, Some(0.9));
+    }
+
+    #[test]
+    fn unknown_active_profile_falls_back_to_base() {
+        let mut cfg: Config = toml::from_str(PROFILED).unwrap();
+        cfg.provider.active = Some("nope".into());
+        let eff = cfg.effective_provider();
+        assert_eq!(eff.kind, "openai");
+        assert_eq!(eff.model, "base-model");
+        // the summary points it out instead of failing silently
+        let s = cfg.profiles_summary();
+        assert!(s.contains("not defined"), "summary: {s}");
+        assert!(!s.contains("<- active"), "no profile is marked active: {s}");
+    }
+
+    #[test]
+    fn api_key_prefers_the_active_profile() {
+        let mut cfg: Config = toml::from_str(PROFILED).unwrap();
+        assert_eq!(cfg.api_key().as_deref(), Some("base-key"));
+        cfg.provider.active = Some("local".into());
+        assert_eq!(cfg.api_key().as_deref(), Some("local-key"));
+        // empty profile key falls back to the base one
+        cfg.profiles.get_mut("cheap").unwrap().api_key = Some("  ".into());
+        cfg.provider.active = Some("cheap".into());
+        assert_eq!(cfg.api_key().as_deref(), Some("base-key"));
+    }
+
+    #[test]
+    fn profiles_roundtrip_through_toml() {
+        let mut cfg: Config = toml::from_str(PROFILED).unwrap();
+        cfg.provider.active = Some("local".into());
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back.profiles.len(), 2);
+        assert_eq!(back.provider.active.as_deref(), Some("local"));
+        let eff = back.effective_provider();
+        assert_eq!(eff.kind, "anthropic");
+        assert_eq!(eff.model, "claude-x");
+        assert_eq!(eff.max_tokens, Some(512));
+    }
+
+    #[test]
+    fn set_model_writes_into_the_active_profile() {
+        let mut cfg: Config = toml::from_str(PROFILED).unwrap();
+        cfg.set_model("switched");
+        assert_eq!(cfg.provider.model, "switched");
+        assert_eq!(
+            cfg.profiles["cheap"].model.as_deref(),
+            Some("cheap-model"),
+            "profile untouched without an active profile"
+        );
+        cfg.provider.active = Some("cheap".into());
+        cfg.set_model("switched-2");
+        assert_eq!(cfg.provider.model, "switched", "base section untouched");
+        assert_eq!(cfg.profiles["cheap"].model.as_deref(), Some("switched-2"));
+        // and the effective view agrees
+        assert_eq!(cfg.effective_provider().model, "switched-2");
+    }
+
+    #[test]
+    fn profiles_summary_lists_and_marks_active() {
+        let mut cfg: Config = toml::from_str(PROFILED).unwrap();
+        assert!(cfg.profiles_summary().starts_with("profiles:\n  cheap"));
+        cfg.provider.active = Some("local".into());
+        let s = cfg.profiles_summary();
+        assert!(
+            s.contains("  local  anthropic · claude-x  <- active\n"),
+            "active line carries the marker: {s}"
+        );
+        assert!(
+            s.contains("  cheap  openai · cheap-model\n"),
+            "inactive line carries no marker: {s}"
+        );
+        let empty: Config = toml::from_str(MINIMAL).unwrap();
+        assert!(empty.profiles_summary().contains("none"));
+    }
 }
 
 impl Config {
@@ -556,7 +702,8 @@ impl Config {
     }
 
     pub fn api_key(&self) -> Option<String> {
-        if let Some(k) = &self.provider.api_key {
+        let eff = self.effective_provider();
+        if let Some(k) = &eff.api_key {
             let k = k.trim();
             if !k.is_empty() {
                 return Some(k.to_string());
@@ -568,7 +715,7 @@ impl Config {
                 return Some(k.to_string());
             }
         }
-        match self.provider.kind.as_str() {
+        match eff.kind.as_str() {
             "openai" => std::env::var("OPENAI_API_KEY")
                 .ok()
                 .filter(|k| !k.trim().is_empty()),
@@ -577,5 +724,104 @@ impl Config {
                 .filter(|k| !k.trim().is_empty()),
             _ => None,
         }
+    }
+
+    /// overlay a single profile on the base [provider] section
+    fn merged(&self, prof: &ProfileConfig) -> ProviderConfig {
+        let mut p = self.provider.clone();
+        if let Some(v) = &prof.kind {
+            p.kind = v.clone();
+        }
+        if let Some(v) = &prof.model {
+            p.model = v.clone();
+        }
+        if let Some(v) = &prof.base_url {
+            p.base_url = Some(v.clone());
+        }
+        // an empty key in a profile means "not set" — inherit the base one
+        // (mirrors api_key()'s own trim handling of the base section)
+        if let Some(v) = prof
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
+            p.api_key = Some(v.to_string());
+        }
+        if let Some(v) = prof.max_tokens {
+            p.max_tokens = Some(v);
+        }
+        if let Some(v) = prof.stream {
+            p.stream = v;
+        }
+        if let Some(v) = prof.temperature {
+            p.temperature = Some(v);
+        }
+        if let Some(v) = prof.top_p {
+            p.top_p = Some(v);
+        }
+        p
+    }
+
+    /// the provider section actually in use: the base [provider] with the
+    /// active profile's fields merged over it; no active profile or an
+    /// unknown name falls back to the base section as-is
+    pub fn effective_provider(&self) -> ProviderConfig {
+        match self
+            .provider
+            .active
+            .as_deref()
+            .and_then(|n| self.profiles.get(n))
+        {
+            Some(prof) => self.merged(prof),
+            None => self.provider.clone(),
+        }
+    }
+
+    /// persist a model switch: into the active profile when one is set
+    /// (so /model is not shadowed by the profile on the next load), into
+    /// the base section otherwise
+    pub fn set_model(&mut self, model: &str) {
+        match self
+            .provider
+            .active
+            .clone()
+            .and_then(|n| self.profiles.get_mut(&n))
+        {
+            Some(prof) => prof.model = Some(model.to_string()),
+            None => self.provider.model = model.to_string(),
+        }
+    }
+
+    /// one-line-per-profile listing shared by /profile in the TUI and the
+    /// GUI: resolved type + model per profile, active marker, hint line
+    pub fn profiles_summary(&self) -> String {
+        if self.profiles.is_empty() {
+            return "profiles: none — define [profiles.<name>] tables in config.toml".into();
+        }
+        let mut out = String::from("profiles:");
+        for (name, prof) in &self.profiles {
+            let eff = self.merged(prof);
+            let mark = if self.provider.active.as_deref() == Some(name.as_str()) {
+                "  <- active"
+            } else {
+                ""
+            };
+            out.push_str(&format!(
+                "\n  {}  {} · {}{}",
+                name, eff.kind, eff.model, mark
+            ));
+        }
+        if let Some(active) = &self.provider.active {
+            if !self.profiles.contains_key(active) {
+                out.push_str(&format!(
+                    "\n  active profile \"{active}\" is not defined — using the base [provider] section"
+                ));
+            }
+        }
+        out.push_str(
+            "\nswitch: /profile <name>, /profile none (back to the base [provider] section)",
+        );
+        out
     }
 }
