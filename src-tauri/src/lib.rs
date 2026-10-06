@@ -1390,19 +1390,18 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
             };
             let slot = sh.mcp.clone();
             let tx = sh.tx.clone();
+            let name2 = name.clone();
             tauri::async_runtime::spawn(async move {
-                // shadow with clones — the trailing note() still needs the names
-                let name = name.clone();
                 let existing = slot.lock().unwrap().clone();
                 let msg = match existing {
                     Some(m) => match m.add(&cfg, &hooks).await {
-                        Ok(sum) => format!("mcp {name}: connected ({sum})"),
+                        Ok(sum) => format!("mcp {name2}: connected ({sum})"),
                         Err(e) => format!("error: {e:#}"),
                     },
                     None => {
                         let (client, mut logs) = hi_derola::mcp::connect_all(std::slice::from_ref(&cfg), &hooks).await;
                         *slot.lock().unwrap() = client;
-                        logs.pop().unwrap_or_else(|| format!("mcp {name}: connected"))
+                        logs.pop().unwrap_or_else(|| format!("mcp {name2}: connected"))
                     }
                 };
                 let _ = tx.send(ApiEvent::Note(msg));
@@ -1421,9 +1420,9 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
             };
             let slot = sh.mcp.clone();
             let tx = sh.tx.clone();
+            let name2 = name.clone();
             tauri::async_runtime::spawn(async move {
-                let name = name.clone();
-                for l in mcp::reconnect_one(&slot, &cfgs, &hooks, &name).await {
+                for l in mcp::reconnect_one(&slot, &cfgs, &hooks, &name2).await {
                     let _ = tx.send(ApiEvent::Note(l));
                 }
             });
@@ -1439,9 +1438,9 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
                 return note("mcp is not configured");
             };
             let tx = sh.tx.clone();
+            let name2 = name.clone();
             tauri::async_runtime::spawn(async move {
-                let name = name.clone();
-                let msg = m.disconnect(&name).await.unwrap_or_else(|e| format!("error: {e:#}"));
+                let msg = m.disconnect(&name2).await.unwrap_or_else(|e| format!("error: {e:#}"));
                 let _ = tx.send(ApiEvent::Note(msg));
             });
             note(format!("disconnecting mcp {name}..."))
@@ -1553,14 +1552,14 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
             let uri = uri.trim().to_string();
             let mcp = sh.mcp.lock().unwrap().clone();
             let tx = sh.tx.clone();
+            let server2 = server.clone();
+            let uri2 = uri.clone();
             tauri::async_runtime::spawn(async move {
-                let server = server.clone();
-                let uri = uri.clone();
                 let Some(c) = mcp else {
                     let _ = tx.send(ApiEvent::Note("mcp is not configured".into()));
                     return;
                 };
-                let msg = match c.read_resource(&server, &uri).await {
+                let msg = match c.read_resource(&server2, &uri2).await {
                     Ok(text) => hi_derola::provider::truncate(&text).trim().to_string(),
                     Err(e) => format!("error: {e:#}"),
                 };
@@ -1617,14 +1616,14 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
                         a.insert(k.to_string(), json!(v));
                     }
                 }
+                let server2 = server.clone();
+                let name2 = name.clone();
                 tauri::async_runtime::spawn(async move {
-                    let server = server.clone();
-                    let name = name.clone();
                     let Some(c) = mcp else {
                         let _ = tx.send(ApiEvent::Note("mcp is not configured".into()));
                         return;
                     };
-                    match c.get_prompt(&server, &name, &Value::Object(a)).await {
+                    match c.get_prompt(&server2, &name2, &Value::Object(a)).await {
                         Ok(msgs) if msgs.is_empty() => {
                             let _ = tx.send(ApiEvent::Note("prompt returned no messages".into()));
                         }
@@ -1688,14 +1687,14 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
                 let level = parts[2].to_string();
                 let mcp = sh.mcp.lock().unwrap().clone();
                 let tx = sh.tx.clone();
+                let server2 = server.clone();
+                let level2 = level.clone();
                 tauri::async_runtime::spawn(async move {
-                    let server = server.clone();
-                    let level = level.clone();
                     let Some(c) = mcp else {
                         let _ = tx.send(ApiEvent::Note("mcp is not configured".into()));
                         return;
                     };
-                    for l in c.set_log_level(&server, &level).await {
+                    for l in c.set_log_level(&server2, &level2).await {
                         let _ = tx.send(ApiEvent::Note(l));
                     }
                 });
