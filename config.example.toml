@@ -159,6 +159,8 @@ enabled = true
 # edit = "ask"
 # write_file = "ask"
 # bash = "ask"
+# bash inside an attached VM sandbox (routed over ssh), independent of bash
+# sandbox = "allow"
 # mcp = "ask"
 # webfetch = "ask"
 # codesearch = "ask"

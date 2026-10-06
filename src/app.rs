@@ -83,7 +83,7 @@ pub struct App {
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
-const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /sessions      list saved sessions\n  /resume [id]   switch to a saved session (latest by default)\n  /mcpauth [name] mcp OAuth status, or authorize a remote server in browser; /mcpauth <name> <code> finishes a flow with a pasted authorization code (resume after a restart)\n  /mcpres [server]  list mcp resources and uri templates\n  /mcpstatus     per-server status: connected/failed/needs auth/crashed\n  /mcpread <server> <uri> read an mcp resource into the chat\n  /mcpprompt [server] <name> [k=v] use an mcp prompt (no args lists prompts)\n  /mcpsub <server> <uri> subscribe to mcp resource updates (land in chat)\n  /mcpunsub <server> <uri> stop the subscription\n  /mcplog [server]  recent mcp log messages; /mcplog set <server|all> <level> sets the minimum level\n  /mcpadd <name> <url|command...> add a server at runtime (saved to config) and connect it\n  /mcpconnect <name> (re)connect a configured server\n  /mcpdisconnect <name> drop the live connection (config untouched)\n  /mcplogout <name> drop the stored oauth tokens; a fresh /mcpauth flow starts on next use\n  /jstools [reload] list user JS tools (.hi-derola/tools/), optional rescan\n  /sandbox       local VM sandboxes: bare = list; /sandbox start|stop|attach|detach <id|name>; /sandbox new <name> [debian|debian-std|ubuntu|ubuntu-std|custom=<path>] [ram=2048] [cpus=2] [disk=20] [login=x] [root=on|off] — attach routes bash into the VM over ssh\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch/mcp_resource + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
+const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /sessions      list saved sessions\n  /resume [id]   switch to a saved session (latest by default)\n  /mcpauth [name] mcp OAuth status, or authorize a remote server in browser; /mcpauth <name> <code> finishes a flow with a pasted authorization code (resume after a restart)\n  /mcpres [server]  list mcp resources and uri templates\n  /mcpstatus     per-server status: connected/failed/needs auth/crashed\n  /mcpread <server> <uri> read an mcp resource into the chat\n  /mcpprompt [server] <name> [k=v] use an mcp prompt (no args lists prompts)\n  /mcpsub <server> <uri> subscribe to mcp resource updates (land in chat)\n  /mcpunsub <server> <uri> stop the subscription\n  /mcplog [server]  recent mcp log messages; /mcplog set <server|all> <level> sets the minimum level\n  /mcpadd <name> <url|command...> add a server at runtime (saved to config) and connect it\n  /mcpconnect <name> (re)connect a configured server\n  /mcpdisconnect <name> drop the live connection (config untouched)\n  /mcplogout <name> drop the stored oauth tokens; a fresh /mcpauth flow starts on next use\n  /jstools [reload] list user JS tools (.hi-derola/tools/), optional rescan\n  /sandbox       local VM sandboxes: bare = list; /sandbox start|stop|attach|detach <id|name>; /sandbox new <name> [debian|debian-std|ubuntu|ubuntu-std|custom=<path>] [ram=2048] [cpus=2] [disk=20] [login=x] [root=on|off]; /sandbox fetch|push <id|name> <path> [dest]; /sandbox term <id|name> [agent] — attach routes bash into the VM over ssh\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch/mcp_resource + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
 
 pub fn help_text() -> &'static str {
     HELP
@@ -123,6 +123,21 @@ fn fmt_mib(bytes: u64) -> String {
     } else {
         format!("{mib:.0} MiB")
     }
+}
+
+/// resolve a sandbox by exact/prefix id or by (substring) name — shared by
+/// every /sandbox subcommand that takes an <id|name> argument
+fn find_sandbox(
+    m: &crate::sandbox::SandboxManager,
+    key: &str,
+) -> Option<crate::sandbox::SandboxStatus> {
+    let key = key.to_lowercase();
+    m.list().into_iter().find(|s| {
+        s.spec.id == key
+            || s.spec.name == key
+            || s.spec.id.starts_with(&key)
+            || s.spec.name.to_lowercase().contains(&key)
+    })
 }
 
 fn key_seq(c: char) -> usize {
@@ -196,7 +211,7 @@ impl App {
     /// create and the bash route attach/detach (GUI parity lives in the
     /// sandbox tab of the window)
     fn sandbox_command(&mut self, arg: &str) {
-        const USAGE: &str = "usage: /sandbox [list] · /sandbox start|stop|attach|detach <id|name> · /sandbox fetch <id|name> <vm-path> [host-path] · /sandbox new <name> [debian|debian-std|ubuntu|ubuntu-std|custom=<path>] [ram=2048] [cpus=2] [disk=20] [login=x] [root=on|off]";
+        const USAGE: &str = "usage: /sandbox [list] · /sandbox start|stop|attach|detach <id|name> · /sandbox fetch|push <id|name> <path> [dest] · /sandbox term <id|name> [agent] · /sandbox new <name> [debian|debian-std|ubuntu|ubuntu-std|custom=<path>] [ram=2048] [cpus=2] [disk=20] [login=x] [root=on|off]";
         let m = crate::sandbox::SandboxManager::global();
         let mut parts = arg.split_whitespace();
         let sub = parts.next().unwrap_or("");
@@ -279,13 +294,7 @@ impl App {
                     return;
                 };
                 let key = key.to_lowercase();
-                let hit = m.list().into_iter().find(|s| {
-                    s.spec.id == key
-                        || s.spec.name == key
-                        || s.spec.id.starts_with(&key)
-                        || s.spec.name.to_lowercase().contains(&key)
-                });
-                let Some(s) = hit else {
+                let Some(s) = find_sandbox(m, &key) else {
                     self.info(format!(
                         "no sandbox matches \"{key}\" — /sandbox lists them"
                     ));
@@ -339,12 +348,7 @@ impl App {
                         .to_string()
                 });
                 let key = key.to_lowercase();
-                let Some(s) = m.list().into_iter().find(|s| {
-                    s.spec.id == key
-                        || s.spec.name == key
-                        || s.spec.id.starts_with(&key)
-                        || s.spec.name.to_lowercase().contains(&key)
-                }) else {
+                let Some(s) = find_sandbox(m, &key) else {
                     self.info(format!(
                         "no sandbox matches \"{key}\" — /sandbox lists them"
                     ));
@@ -355,19 +359,68 @@ impl App {
                     Err(e) => self.info(format!("error: {e:#}")),
                 }
             }
+            "push" => {
+                let Some(key) = parts.next() else {
+                    self.info(format!(
+                        "/sandbox push <id|name> <host-path> [vm-path] — {USAGE}"
+                    ));
+                    return;
+                };
+                let Some(host_path) = parts.next() else {
+                    self.info("usage: /sandbox push <id|name> <host-path> [vm-path]");
+                    return;
+                };
+                // a relative path in the VM means the VM user's home
+                let vm_path = parts.next().map(str::to_string).unwrap_or_else(|| {
+                    host_path
+                        .rsplit(['/', '\\'])
+                        .next()
+                        .unwrap_or(host_path)
+                        .to_string()
+                });
+                let key = key.to_lowercase();
+                let Some(s) = find_sandbox(m, &key) else {
+                    self.info(format!(
+                        "no sandbox matches \"{key}\" — /sandbox lists them"
+                    ));
+                    return;
+                };
+                match crate::sandbox::push_to_vm(&s.spec.id, host_path, &vm_path) {
+                    Ok(msg) => self.info(msg),
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            "term" => {
+                let Some(key) = parts.next() else {
+                    self.info(format!("/sandbox term <id|name> [agent] — {USAGE}"));
+                    return;
+                };
+                let agent = parts
+                    .next()
+                    .is_some_and(|a| matches!(a, "agent" | "-a" | "--agent"));
+                let key = key.to_lowercase();
+                let Some(s) = find_sandbox(m, &key) else {
+                    self.info(format!(
+                        "no sandbox matches \"{key}\" — /sandbox lists them"
+                    ));
+                    return;
+                };
+                match m.open_terminal(&s.spec.id, agent) {
+                    Ok(()) => self.info(format!(
+                        "terminal opened — ssh session into \"{}\"{}",
+                        s.spec.name,
+                        if agent { " running the agent TUI" } else { "" }
+                    )),
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
             "start" | "stop" => {
                 let Some(key) = parts.next() else {
                     self.info(format!("/sandbox {sub} <id|name> — {USAGE}"));
                     return;
                 };
                 let key = key.to_lowercase();
-                let hit = m.list().into_iter().find(|s| {
-                    s.spec.id == key
-                        || s.spec.name == key
-                        || s.spec.id.starts_with(&key)
-                        || s.spec.name.to_lowercase().contains(&key)
-                });
-                let Some(s) = hit else {
+                let Some(s) = find_sandbox(m, &key) else {
                     self.info(format!(
                         "no sandbox matches \"{key}\" — /sandbox lists them"
                     ));

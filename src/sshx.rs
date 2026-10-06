@@ -404,10 +404,31 @@ fn win_quote(s: &str) -> String {
 }
 
 /// launch a terminal window with an interactive ssh session into the VM;
-/// windows uses `cmd /C start`, unix tries the usual terminal emulators
+/// windows prefers Windows Terminal (proper conpty, scrollback, fonts) and
+/// falls back to the classic `cmd /C start` console host, unix tries the
+/// usual terminal emulators
 pub fn spawn_terminal(bin: &Path, ssh_args: &[String]) -> Result<(), String> {
     #[cfg(windows)]
     {
+        if let Some(wt) = crate::sandbox::find_binary("wt") {
+            let mut argv: Vec<String> = vec![
+                "new-tab".into(),
+                "--title".into(),
+                "hi-derola sandbox".into(),
+                bin.display().to_string(),
+            ];
+            argv.extend(ssh_args.iter().cloned());
+            match silent(&mut Command::new(&wt)).args(&argv).spawn() {
+                Ok(child) => {
+                    std::thread::spawn(move || {
+                        let mut c = child;
+                        let _ = c.wait();
+                    });
+                    return Ok(());
+                }
+                Err(_) => {} // broken app-execution alias etc. — try cmd next
+            }
+        }
         let line = ssh_args
             .iter()
             .map(|a| win_quote(a))

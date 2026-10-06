@@ -1755,7 +1755,7 @@ function fillPermList() {
   const box = $("s-perm");
   const p = (CFG && CFG.permissions) || {};
   const lines = [];
-  for (const k of ["edit", "write_file", "bash", "mcp"]) {
+  for (const k of ["edit", "write_file", "bash", "sandbox", "mcp"]) {
     if (p[k]) lines.push(k + " = " + p[k]);
   }
   for (const r of p.rules || []) {
@@ -1763,7 +1763,7 @@ function fillPermList() {
   }
   box.textContent = lines.length
     ? lines.join("\n")
-    : "default: mutations (write/edit/bash/mcp) ask, reads allowed";
+    : "default: mutations (write/edit/bash/sandbox/mcp) ask, reads allowed";
   box.style.whiteSpace = "pre-wrap";
 }
 

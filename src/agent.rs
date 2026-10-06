@@ -357,10 +357,18 @@ pub async fn run(
             .map_err(|_| anyhow!("closed"))?;
             let plan_block =
                 cfg.plan && matches!(call.name.as_str(), "write_file" | "edit" | "apply_patch");
+            // bash routed into an attached sandbox is checked (and saved by
+            // "always allow") under the separate "sandbox" permission, so VM
+            // bash can be allowed without loosening the host bash rule
+            let perm_tool = if call.name == "bash" && crate::sandbox::shell_route().is_some() {
+                "sandbox"
+            } else {
+                call.name.as_str()
+            };
             let perm = if plan_block {
                 crate::perm::Perm::Deny
             } else {
-                cfg.perm.check(&call.name, &call.args)
+                cfg.perm.check(perm_tool, &call.args)
             };
             match perm {
                 crate::perm::Perm::Deny => {
@@ -398,7 +406,7 @@ pub async fn run(
                             continue;
                         }
                         if reply.always {
-                            if let Some(rule) = crate::perm::derive_rule(&call.name, &call.args) {
+                            if let Some(rule) = crate::perm::derive_rule(perm_tool, &call.args) {
                                 cfg.perm.rules.push(rule);
                             }
                         }

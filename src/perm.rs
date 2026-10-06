@@ -23,6 +23,10 @@ pub struct PermCfg {
     pub write_file: Option<String>,
     #[serde(default)]
     pub bash: Option<String>,
+    /// bash inside an attached VM sandbox (routed over ssh) — separate from
+    /// the host `bash` permission so the sandbox can be loosened alone
+    #[serde(default)]
+    pub sandbox: Option<String>,
     #[serde(default)]
     pub mcp: Option<String>,
     #[serde(default)]
@@ -66,6 +70,8 @@ impl PermCfg {
             }
         }
         // an external bash workdir is the same escape as an external file path
+        // ("sandbox" is exempt: the command runs inside the VM, where host
+        // paths do not exist and a workdir arg is ignored anyway)
         if key == "bash" {
             let v: serde_json::Value =
                 serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
@@ -83,6 +89,7 @@ impl PermCfg {
             "edit" => self.edit.as_deref(),
             "write_file" => self.write_file.as_deref(),
             "bash" => self.bash.as_deref(),
+            "sandbox" => self.sandbox.as_deref(),
             "mcp" => self.mcp.as_deref(),
             "webfetch" => self.webfetch.as_deref(),
             "websearch" => self.websearch.as_deref(),
@@ -137,7 +144,8 @@ fn split_tool(tool: &str, args: &str) -> (String, String) {
         return ("mcp".to_string(), rest.to_string());
     }
     match tool {
-        "edit" | "write_file" | "read_file" | "list_files" | "glob" | "grep" | "bash" => {
+        "edit" | "write_file" | "read_file" | "list_files" | "glob" | "grep" | "bash"
+        | "sandbox" => {
             let v: serde_json::Value =
                 serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
             let subject = v["path"]
@@ -171,7 +179,7 @@ fn split_tool(tool: &str, args: &str) -> (String, String) {
 
 fn default_perm(key: &str) -> Perm {
     match key {
-        "write_file" | "edit" | "apply_patch" | "bash" | "mcp" => Perm::Ask,
+        "write_file" | "edit" | "apply_patch" | "bash" | "sandbox" | "mcp" => Perm::Ask,
         _ => Perm::Allow,
     }
 }
@@ -263,7 +271,7 @@ fn parse(s: &str) -> Perm {
 pub fn derive_rule(tool: &str, args: &str) -> Option<PermRule> {
     let v: serde_json::Value = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
     let (key, pattern) = match tool {
-        "bash" => {
+        "bash" | "sandbox" => {
             let cmd = v["command"].as_str()?.trim();
             let words: Vec<&str> = cmd.split_whitespace().take(2).collect();
             if words.is_empty() {
@@ -387,6 +395,39 @@ mod tests {
         assert!(!wc("", "x"));
         assert!(wc("**", "a/b/c"));
         assert!(wc("cargo build", "cargo build"));
+    }
+
+    #[test]
+    fn sandbox_bash_perm_is_independent() {
+        // "sandbox" (bash routed into an attached VM) has its own permission,
+        // independent of the host bash rule; default is ask
+        let mut sbx = PermCfg::default();
+        sbx.bash = Some("allow".into());
+        assert_eq!(sbx.check("sandbox", r#"{"command":"ls"}"#), Perm::Ask);
+        sbx.sandbox = Some("allow".into());
+        assert_eq!(sbx.check("sandbox", r#"{"command":"ls"}"#), Perm::Allow);
+        assert_eq!(sbx.check("bash", r#"{"command":"ls"}"#), Perm::Allow);
+        let loose_vm = PermCfg {
+            sandbox: Some("allow".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            loose_vm.check("sandbox", r#"{"command":"ls"}"#),
+            Perm::Allow
+        );
+        assert_eq!(loose_vm.check("bash", r#"{"command":"ls"}"#), Perm::Ask);
+        // "always allow" on a routed bash call persists a sandbox rule
+        let r = derive_rule("sandbox", r#"{"command":"git push origin main"}"#).unwrap();
+        assert_eq!(r.tool, "sandbox");
+        assert_eq!(r.pattern.as_deref(), Some("git push *"));
+        assert_eq!(
+            PermCfg {
+                rules: vec![r],
+                ..Default::default()
+            }
+            .check("sandbox", r#"{"command":"git push origin main"}"#),
+            Perm::Allow
+        );
     }
 
     #[test]

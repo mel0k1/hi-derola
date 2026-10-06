@@ -617,20 +617,38 @@ pub struct SandboxManager {
     inner: Mutex<BTreeMap<String, Entry>>,
 }
 
+/// tests root the shared manager at a scratch dir instead of the real
+/// config dir; must be set before the first `global()` call
+#[cfg(test)]
+static TEST_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// point `global()` at a scratch dir (test-only, first call wins)
+#[cfg(test)]
+pub fn test_global_dir(dir: PathBuf) {
+    let _ = TEST_DIR.set(dir);
+}
+
 impl SandboxManager {
     /// manager rooted at <config>/hi-derola/sandboxes (shared app instance)
     pub fn global() -> &'static Arc<SandboxManager> {
         static M: OnceLock<Arc<SandboxManager>> = OnceLock::new();
         M.get_or_init(|| {
-            let dir = crate::config::config_path()
-                .parent()
-                .map(|p| p.join("sandboxes"))
-                .unwrap_or_else(|| PathBuf::from("sandboxes"));
+            let dir = Self::default_dir();
+            #[cfg(test)]
+            let dir = TEST_DIR.get().cloned().unwrap_or(dir);
             let m = Arc::new(SandboxManager::new(dir));
             // VMs found running after an app restart resume their ssh probing
             m.spawn_ssh_wait_all();
             m
         })
+    }
+
+    /// <config>/hi-derola/sandboxes next to config.toml
+    fn default_dir() -> PathBuf {
+        crate::config::config_path()
+            .parent()
+            .map(|p| p.join("sandboxes"))
+            .unwrap_or_else(|| PathBuf::from("sandboxes"))
     }
 
     pub fn new(dir: PathBuf) -> Self {
@@ -1756,6 +1774,29 @@ pub fn fetch_from_vm(id: &str, vm_path: &str, host_path: &str) -> Result<String>
     ))
 }
 
+/// push a host file into the VM (parent dirs created); the counterpart of
+/// `fetch_from_vm` for quick one-file delivery without a git roundtrip
+pub fn push_to_vm(id: &str, host_path: &str, vm_path: &str) -> Result<String> {
+    // ssh_stream buffers the bytes in memory, so keep a generous but sane cap
+    const MAX_PUSH: u64 = 256 * 1024 * 1024;
+    let meta = std::fs::metadata(host_path).map_err(|e| anyhow!("{host_path}: {e}"))?;
+    if !meta.is_file() {
+        bail!("{host_path}: not a file");
+    }
+    if meta.len() > MAX_PUSH {
+        bail!(
+            "{host_path}: {} bytes exceeds the 256 MiB push cap — use git or scp instead",
+            meta.len()
+        );
+    }
+    let bytes = std::fs::read(host_path).map_err(|e| anyhow!("{host_path}: {e}"))?;
+    guest_push(id, vm_path, &bytes)?;
+    Ok(format!(
+        "pushed {host_path} -> {vm_path} ({} bytes)",
+        bytes.len()
+    ))
+}
+
 // -------------------------------------------------------- vm background bash
 //
 // `background = true` while a VM is attached starts the command as a remote
@@ -2453,6 +2494,11 @@ mod tests {
 
     #[test]
     fn shell_route_set_clear_and_detach() {
+        // root the shared manager at a scratch dir: global() must not touch
+        // the real config dir from tests
+        test_global_dir(
+            std::env::temp_dir().join(format!("hiderola-sbx-test-{}", std::process::id())),
+        );
         set_shell_route(None);
         assert!(shell_route().is_none());
 
