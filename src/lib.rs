@@ -7,6 +7,7 @@ pub mod codemode;
 mod commands;
 pub mod config;
 pub mod diff;
+pub mod doctor;
 pub mod exa;
 pub mod files;
 pub mod fmt;

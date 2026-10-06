@@ -71,6 +71,18 @@ pub fn server_name_for(path: &str) -> Option<&'static str> {
         .map(|(name, _, _)| *name)
 }
 
+/// unique candidate server binary names in registry order (doctor lists
+/// them and checks which are installed)
+pub fn server_names() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for (name, _, _) in REGISTRY {
+        if !out.contains(name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
 fn path_to_uri(path: &str) -> String {
     let abs = std::fs::canonicalize(path)
         .map(|p| p.display().to_string())
