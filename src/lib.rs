@@ -30,6 +30,7 @@ pub mod sshx;
 pub mod todo;
 pub mod tools;
 pub mod ui;
+pub mod usage;
 pub mod web;
 #[cfg(windows)]
 mod winjob;

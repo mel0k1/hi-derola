@@ -39,6 +39,8 @@ pub struct StoredSession {
     #[serde(default)]
     pub cost: f64,
     #[serde(default)]
+    pub usage: Vec<crate::usage::UsageRow>,
+    #[serde(default)]
     pub todos: Vec<crate::todo::Todo>,
     #[serde(default)]
     pub parent: Option<String>,
@@ -248,6 +250,7 @@ mod tests {
             tokens_in: 0,
             tokens_out: 0,
             cost: 0.0,
+            usage: vec![],
             todos: vec![],
             parent: None,
             changes: vec![],
@@ -295,6 +298,7 @@ mod tests {
             tokens_in: 0,
             tokens_out: 0,
             cost: 0.0,
+            usage: vec![],
             todos: vec![],
             parent: None,
             changes: vec![],
@@ -313,6 +317,41 @@ mod tests {
     }
 
     #[test]
+    fn usage_rows_roundtrip() {
+        let _g = env_guard("u");
+        let st = StoredSession {
+            id: new_id(),
+            title: "t".into(),
+            created: 0,
+            updated: 0,
+            system: String::new(),
+            messages: vec![],
+            tokens_in: 3000,
+            tokens_out: 300,
+            cost: 0.3,
+            usage: vec![crate::usage::UsageRow {
+                model: "gpt-5".into(),
+                input: 2000,
+                output: 200,
+                cached: 1000,
+                cost: 0.2,
+            }],
+            todos: vec![],
+            parent: None,
+            changes: vec![],
+            queue: vec![],
+        };
+        save(&st).unwrap();
+        let got = load(&st.id).unwrap();
+        assert_eq!(got.usage, st.usage);
+        // sessions written before the usage field existed load with an empty ledger
+        let mut v = serde_json::to_value(&got).unwrap();
+        v.as_object_mut().unwrap().remove("usage");
+        let old: StoredSession = serde_json::from_value(v).unwrap();
+        assert!(old.usage.is_empty());
+    }
+
+    #[test]
     fn latest_picks_recent() {
         let _g = env_guard("c");
         let mut a = StoredSession {
@@ -325,6 +364,7 @@ mod tests {
             tokens_in: 0,
             tokens_out: 0,
             cost: 0.0,
+            usage: vec![],
             todos: vec![],
             parent: None,
             changes: vec![],

@@ -1353,6 +1353,7 @@ fn run_subagent<'a>(
                     tokens_in: 0,
                     tokens_out: 0,
                     cost: 0.0,
+                    usage: Vec::new(),
                     todos: Vec::new(),
                     parent: cfg.parent_sid.clone(),
                     changes: Vec::new(),

@@ -69,6 +69,8 @@ pub struct App {
     pub tokens_out: u64,
     pub tokens_cached: u64,
     pub cost: f64,
+    /// one row per api request, priced with the model that served it
+    pub usage: Vec<crate::usage::UsageRow>,
     pub should_quit: bool,
     pub status: String,
     allow_all: Arc<AtomicBool>,
@@ -83,27 +85,14 @@ pub struct App {
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
-const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config (into the active profile when one is set)\n  /model         show current model\n  /models        list models available for the api key\n  /profile [name] switch provider profile (bare = list, \"none\" = back to the base [provider] section)\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /sessions      list saved sessions\n  /resume [id]   switch to a saved session (latest by default)\n  /mcpauth [name] mcp OAuth status, or authorize a remote server in browser; /mcpauth <name> <code> finishes a flow with a pasted authorization code (resume after a restart)\n  /mcpres [server]  list mcp resources and uri templates\n  /mcpstatus     per-server status: connected/failed/needs auth/crashed\n  /mcpread <server> <uri> read an mcp resource into the chat\n  /mcpprompt [server] <name> [k=v] use an mcp prompt (no args lists prompts)\n  /mcpsub <server> <uri> subscribe to mcp resource updates (land in chat)\n  /mcpunsub <server> <uri> stop the subscription\n  /mcplog [server]  recent mcp log messages; /mcplog set <server|all> <level> sets the minimum level\n  /mcpadd <name> <url|command...> add a server at runtime (saved to config) and connect it\n  /mcpconnect <name> (re)connect a configured server\n  /mcpdisconnect <name> drop the live connection (config untouched)\n  /mcplogout <name> drop the stored oauth tokens; a fresh /mcpauth flow starts on next use\n  /jstools [reload] list user JS tools (.hi-derola/tools/), optional rescan\n  /doctor        environment self-check: config/provider, ssh, qemu+accel, lsp servers, formatters, mcp, sandbox\n  /sandbox       local VM sandboxes: bare = list; /sandbox start|stop|attach|detach <id|name>; /sandbox new <name> [debian|debian-std|ubuntu|ubuntu-std|custom=<path>] [ram=2048] [cpus=2] [disk=20] [login=x] [root=on|off]; /sandbox fetch|push <id|name> <path> [dest]; /sandbox term <id|name> [agent] — attach routes bash into the VM over ssh\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch/mcp_resource + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
+const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config (into the active profile when one is set)\n  /model         show current model\n  /models        list models available for the api key\n  /profile [name] switch provider profile (bare = list, \"none\" = back to the base [provider] section)\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /sessions      list saved sessions\n  /resume [id]   switch to a saved session (latest by default)\n  /mcpauth [name] mcp OAuth status, or authorize a remote server in browser; /mcpauth <name> <code> finishes a flow with a pasted authorization code (resume after a restart)\n  /mcpres [server]  list mcp resources and uri templates\n  /mcpstatus     per-server status: connected/failed/needs auth/crashed\n  /mcpread <server> <uri> read an mcp resource into the chat\n  /mcpprompt [server] <name> [k=v] use an mcp prompt (no args lists prompts)\n  /mcpsub <server> <uri> subscribe to mcp resource updates (land in chat)\n  /mcpunsub <server> <uri> stop the subscription\n  /mcplog [server]  recent mcp log messages; /mcplog set <server|all> <level> sets the minimum level\n  /mcpadd <name> <url|command...> add a server at runtime (saved to config) and connect it\n  /mcpconnect <name> (re)connect a configured server\n  /mcpdisconnect <name> drop the live connection (config untouched)\n  /mcplogout <name> drop the stored oauth tokens; a fresh /mcpauth flow starts on next use\n  /jstools [reload] list user JS tools (.hi-derola/tools/), optional rescan\n  /doctor        environment self-check: config/provider, ssh, qemu+accel, lsp servers, formatters, mcp, sandbox
+  /usage         token/cost report for this session (per-model breakdown, prices, context fill)\n  /sandbox       local VM sandboxes: bare = list; /sandbox start|stop|attach|detach <id|name>; /sandbox new <name> [debian|debian-std|ubuntu|ubuntu-std|custom=<path>] [ram=2048] [cpus=2] [disk=20] [login=x] [root=on|off]; /sandbox fetch|push <id|name> <path> [dest]; /sandbox term <id|name> [agent] — attach routes bash into the VM over ssh\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch/mcp_resource + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
 
 pub fn help_text() -> &'static str {
     HELP
 }
 
-fn fmt_tokens(n: u64) -> String {
-    if n < 1000 {
-        n.to_string()
-    } else {
-        format!("{:.1}k", n as f64 / 1000.0)
-    }
-}
-
-fn fmt_cost(c: f64) -> String {
-    if c >= 1.0 {
-        format!("${c:.2}")
-    } else {
-        format!("${c:.4}")
-    }
-}
+use crate::usage::{fmt_cost, fmt_tokens};
 
 fn fmt_age(secs: u64) -> String {
     if secs < 3600 {
@@ -152,7 +141,7 @@ impl App {
         provider: Arc<dyn Provider>,
         tx: mpsc::UnboundedSender<ApiEvent>,
     ) -> Self {
-        let model = cfg.provider.model.clone();
+        let model = cfg.effective_provider().model.clone();
         let system = crate::base_prompt("in the user's terminal", &model);
         let status = format!("{} · {}", provider.name(), model);
         let sid = crate::sessions::new_id();
@@ -178,6 +167,7 @@ impl App {
             tokens_out: 0,
             tokens_cached: 0,
             cost: 0.0,
+            usage: Vec::new(),
             should_quit: false,
             status,
             allow_all: Arc::new(AtomicBool::new(false)),
@@ -731,7 +721,15 @@ impl App {
                 } else {
                     0.5
                 };
-                self.cost += crate::models::cost_cached(&self.model, input, output, cached, disc);
+                let delta = crate::models::cost_cached(&self.model, input, output, cached, disc);
+                self.cost += delta;
+                self.usage.push(crate::usage::UsageRow {
+                    model: self.model.clone(),
+                    input,
+                    output,
+                    cached,
+                    cost: delta,
+                });
             }
             ApiEvent::Done { text, messages } => {
                 if let Some(i) = self.streaming {
@@ -781,6 +779,7 @@ impl App {
             tokens_in: self.tokens_in,
             tokens_out: self.tokens_out,
             cost: self.cost,
+            usage: self.usage.clone(),
             todos: crate::todo::get(),
             parent: None,
             changes: Vec::new(),
@@ -807,6 +806,7 @@ impl App {
         self.tokens_out = st.tokens_out;
         self.tokens_cached = 0;
         self.cost = st.cost;
+        self.usage = st.usage.clone();
         crate::todo::set_list(st.todos);
         *self.queue.lock().unwrap() = st.queue.clone();
         if !st.queue.is_empty() {
@@ -1365,6 +1365,7 @@ impl App {
                 self.tokens_out = 0;
                 self.tokens_cached = 0;
                 self.cost = 0.0;
+                self.usage.clear();
                 self.info("new session");
             }
             "/sessions" => {
@@ -1948,6 +1949,20 @@ impl App {
                 } else {
                     self.info(format!("JS tools:\n{}", crate::jstools::summary()));
                 }
+            }
+            "/usage" => {
+                let eff = self.cfg.effective_provider();
+                let limit = if self.cfg.agent.context_limit > 0 {
+                    self.cfg.agent.context_limit
+                } else {
+                    crate::models::lookup(&self.model).window
+                };
+                self.info(crate::usage::render(
+                    &self.usage,
+                    &self.model,
+                    &eff.kind,
+                    limit,
+                ));
             }
             "/doctor" => {
                 let eff = self.cfg.effective_provider();

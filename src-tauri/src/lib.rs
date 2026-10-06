@@ -26,6 +26,7 @@ pub struct Shared {
     inflight: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     tokens: Mutex<(u64, u64)>,
     cost: Mutex<f64>,
+    usage: Mutex<Vec<hi_derola::usage::UsageRow>>,
     todos: Mutex<Vec<Todo>>,
     attachments: Mutex<Vec<(String, String)>>,
     mcp: McpSlot,
@@ -83,6 +84,7 @@ fn persist(sh: &Shared) {
         tokens_in: sh.tokens.lock().unwrap().0,
         tokens_out: sh.tokens.lock().unwrap().1,
         cost: *sh.cost.lock().unwrap(),
+        usage: sh.usage.lock().unwrap().clone(),
         todos: sh.todos.lock().unwrap().clone(),
         parent: None,
         changes: sh.changes.lock().unwrap().clone(),
@@ -356,6 +358,13 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     *c += delta;
                     let total = *c;
                     drop(c);
+                    sh.usage.lock().unwrap().push(hi_derola::usage::UsageRow {
+                        model: model.clone(),
+                        input,
+                        output,
+                        cached,
+                        cost: delta,
+                    });
                     let ctx_used = input + output;
                     json!({"t": "usage", "input": input, "output": output, "cached": cached, "cost": total,
                            "ctx_used": ctx_used, "ctx_limit": ctx_limit})
@@ -418,6 +427,7 @@ fn start_new(sh: &Shared, app: &AppHandle) {
     *sh.created.lock().unwrap() = 0;
     *sh.tokens.lock().unwrap() = (0, 0);
     *sh.cost.lock().unwrap() = 0.0;
+    *sh.usage.lock().unwrap() = Vec::new();
     *sh.todos.lock().unwrap() = Vec::new();
     sh.queue.lock().unwrap().clear();
     hi_derola::todo::clear();
@@ -974,6 +984,7 @@ async fn open_session(
     *sh.created.lock().unwrap() = st.created;
     *sh.tokens.lock().unwrap() = (st.tokens_in, st.tokens_out);
     *sh.cost.lock().unwrap() = st.cost;
+    *sh.usage.lock().unwrap() = st.usage.clone();
     *sh.todos.lock().unwrap() = st.todos.clone();
     hi_derola::todo::set_list(st.todos.clone());
     let _ = app.emit(
@@ -1028,6 +1039,7 @@ async fn delete_session(
         *sh.created.lock().unwrap() = 0;
         *sh.tokens.lock().unwrap() = (0, 0);
         *sh.cost.lock().unwrap() = 0.0;
+        *sh.usage.lock().unwrap() = Vec::new();
         *sh.todos.lock().unwrap() = Vec::new();
         sh.queue.lock().unwrap().clear();
         hi_derola::todo::clear();
@@ -1253,7 +1265,7 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
         .unwrap_or((line, ""));
     match cmd {
         "/help" | "/h" => note(
-            "commands: /file <path> · /model <name> · /models · /profile [name] · /plan · /undo · /redo · /init · /compact · /export [path] · /mcpadd <name> <url|command...> · /mcpconnect <name> · /mcpdisconnect <name> · /mcplogout <name> · /mcpres [server] · /mcpstatus · /mcpread <server> <uri> · /mcpsub <server> <uri> · /mcpunsub <server> <uri> · /mcpprompt [server] <name> [k=v] · /mcplog [server] (/mcplog set <server|all> <level>) · /jstools [reload] · /clear · /help\n\
+            "commands: /file <path> · /model <name> · /models · /profile [name] · /plan · /undo · /redo · /init · /compact · /export [path] · /usage · /mcpadd <name> <url|command...> · /mcpconnect <name> · /mcpdisconnect <name> · /mcplogout <name> · /mcpres [server] · /mcpstatus · /mcpread <server> <uri> · /mcpsub <server> <uri> · /mcpunsub <server> <uri> · /mcpprompt [server] <name> [k=v] · /mcplog [server] (/mcplog set <server|all> <level>) · /jstools [reload] · /clear · /help\n\
              mutations (write/edit/bash/mcp) ask for confirmation, allow all skips further asks\n\
              custom commands: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)",
         ),
@@ -1327,6 +1339,20 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
                 let _ = tx.send(ApiEvent::Note(msg));
             });
             note("fetching models...")
+        }
+        "/usage" => {
+            let (eff, limit) = {
+                let cfg = sh.cfg.lock().unwrap();
+                let eff = cfg.effective_provider();
+                let limit = if cfg.agent.context_limit > 0 {
+                    cfg.agent.context_limit
+                } else {
+                    models::lookup(&eff.model).window
+                };
+                (eff, limit)
+            };
+            let rows = sh.usage.lock().unwrap().clone();
+            note(hi_derola::usage::render(&rows, &eff.model, &eff.kind, limit))
         }
         "/mcpadd" => {
             let cfg = match hi_derola::mcp::parse_add(arg) {
@@ -1983,6 +2009,12 @@ pub fn run() -> Result<()> {
                         .unwrap_or((0, 0)),
                 ),
                 cost: Mutex::new(restore.as_ref().map(|s| s.cost).unwrap_or(0.0)),
+                usage: Mutex::new(
+                    restore
+                        .as_ref()
+                        .map(|s| s.usage.clone())
+                        .unwrap_or_default(),
+                ),
                 todos: Mutex::new(
                     restore
                         .as_ref()
