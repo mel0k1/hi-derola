@@ -1265,7 +1265,7 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
         .unwrap_or((line, ""));
     match cmd {
         "/help" | "/h" => note(
-            "commands: /file <path> · /model <name> · /models · /profile [name] · /plan · /undo · /redo · /init · /compact · /export [path] · /usage · /mcpadd <name> <url|command...> · /mcpconnect <name> · /mcpdisconnect <name> · /mcplogout <name> · /mcpres [server] · /mcpstatus · /mcpread <server> <uri> · /mcpsub <server> <uri> · /mcpunsub <server> <uri> · /mcpprompt [server] <name> [k=v] · /mcplog [server] (/mcplog set <server|all> <level>) · /jstools [reload] · /clear · /help\n\
+            "commands: /file <path> · /model <name> · /models · /profile [name] · /plan · /undo · /redo · /init · /compact · /export [path] · /usage · /update · /mcpadd <name> <url|command...> · /mcpconnect <name> · /mcpdisconnect <name> · /mcplogout <name> · /mcpres [server] · /mcpstatus · /mcpread <server> <uri> · /mcpsub <server> <uri> · /mcpunsub <server> <uri> · /mcpprompt [server] <name> [k=v] · /mcplog [server] (/mcplog set <server|all> <level>) · /jstools [reload] · /clear · /help\n\
              mutations (write/edit/bash/mcp) ask for confirmation, allow all skips further asks\n\
              custom commands: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)",
         ),
@@ -1353,6 +1353,21 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
             };
             let rows = sh.usage.lock().unwrap().clone();
             note(hi_derola::usage::render(&rows, &eff.model, &eff.kind, limit))
+        }
+        "/update" => {
+            let tx = sh.tx.clone();
+            tauri::async_runtime::spawn(async move {
+                let msg = match hi_derola::update::run(|line| {
+                    let _ = tx.send(ApiEvent::Note(line.to_string()));
+                })
+                .await
+                {
+                    Ok(m) => m,
+                    Err(e) => format!("error: {e:#}"),
+                };
+                let _ = tx.send(ApiEvent::Note(msg));
+            });
+            note("checking for updates...")
         }
         "/mcpadd" => {
             let cfg = match hi_derola::mcp::parse_add(arg) {

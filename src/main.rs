@@ -2,10 +2,28 @@ use anyhow::{Context, Result};
 use hi_derola::{app, config, fmt, lsp, provider, tools};
 
 fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    // headless subcommands that must not require a config/api key
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("hi-derola {}", hi_derola::update::current_version());
+        return Ok(());
+    }
+    let want_update = args.iter().any(|a| a == "update" || a == "self-update");
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let tui = std::env::args().any(|a| a == "--tui");
+    if want_update {
+        return runtime.block_on(async {
+            match hi_derola::update::run(|line| println!("{line}")).await {
+                Ok(msg) => {
+                    println!("{msg}");
+                    Ok(())
+                }
+                Err(e) => Err(anyhow::anyhow!("update failed: {e:#}")),
+            }
+        });
+    }
+    let tui = args.iter().any(|a| a == "--tui");
     let cfg = config::Config::load()?;
     lsp::set_enabled(cfg.lsp.enabled);
     fmt::set_enabled(cfg.formatters.enabled);
