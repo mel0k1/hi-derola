@@ -8,9 +8,9 @@
 //! (and the same confirm UI) as a direct `mcp__server__tool` call.
 
 use boa_engine::{
-    js_string, native_function::NativeFunction, object::builtins::JsPromise,
-    object::JsObject, property::Attribute, builtins::promise::PromiseState, Context,
-    JsError, JsNativeError, JsResult, JsValue, Source,
+    builtins::promise::PromiseState, js_string, native_function::NativeFunction,
+    object::builtins::JsPromise, object::JsObject, property::Attribute, Context, JsError,
+    JsNativeError, JsResult, JsValue, Source,
 };
 use serde_json::{json, Value};
 use std::cell::RefCell;
@@ -92,18 +92,22 @@ enum Decision {
     Deny(String),
 }
 
-fn tool_native(idx: usize, _this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
+fn tool_native(
+    idx: usize,
+    _this: &JsValue,
+    args: &[JsValue],
+    ctx: &mut Context,
+) -> JsResult<JsValue> {
     // phase 1: validate, count the call, clone what we need, release the
     // borrow before any long host IO
     let target = RUN.with(|r| {
         let mut g = r.borrow_mut();
-        let st = g
-            .as_mut()
-            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("code: no run state")))?;
-        let t = st
-            .targets
-            .get(idx)
-            .ok_or_else(|| JsError::from(JsNativeError::error().with_message("code: unknown tool binding")))?;
+        let st = g.as_mut().ok_or_else(|| {
+            JsError::from(JsNativeError::error().with_message("code: no run state"))
+        })?;
+        let t = st.targets.get(idx).ok_or_else(|| {
+            JsError::from(JsNativeError::error().with_message("code: unknown tool binding"))
+        })?;
         st.calls += 1;
         if st.calls > MAX_TOOL_CALLS {
             return Err(JsError::from(JsNativeError::error().with_message(format!(
@@ -112,7 +116,9 @@ fn tool_native(idx: usize, _this: &JsValue, args: &[JsValue], ctx: &mut Context)
             .into());
         }
         if Instant::now() >= st.deadline {
-            return Err(JsError::from(JsNativeError::error().with_message("code: time budget exceeded")));
+            return Err(JsError::from(
+                JsNativeError::error().with_message("code: time budget exceeded"),
+            ));
         }
         let target = Target {
             server: t.server.clone(),
@@ -179,9 +185,9 @@ fn tool_native(idx: usize, _this: &JsValue, args: &[JsValue], ctx: &mut Context)
             let mut g = r.borrow_mut();
             // no JS runs on this thread while we block, so holding the borrow
             // across block_on is safe (the interpreter is strictly sequential)
-            let st = g
-                .as_mut()
-                .ok_or_else(|| JsError::from(JsNativeError::error().with_message("code: no run state")))?;
+            let st = g.as_mut().ok_or_else(|| {
+                JsError::from(JsNativeError::error().with_message("code: no run state"))
+            })?;
             let started = Instant::now();
             match st.handle.block_on(fut) {
                 Ok(v) => {
@@ -203,7 +209,9 @@ fn tool_native(idx: usize, _this: &JsValue, args: &[JsValue], ctx: &mut Context)
         })?;
         return JsValue::from_json(&res, ctx);
     };
-    Err(JsError::from(JsNativeError::error().with_message(msg.clone())))
+    Err(JsError::from(
+        JsNativeError::error().with_message(msg.clone()),
+    ))
 }
 
 fn console_native(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> JsResult<JsValue> {
@@ -244,7 +252,10 @@ fn build_objects(ctx: &mut Context) -> JsResult<()> {
             let st = g.as_ref().unwrap();
             (st.targets[idx].server.clone(), st.targets[idx].tool.clone())
         });
-        groups.entry(sanitize(&server)).or_default().push((sanitize(&tool), idx));
+        groups
+            .entry(sanitize(&server))
+            .or_default()
+            .push((sanitize(&tool), idx));
     }
     let mcp = JsObject::with_object_proto(ctx.intrinsics());
     for (server, tools) in groups {
@@ -425,7 +436,13 @@ pub fn default_timeout() -> Duration {
 pub(crate) fn sanitize(name: &str) -> String {
     let mut s: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if s.is_empty() {
         s = "_".into();
@@ -473,7 +490,10 @@ pub fn mcp_targets(client: Arc<McpClient>, specs: &[ToolSpec]) -> Vec<Target> {
                     let c = c.clone();
                     let key = key.clone();
                     Box::pin(async move {
-                        let text = c.call(&key, &args.to_string()).await.map_err(|e| e.to_string())?;
+                        let text = c
+                            .call(&key, &args.to_string())
+                            .await
+                            .map_err(|e| e.to_string())?;
                         Ok(parse_mcp_text(text))
                     })
                 }),
@@ -504,7 +524,10 @@ pub fn catalog_from_mcp_specs(specs: &[ToolSpec]) -> String {
         let Some((server, tool)) = rest.split_once("__") else {
             continue;
         };
-        groups.entry(server).or_default().push((tool, s.description.as_str()));
+        groups
+            .entry(server)
+            .or_default()
+            .push((tool, s.description.as_str()));
     }
     if groups.is_empty() {
         return String::new();
@@ -525,7 +548,11 @@ pub fn catalog_from_mcp_specs(specs: &[ToolSpec]) -> String {
         for (tool, desc) in tools {
             let sj = sanitize(server);
             let tj = sanitize(tool);
-            with_desc.push_str(&format!("  - {} // {}\n", signature(&sj, &tj), short_desc(desc)));
+            with_desc.push_str(&format!(
+                "  - {} // {}\n",
+                signature(&sj, &tj),
+                short_desc(desc)
+            ));
             signatures.push_str(&format!("  - {}\n", signature(&sj, &tj)));
         }
     }
@@ -589,7 +616,11 @@ mod tests {
             perm,
             allow_all: Arc::new(AtomicBool::new(false)),
             timeout: Duration::from_secs(15),
-            confirm: Arc::new(|_, _| ConfirmReply { approved: true, feedback: String::new(), always: false }),
+            confirm: Arc::new(|_, _| ConfirmReply {
+                approved: true,
+                feedback: String::new(),
+                always: false,
+            }),
             note: Arc::new(|_: String| {}),
         }
     }
@@ -657,7 +688,11 @@ mod tests {
         );
         cfg.confirm = Arc::new(move |_, _| {
             asks2.fetch_add(1, Ordering::Relaxed);
-            ConfirmReply { approved: true, feedback: String::new(), always: true }
+            ConfirmReply {
+                approved: true,
+                feedback: String::new(),
+                always: true,
+            }
         });
         let out = run_code(
             r#"
@@ -720,7 +755,13 @@ mod tests {
         t.call = Arc::new(|_| Box::pin(async { Ok(Value::String("plain text answer".into())) }));
         let out = run_code(
             "return await mcp.srv.text({})",
-            cfg_with(vec![t], PermCfg { mcp: Some("allow".into()), ..Default::default() }),
+            cfg_with(
+                vec![t],
+                PermCfg {
+                    mcp: Some("allow".into()),
+                    ..Default::default()
+                },
+            ),
         )
         .await;
         assert_eq!(out.output.unwrap(), "plain text answer");
@@ -734,9 +775,15 @@ mod tests {
         assert!(js_ident("my_server"));
         assert!(!js_ident("my-server"));
         assert!(!js_ident("9lives"));
-        assert_eq!(signature("github", "search_repo"), "mcp.github.search_repo({...})");
+        assert_eq!(
+            signature("github", "search_repo"),
+            "mcp.github.search_repo({...})"
+        );
         // sanitized names are always valid identifiers
-        assert_eq!(signature("my_server", "my_tool"), "mcp.my_server.my_tool({...})");
+        assert_eq!(
+            signature("my_server", "my_tool"),
+            "mcp.my_server.my_tool({...})"
+        );
         assert_eq!(signature("_9lives", "t2"), "mcp._9lives.t2({...})");
         // raw names with dashes/leading digits would need bracket notation
         assert_eq!(
@@ -761,7 +808,10 @@ mod tests {
         ];
         let c = catalog_from_mcp_specs(&specs);
         assert!(c.contains("- github (1 tool)"), "{c}");
-        assert!(c.contains("  - mcp.github.search({...}) // Search repositories."), "{c}");
+        assert!(
+            c.contains("  - mcp.github.search({...}) // Search repositories."),
+            "{c}"
+        );
         assert!(c.contains("- my_server (1 tool)"), "{c}");
         assert!(c.contains("  - mcp.my_server.get({...}) //"), "{c}");
     }
@@ -770,8 +820,14 @@ mod tests {
     fn mcp_text_results_parse_as_json() {
         assert_eq!(parse_mcp_text("{\"a\":1}".into()), json!({"a":1}));
         assert_eq!(parse_mcp_text("[1,2]".into()), json!([1, 2]));
-        assert_eq!(parse_mcp_text("just text".into()), Value::String("just text".into()));
-        assert_eq!(parse_mcp_text("{not json".into()), Value::String("{not json".into()));
+        assert_eq!(
+            parse_mcp_text("just text".into()),
+            Value::String("just text".into())
+        );
+        assert_eq!(
+            parse_mcp_text("{not json".into()),
+            Value::String("{not json".into())
+        );
     }
 
     #[tokio::test]
@@ -789,7 +845,10 @@ mod tests {
                     })
                 }),
             }],
-            PermCfg { mcp: Some("allow".into()), ..Default::default() },
+            PermCfg {
+                mcp: Some("allow".into()),
+                ..Default::default()
+            },
         );
         cfg.timeout = Duration::from_millis(100);
         let out = run_code(
@@ -823,11 +882,17 @@ mod tests {
                     })
                 }),
             }],
-            PermCfg { mcp: Some("allow".into()), ..Default::default() },
+            PermCfg {
+                mcp: Some("allow".into()),
+                ..Default::default()
+            },
         );
         let out = run(
             "return await mcp.slow.tool({})".into(),
-            RunCfg { timeout: Duration::from_millis(100), ..cfg },
+            RunCfg {
+                timeout: Duration::from_millis(100),
+                ..cfg
+            },
         )
         .await;
         let err = out.output.unwrap_err();

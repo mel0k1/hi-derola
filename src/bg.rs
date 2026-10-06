@@ -3,6 +3,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 const BUF_CAP: usize = 256 * 1024;
 const LIVE_TAIL: usize = 1200;
 
+/// custom kill for jobs that are not a host process — sandbox VM background
+/// tasks register a hook that kills the remote process group over ssh;
+/// receives the task id
+pub type KillHook = Arc<dyn Fn(&str) -> String + Send + Sync>;
+
 #[derive(Clone)]
 pub struct Job {
     pub id: String,
@@ -13,6 +18,7 @@ pub struct Job {
     pid: Option<u32>,
     abort: Option<tokio::task::AbortHandle>,
     out: Option<Arc<Mutex<String>>>,
+    kill: Option<KillHook>,
 }
 
 static JOBS: OnceLock<Arc<Mutex<Vec<Job>>>> = OnceLock::new();
@@ -37,8 +43,15 @@ pub fn start(kind: &str, description: &str) -> String {
         pid: None,
         abort: None,
         out: None,
+        kill: None,
     });
     id
+}
+
+pub fn attach_kill(id: &str, f: KillHook) {
+    if let Some(job) = jobs().lock().unwrap().iter_mut().find(|j| j.id == id) {
+        job.kill = Some(f);
+    }
 }
 
 pub fn attach_pid(id: &str, pid: u32) {
@@ -79,7 +92,9 @@ pub fn killed(id: &str) -> bool {
 pub fn append(id: &str, chunk: &str) {
     let buf = {
         let j = jobs().lock().unwrap();
-        let Some(job) = j.iter().find(|j| j.id == id) else { return };
+        let Some(job) = j.iter().find(|j| j.id == id) else {
+            return;
+        };
         match &job.out {
             Some(b) => b.clone(),
             None => return,
@@ -115,6 +130,11 @@ pub fn kill(id: &str) -> String {
         return format!("task {id} is not running ({})", job.status);
     }
     let mut able = false;
+    if let Some(f) = job.kill.clone() {
+        let msg = f(&id);
+        job.status = "killed";
+        return msg;
+    }
     if let Some(h) = &job.abort {
         h.abort();
         able = true;
@@ -249,6 +269,9 @@ mod tests {
         assert!(status(Some(&id2)).contains("[killed]"));
         assert!(kill(&id2).contains("is not running"));
         finish(&id2, None);
-        assert!(status(Some(&id2)).contains("[killed]"), "finish must not override killed");
+        assert!(
+            status(Some(&id2)).contains("[killed]"),
+            "finish must not override killed"
+        );
     }
 }

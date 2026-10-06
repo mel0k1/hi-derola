@@ -73,7 +73,8 @@ pub fn new_id() -> String {
         .map(|d| d.subsec_nanos() as u64 + d.as_secs())
         .unwrap_or(0);
     let pid = std::process::id() as u64;
-    let mix = (nanos.wrapping_mul(0x9e3779b97f4a7c15) ^ pid.wrapping_mul(0xbf58476d1ce4e5b9)) as u32;
+    let mix =
+        (nanos.wrapping_mul(0x9e3779b97f4a7c15) ^ pid.wrapping_mul(0xbf58476d1ce4e5b9)) as u32;
     format!("s-{}-{:08x}", now(), mix)
 }
 
@@ -170,7 +171,11 @@ pub fn list() -> Vec<SessionMeta> {
             parent: v.parent,
         });
     }
-    out.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| b.created.cmp(&a.created)));
+    out.sort_by(|a, b| {
+        b.updated
+            .cmp(&a.updated)
+            .then_with(|| b.created.cmp(&a.created))
+    });
     out.dedup_by(|a, b| a.id == b.id);
     out
 }
@@ -205,10 +210,14 @@ mod tests {
         }
         pub fn take(name: &str) -> Guard {
             let lock = ENV.lock().unwrap();
-            let d = std::env::temp_dir().join(format!("hiderola-test-{}-{name}", std::process::id()));
+            let d =
+                std::env::temp_dir().join(format!("hiderola-test-{}-{name}", std::process::id()));
             let _ = std::fs::remove_dir_all(&d);
             std::env::set_var("HI_DEROLA_SESSIONS_DIR", &d);
-            Guard { _lock: lock, dir: d }
+            Guard {
+                _lock: lock,
+                dir: d,
+            }
         }
         impl Drop for Guard {
             fn drop(&mut self) {

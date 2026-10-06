@@ -94,11 +94,20 @@ fn persist(sh: &Shared) {
 
 fn emit_sessions(app: &AppHandle, sh: &Shared) {
     let sid = sh.sid.lock().unwrap().clone();
-    let _ = app.emit("ev", json!({"t": "sessions", "list": sessions::list(), "sid": sid}));
+    let _ = app.emit(
+        "ev",
+        json!({"t": "sessions", "list": sessions::list(), "sid": sid}),
+    );
 }
 
 fn emit_attachments(sh: &Shared, app: &AppHandle) {
-    let list: Vec<String> = sh.attachments.lock().unwrap().iter().map(|(p, _)| p.clone()).collect();
+    let list: Vec<String> = sh
+        .attachments
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(p, _)| p.clone())
+        .collect();
     let _ = app.emit("ev", json!({"t": "attachments", "list": list}));
 }
 
@@ -263,7 +272,12 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                 ApiEvent::Chunk(s) => json!({"t": "chunk", "s": s}),
                 ApiEvent::Reasoning(s) => json!({"t": "reasoning", "s": s}),
                 ApiEvent::Note(s) => json!({"t": "note", "s": s}),
-                ApiEvent::Tool { name, detail, diff, paths } => {
+                ApiEvent::Tool {
+                    name,
+                    detail,
+                    diff,
+                    paths,
+                } => {
                     if !paths.is_empty() {
                         let mut adds = 0u64;
                         let mut dels = 0u64;
@@ -310,14 +324,22 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     json!({"t": "todo", "s": s})
                 }
                 ApiEvent::BgOut { id, chunk } => json!({"t": "bgout", "id": id, "s": chunk}),
-                ApiEvent::Usage { input, output, cached } => {
+                ApiEvent::Usage {
+                    input,
+                    output,
+                    cached,
+                } => {
                     let (model, kind, ctx_limit) = {
                         let cfg = sh.cfg.lock().unwrap();
                         let limit = if cfg.agent.context_limit > 0 {
                             cfg.agent.context_limit
                         } else {
                             let w = models::lookup(&cfg.provider.model).window;
-                            if w > 0 { w / 10 * 9 } else { 0 }
+                            if w > 0 {
+                                w / 10 * 9
+                            } else {
+                                0
+                            }
                         };
                         (cfg.provider.model.clone(), cfg.provider.kind.clone(), limit)
                     };
@@ -460,8 +482,12 @@ async fn list_models(
     api_key: Option<String>,
 ) -> Result<Vec<String>, String> {
     let cfg = sh.cfg.lock().unwrap().clone();
-    let kind = kind.filter(|s| !s.trim().is_empty()).unwrap_or(cfg.provider.kind.clone());
-    let base = base_url.filter(|s| !s.trim().is_empty()).or(cfg.provider.base_url.clone());
+    let kind = kind
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or(cfg.provider.kind.clone());
+    let base = base_url
+        .filter(|s| !s.trim().is_empty())
+        .or(cfg.provider.base_url.clone());
     let key = api_key
         .filter(|s| !s.trim().is_empty())
         .or_else(|| cfg.api_key())
@@ -509,7 +535,11 @@ async fn answer(sh: State<'_, Arc<Shared>>, text: String) -> Result<(), String> 
 async fn allow_all(sh: State<'_, Arc<Shared>>) -> Result<(), String> {
     sh.allow_all.store(true, Ordering::Relaxed);
     if let Some((c, _, _)) = sh.confirm.lock().unwrap().take() {
-        let _ = c.send(ConfirmReply { approved: true, feedback: String::new(), always: false });
+        let _ = c.send(ConfirmReply {
+            approved: true,
+            feedback: String::new(),
+            always: false,
+        });
     }
     Ok(())
 }
@@ -618,7 +648,11 @@ async fn mcp_resources(sh: State<'_, Arc<Shared>>) -> Result<Vec<Value>, String>
 }
 
 #[tauri::command]
-async fn mcp_read_resource(sh: State<'_, Arc<Shared>>, server: String, uri: String) -> Result<Value, String> {
+async fn mcp_read_resource(
+    sh: State<'_, Arc<Shared>>,
+    server: String,
+    uri: String,
+) -> Result<Value, String> {
     let Some(c) = sh.mcp.lock().unwrap().clone() else {
         return Err("mcp is not configured".into());
     };
@@ -629,19 +663,31 @@ async fn mcp_read_resource(sh: State<'_, Arc<Shared>>, server: String, uri: Stri
 }
 
 #[tauri::command]
-async fn mcp_subscribe(sh: State<'_, Arc<Shared>>, server: String, uri: String) -> Result<(), String> {
+async fn mcp_subscribe(
+    sh: State<'_, Arc<Shared>>,
+    server: String,
+    uri: String,
+) -> Result<(), String> {
     let Some(c) = sh.mcp.lock().unwrap().clone() else {
         return Err("mcp is not configured".into());
     };
-    c.subscribe(&server, &uri).await.map_err(|e| format!("{e:#}"))
+    c.subscribe(&server, &uri)
+        .await
+        .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
-async fn mcp_unsubscribe(sh: State<'_, Arc<Shared>>, server: String, uri: String) -> Result<(), String> {
+async fn mcp_unsubscribe(
+    sh: State<'_, Arc<Shared>>,
+    server: String,
+    uri: String,
+) -> Result<(), String> {
     let Some(c) = sh.mcp.lock().unwrap().clone() else {
         return Err("mcp is not configured".into());
     };
-    c.unsubscribe(&server, &uri).await.map_err(|e| format!("{e:#}"))
+    c.unsubscribe(&server, &uri)
+        .await
+        .map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
@@ -799,9 +845,7 @@ async fn sandbox_create(spec: sandbox::NewSandbox) -> Result<sandbox::SandboxSta
 async fn sandbox_action(id: String, action: String) -> Result<Value, String> {
     let m = sandbox::SandboxManager::global().clone();
     tokio::task::spawn_blocking(move || match action.as_str() {
-        "start" => m
-            .start(&id)
-            .and_then(|s| Ok(serde_json::to_value(s)?)),
+        "start" => m.start(&id).and_then(|s| Ok(serde_json::to_value(s)?)),
         "stop" => m.stop(&id).and_then(|s| Ok(serde_json::to_value(s)?)),
         "delete" => m.delete(&id).map(|_| Value::Null),
         other => Err(anyhow::anyhow!("unknown sandbox action \"{other}\"")),
@@ -898,7 +942,11 @@ async fn new_session(sh: State<'_, Arc<Shared>>, app: AppHandle) -> Result<(), S
 }
 
 #[tauri::command]
-async fn open_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) -> Result<Value, String> {
+async fn open_session(
+    sh: State<'_, Arc<Shared>>,
+    app: AppHandle,
+    id: String,
+) -> Result<Value, String> {
     if *sh.sid.lock().unwrap() != id {
         persist(&sh);
     }
@@ -953,7 +1001,11 @@ async fn open_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) ->
     }))
 }
 #[tauri::command]
-async fn delete_session(sh: State<'_, Arc<Shared>>, app: AppHandle, id: String) -> Result<Value, String> {
+async fn delete_session(
+    sh: State<'_, Arc<Shared>>,
+    app: AppHandle,
+    id: String,
+) -> Result<Value, String> {
     sessions::delete(&id).map_err(|e| format!("{e:#}"))?;
     let current = { *sh.sid.lock().unwrap() == id };
     if current {
@@ -1019,7 +1071,10 @@ async fn list_dir(path: Option<String>) -> Result<Value, String> {
         let size = e.metadata().map(|m| m.len()).unwrap_or(0);
         entries.push((name, ft.is_dir(), size));
     }
-    entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
+    entries.sort_by(|a, b| {
+        b.1.cmp(&a.1)
+            .then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase()))
+    });
     entries.truncate(500);
     let cwd = std::env::current_dir().unwrap_or_default();
     let home = dirs::home_dir();
@@ -1096,7 +1151,11 @@ fn dir_tree(root: &std::path::Path, depth: u8, counter: &mut usize) -> String {
 }
 
 #[tauri::command]
-async fn attach_path(sh: State<'_, Arc<Shared>>, app: AppHandle, path: String) -> Result<Value, String> {
+async fn attach_path(
+    sh: State<'_, Arc<Shared>>,
+    app: AppHandle,
+    path: String,
+) -> Result<Value, String> {
     let p = expand(path.trim());
     let meta = std::fs::metadata(&p).map_err(|e| format!("{e}"))?;
     if meta.is_dir() {
@@ -1119,7 +1178,10 @@ async fn attach_path(sh: State<'_, Arc<Shared>>, app: AppHandle, path: String) -
         hi_derola::files::read_attach(&p.display().to_string()).map_err(|e| format!("{e:#}"))?
     };
     let size = content.len();
-    sh.attachments.lock().unwrap().push((p.display().to_string(), content));
+    sh.attachments
+        .lock()
+        .unwrap()
+        .push((p.display().to_string(), content));
     emit_attachments(&sh, &app);
     Ok(json!({"ok": true, "kind": "file", "size": size}))
 }
@@ -1651,7 +1713,9 @@ fn dispatch_prompt(sh: &Arc<Shared>, app: &AppHandle, text: String) -> Value {
         // the queue is durable: it lives in the session file, so a crash
         // cannot lose messages typed while the agent was busy
         persist(sh);
-        let _ = sh.tx.send(ApiEvent::Note("queued: will run after the current task".into()));
+        let _ = sh.tx.send(ApiEvent::Note(
+            "queued: will run after the current task".into(),
+        ));
         return json!({"cmd": false, "queued": true});
     }
     {
@@ -1769,7 +1833,9 @@ async fn send(sh: State<'_, Arc<Shared>>, app: AppHandle, text: String) -> Resul
         sh.queue.lock().unwrap().push(composed);
         emit_attachments(&sh, &app);
         persist(&sh);
-        let _ = sh.tx.send(ApiEvent::Note("queued: will steer the current run".into()));
+        let _ = sh
+            .tx
+            .send(ApiEvent::Note("queued: will steer the current run".into()));
         return Ok(json!({"cmd": false, "queued": true}));
     }
     {
@@ -1794,9 +1860,9 @@ pub fn run() -> Result<()> {
         .setup(move |app| {
             let (tx, rx) = mpsc::unbounded_channel::<ApiEvent>();
             let cfg = (*cfg).clone();
-            let provider = cfg
-                .api_key()
-                .and_then(|k| provider::build(&cfg.provider.kind, cfg.provider.base_url.clone(), k).ok());
+            let provider = cfg.api_key().and_then(|k| {
+                provider::build(&cfg.provider.kind, cfg.provider.base_url.clone(), k).ok()
+            });
             let restore = sessions::latest();
             let (sid, title, created, session) = match &restore {
                 Some(st) => (
@@ -1830,20 +1896,38 @@ pub fn run() -> Result<()> {
                 confirm: Mutex::new(None),
                 ask: Mutex::new(None),
                 inflight: Mutex::new(None),
-                tokens: Mutex::new(restore.as_ref().map(|s| (s.tokens_in, s.tokens_out)).unwrap_or((0, 0))),
+                tokens: Mutex::new(
+                    restore
+                        .as_ref()
+                        .map(|s| (s.tokens_in, s.tokens_out))
+                        .unwrap_or((0, 0)),
+                ),
                 cost: Mutex::new(restore.as_ref().map(|s| s.cost).unwrap_or(0.0)),
-                todos: Mutex::new(restore.as_ref().map(|s| s.todos.clone()).unwrap_or_default()),
+                todos: Mutex::new(
+                    restore
+                        .as_ref()
+                        .map(|s| s.todos.clone())
+                        .unwrap_or_default(),
+                ),
                 attachments: Mutex::new(Vec::new()),
                 mcp: Arc::new(Mutex::new(None)),
                 allow_all: Arc::new(AtomicBool::new(false)),
                 plan: AtomicBool::new(false),
                 queue: Arc::new(Mutex::new(Vec::new())),
                 titled: AtomicBool::new(restore.is_some()),
-                changes: Mutex::new(restore.as_ref().map(|s| s.changes.clone()).unwrap_or_default()),
+                changes: Mutex::new(
+                    restore
+                        .as_ref()
+                        .map(|s| s.changes.clone())
+                        .unwrap_or_default(),
+                ),
                 tx: tx.clone(),
             });
             let tx2 = tx.clone();
-            let restored_todos = restore.as_ref().map(|s| s.todos.clone()).unwrap_or_default();
+            let restored_todos = restore
+                .as_ref()
+                .map(|s| s.todos.clone())
+                .unwrap_or_default();
             if !restored_todos.is_empty() {
                 hi_derola::todo::set_list(restored_todos);
             }
@@ -1863,13 +1947,47 @@ pub fn run() -> Result<()> {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            init, save, send, confirm, answer, allow_all, stop, list_models, mcp_reconnect,
-            mcp_auth, mcp_resources, mcp_read_resource, mcp_subscribe, mcp_unsubscribe, mcp_prompts,
-            mcp_templates, mcp_subscriptions, mcp_get_prompt, sandbox_detect, sandbox_list,
-            sandbox_create, sandbox_action, sandbox_attach, sandbox_detach, sandbox_ssh_exec,
-            sandbox_agent_install, sandbox_ssh_terminal, undo,
-            redo, list_sessions, new_session, open_session, delete_session, list_dir, attach_path,
-            detach, set_theme, list_project_files, set_plan, task_kill, list_agents
+            init,
+            save,
+            send,
+            confirm,
+            answer,
+            allow_all,
+            stop,
+            list_models,
+            mcp_reconnect,
+            mcp_auth,
+            mcp_resources,
+            mcp_read_resource,
+            mcp_subscribe,
+            mcp_unsubscribe,
+            mcp_prompts,
+            mcp_templates,
+            mcp_subscriptions,
+            mcp_get_prompt,
+            sandbox_detect,
+            sandbox_list,
+            sandbox_create,
+            sandbox_action,
+            sandbox_attach,
+            sandbox_detach,
+            sandbox_ssh_exec,
+            sandbox_agent_install,
+            sandbox_ssh_terminal,
+            undo,
+            redo,
+            list_sessions,
+            new_session,
+            open_session,
+            delete_session,
+            list_dir,
+            attach_path,
+            detach,
+            set_theme,
+            list_project_files,
+            set_plan,
+            task_kill,
+            list_agents
         ])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow!("{e}"))?;

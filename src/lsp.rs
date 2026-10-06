@@ -32,7 +32,11 @@ const REGISTRY: &[(&str, &[&str], &[&str])] = &[
     ("pyright-langserver", &["py", "pyi"], &["--stdio"]),
     ("basedpyright-langserver", &["py", "pyi"], &["--stdio"]),
     ("pylsp", &["py", "pyi"], &[]),
-    ("typescript-language-server", &["ts", "tsx", "js", "jsx", "mjs", "cjs"], &["--stdio"]),
+    (
+        "typescript-language-server",
+        &["ts", "tsx", "js", "jsx", "mjs", "cjs"],
+        &["--stdio"],
+    ),
     ("gopls", &["go"], &[]),
     ("clangd", &["c", "h", "cpp", "hpp", "cc", "cxx"], &[]),
 ];
@@ -110,12 +114,10 @@ fn uri_to_path(uri: &str) -> String {
 pub fn parse_frame(buf: &[u8]) -> Option<(usize, Value)> {
     let sep = find_subslice(buf, b"\r\n\r\n")?;
     let head = std::str::from_utf8(&buf[..sep]).ok()?;
-    let len = head
-        .lines()
-        .find_map(|l| {
-            let v = l.strip_prefix("Content-Length:")?;
-            v.trim().parse::<usize>().ok()
-        })?;
+    let len = head.lines().find_map(|l| {
+        let v = l.strip_prefix("Content-Length:")?;
+        v.trim().parse::<usize>().ok()
+    })?;
     let start = sep + 4;
     if buf.len() < start + len {
         return None;
@@ -126,9 +128,7 @@ pub fn parse_frame(buf: &[u8]) -> Option<(usize, Value)> {
 }
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 async fn get_server(name: &'static str, args: &[&str], root: &str) -> Option<Arc<Server>> {
@@ -178,20 +178,28 @@ async fn get_server(name: &'static str, args: &[&str], root: &str) -> Option<Arc
             while let Some((used, msg)) = parse_frame(&buf) {
                 buf.drain(..used);
                 if std::env::var_os("HI_DEROLA_LSP_DEBUG").is_some() {
-                    eprintln!("[lsp <-] {}", serde_json::to_string(&msg).unwrap_or_default().chars().take(300).collect::<String>());
+                    eprintln!(
+                        "[lsp <-] {}",
+                        serde_json::to_string(&msg)
+                            .unwrap_or_default()
+                            .chars()
+                            .take(300)
+                            .collect::<String>()
+                    );
                 }
                 let id = msg.get("id").and_then(|v| v.as_i64());
                 let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
                 if method == "textDocument/publishDiagnostics" {
                     let uri = msg["params"]["uri"].as_str().unwrap_or("").to_string();
-                    let diags = msg["params"]["diagnostics"].as_array().cloned().unwrap_or_default();
-                    r.diags
-                        .lock()
-                        .unwrap()
-                        .insert(uri, (Instant::now(), diags));
+                    let diags = msg["params"]["diagnostics"]
+                        .as_array()
+                        .cloned()
+                        .unwrap_or_default();
+                    r.diags.lock().unwrap().insert(uri, (Instant::now(), diags));
                 } else if let (Some(id), true) = (id, !method.is_empty()) {
                     // server -> client request: answer with an empty result
-                    let resp = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": Value::Null});
+                    let resp =
+                        serde_json::json!({"jsonrpc": "2.0", "id": id, "result": Value::Null});
                     let mut g = r.stdin.lock().await;
                     let _ = write_frame(&mut *g, &resp).await;
                 } else if let Some(id) = id {
@@ -232,7 +240,10 @@ async fn get_server(name: &'static str, args: &[&str], root: &str) -> Option<Arc
         return None;
     }
     let _ = notify(&srv, "initialized", serde_json::json!({})).await;
-    servers().lock().unwrap().insert(name.to_string(), srv.clone());
+    servers()
+        .lock()
+        .unwrap()
+        .insert(name.to_string(), srv.clone());
     Some(srv)
 }
 
@@ -260,7 +271,11 @@ async fn write_frame(
 ) -> std::io::Result<()> {
     let body = serde_json::to_string(msg)?;
     if std::env::var_os("HI_DEROLA_LSP_DEBUG").is_some() {
-        eprintln!("[lsp ->] {} {}", body.get(..120).unwrap_or(&body), body.len());
+        eprintln!(
+            "[lsp ->] {} {}",
+            body.get(..120).unwrap_or(&body),
+            body.len()
+        );
     }
     w.write_all(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes())
         .await?;
@@ -377,14 +392,23 @@ pub async fn diagnose(path: &str) -> Option<String> {
             };
             let line = d["range"]["start"]["line"].as_i64().unwrap_or(0) + 1;
             let col = d["range"]["start"]["character"].as_i64().unwrap_or(0) + 1;
-            let msg = d["message"].as_str().unwrap_or("").lines().next().unwrap_or("");
+            let msg = d["message"]
+                .as_str()
+                .unwrap_or("")
+                .lines()
+                .next()
+                .unwrap_or("");
             format!("{sev}: {msg} (line {line}, col {col})")
         })
         .collect();
     if lines.is_empty() {
         return None;
     }
-    let extra = if lines.len() == MAX_DIAGS { " (more may follow)" } else { "" };
+    let extra = if lines.len() == MAX_DIAGS {
+        " (more may follow)"
+    } else {
+        ""
+    };
     Some(format!(
         "--- lsp diagnostics ({name}) ---\n{}{extra}",
         lines.join("\n")
@@ -486,8 +510,7 @@ async fn prepare(path: &str) -> anyhow::Result<Prepared> {
     if !enabled() {
         anyhow::bail!("LSP is disabled (config: [lsp] enabled = false)");
     }
-    let name = server_name_for(path)
-        .context("no LSP server available for this file type")?;
+    let name = server_name_for(path).context("no LSP server available for this file type")?;
     let meta = std::fs::metadata(path).ok().context("file not found")?;
     if meta.len() > MAX_FILE_BYTES {
         anyhow::bail!("file too large for LSP ({} bytes)", meta.len());
@@ -647,10 +670,32 @@ fn line_text_of(text: &str, line0: i64) -> Option<String> {
 }
 
 const SYMBOL_KINDS: &[&str] = &[
-    "file", "module", "namespace", "package", "class", "method", "property", "field",
-    "constructor", "enum", "interface", "function", "variable", "constant", "string",
-    "number", "boolean", "array", "object", "key", "null", "enum member", "struct",
-    "event", "operator", "type parameter",
+    "file",
+    "module",
+    "namespace",
+    "package",
+    "class",
+    "method",
+    "property",
+    "field",
+    "constructor",
+    "enum",
+    "interface",
+    "function",
+    "variable",
+    "constant",
+    "string",
+    "number",
+    "boolean",
+    "array",
+    "object",
+    "key",
+    "null",
+    "enum member",
+    "struct",
+    "event",
+    "operator",
+    "type parameter",
 ];
 
 fn symbol_kind(k: i64) -> &'static str {
@@ -746,15 +791,29 @@ pub async fn hover(path: &str, line: u32, col: u32) -> anyhow::Result<String> {
 }
 
 pub async fn definition(path: &str, line: u32, col: u32) -> anyhow::Result<String> {
-    position_nav(path, line, col, "textDocument/definition", json!({}), fmt_locations)
-        .await
-        .map(|s| s.replace("textDocument/definition", "definition"))
+    position_nav(
+        path,
+        line,
+        col,
+        "textDocument/definition",
+        json!({}),
+        fmt_locations,
+    )
+    .await
+    .map(|s| s.replace("textDocument/definition", "definition"))
 }
 
 pub async fn implementation(path: &str, line: u32, col: u32) -> anyhow::Result<String> {
-    position_nav(path, line, col, "textDocument/implementation", json!({}), fmt_locations)
-        .await
-        .map(|s| s.replace("textDocument/implementation", "implementation"))
+    position_nav(
+        path,
+        line,
+        col,
+        "textDocument/implementation",
+        json!({}),
+        fmt_locations,
+    )
+    .await
+    .map(|s| s.replace("textDocument/implementation", "implementation"))
 }
 
 pub async fn references(
@@ -764,9 +823,16 @@ pub async fn references(
     include_decl: bool,
 ) -> anyhow::Result<String> {
     let extra = serde_json::json!({"context": {"includeDeclaration": include_decl}});
-    position_nav(path, line, col, "textDocument/references", extra, fmt_locations)
-        .await
-        .map(|s| s.replace("textDocument/references", "references"))
+    position_nav(
+        path,
+        line,
+        col,
+        "textDocument/references",
+        extra,
+        fmt_locations,
+    )
+    .await
+    .map(|s| s.replace("textDocument/references", "references"))
 }
 
 pub async fn document_symbols(path: &str) -> anyhow::Result<String> {
@@ -1052,7 +1118,10 @@ mod tests {
         // non-BMP chars (emoji) take 2 UTF-16 units each; col 6 points at 'x'
         let crab = "let 🦀x = 1;";
         let pos = to_lsp_position(crab, 1, 6);
-        assert_eq!(pos["character"], 6, "l,e,t,space=4 units + 2 units for the crab");
+        assert_eq!(
+            pos["character"], 6,
+            "l,e,t,space=4 units + 2 units for the crab"
+        );
         let line = line_text_of(crab, 0).unwrap();
         assert_eq!(from_lsp_units(&line, pos["character"].as_i64().unwrap()), 6);
         // plain ascii
@@ -1071,7 +1140,8 @@ mod tests {
 
     #[test]
     fn hover_formatting() {
-        let markup = serde_json::json!({"contents": {"kind": "markdown", "value": "fn **main**\n\ndocs"}});
+        let markup =
+            serde_json::json!({"contents": {"kind": "markdown", "value": "fn **main**\n\ndocs"}});
         assert_eq!(fmt_hover(&markup), "fn **main**\n\ndocs");
         let plain = serde_json::json!({"contents": {"language": "rust", "value": "let x: i32"}});
         assert_eq!(fmt_hover(&plain), "```rust\nlet x: i32\n```");
@@ -1147,7 +1217,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hd-lsp-ch-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join("callh.rs");
-        std::fs::write(&f, "fn alpha() {}\nfn beta() { alpha() }\nlet \u{1f980}\u{0418} = 1;\n").unwrap();
+        std::fs::write(
+            &f,
+            "fn alpha() {}\nfn beta() { alpha() }\nlet \u{1f980}\u{0418} = 1;\n",
+        )
+        .unwrap();
         let abs = f.display().to_string();
         let base = std::env::current_dir().unwrap().display().to_string();
         let mut cache = HashMap::new();
@@ -1217,14 +1291,19 @@ mod tests {
             return;
         };
         eprintln!("definition -> {def}");
-        assert!(def.contains("snapshot.rs:2"), "must point at the definition: {def}");
+        assert!(
+            def.contains("snapshot.rs:2"),
+            "must point at the definition: {def}"
+        );
 
         let hover_text = hover(&app.display().to_string(), line, col).await.unwrap();
         eprintln!("hover -> {hover_text}");
         assert!(hover_text.contains("fn begin_turn"), "{hover_text}");
 
         // references from the definition site in snapshot.rs (line 25, col 13)
-        let refs = references(&snap.display().to_string(), 25, 13, false).await.unwrap();
+        let refs = references(&snap.display().to_string(), 25, 13, false)
+            .await
+            .unwrap();
         eprintln!("references -> {refs}");
         assert!(refs.contains("app.rs:"), "{refs}");
 
@@ -1233,15 +1312,21 @@ mod tests {
         assert!(syms.contains("function begin_turn"), "{syms}");
 
         // call hierarchy on the same site (snapshot.rs:25:13 = begin_turn)
-        let prep = prepare_call_hierarchy(&snap.display().to_string(), 25, 13).await.unwrap();
+        let prep = prepare_call_hierarchy(&snap.display().to_string(), 25, 13)
+            .await
+            .unwrap();
         eprintln!("prepare_call_hierarchy -> {prep}");
         assert!(prep.contains("function begin_turn"), "{prep}");
 
-        let inc = incoming_calls(&snap.display().to_string(), 25, 13).await.unwrap();
+        let inc = incoming_calls(&snap.display().to_string(), 25, 13)
+            .await
+            .unwrap();
         eprintln!("incoming_calls -> {inc}");
         assert!(inc.contains("app.rs"), "callers must include app.rs: {inc}");
 
-        let outg = outgoing_calls(&snap.display().to_string(), 25, 13).await.unwrap();
+        let outg = outgoing_calls(&snap.display().to_string(), 25, 13)
+            .await
+            .unwrap();
         eprintln!("outgoing_calls -> {outg}");
         assert!(
             outg.contains("begin_turn_in"),
@@ -1253,7 +1338,13 @@ mod tests {
     fn find(text: &str, needle: &str) -> Option<(u32, u32)> {
         let idx = text.find(needle)?;
         let line = text[..idx].matches('\n').count() + 1;
-        let col = text[..idx].rsplit('\n').next().unwrap_or("").chars().count() + 1;
+        let col = text[..idx]
+            .rsplit('\n')
+            .next()
+            .unwrap_or("")
+            .chars()
+            .count()
+            + 1;
         Some((line as u32, col as u32))
     }
 }

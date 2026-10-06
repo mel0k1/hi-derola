@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::{sse_lines, send, ApiEvent, ChatRequest, Provider, Reply};
+use super::{send, sse_lines, ApiEvent, ChatRequest, Provider, Reply};
 use crate::chat::{Message, Role, ToolCall};
 
 pub struct OpenAi {
@@ -150,7 +150,10 @@ impl Provider for OpenAi {
                             .map_err(|_| anyhow::anyhow!("closed"))?;
                     }
                 }
-                if let Some(r) = d["reasoning_content"].as_str().or_else(|| d["reasoning"].as_str()) {
+                if let Some(r) = d["reasoning_content"]
+                    .as_str()
+                    .or_else(|| d["reasoning"].as_str())
+                {
                     if !r.is_empty() {
                         tx.send(ApiEvent::Reasoning(r.to_string()))
                             .map_err(|_| anyhow::anyhow!("closed"))?;
@@ -169,7 +172,8 @@ impl Provider for OpenAi {
                             pending[idx]["name"] = json!(n);
                         }
                         if let Some(a) = tc["function"]["arguments"].as_str() {
-                            let acc = format!("{}{}", pending[idx]["args"].as_str().unwrap_or(""), a);
+                            let acc =
+                                format!("{}{}", pending[idx]["args"].as_str().unwrap_or(""), a);
                             pending[idx]["args"] = json!(acc);
                         }
                     }
@@ -178,7 +182,9 @@ impl Provider for OpenAi {
                     tx.send(ApiEvent::Usage {
                         input: u["prompt_tokens"].as_u64().unwrap_or(0),
                         output: u["completion_tokens"].as_u64().unwrap_or(0),
-                        cached: u["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0),
+                        cached: u["prompt_tokens_details"]["cached_tokens"]
+                            .as_u64()
+                            .unwrap_or(0),
                     })
                     .map_err(|_| anyhow::anyhow!("closed"))?;
                 }
@@ -196,7 +202,8 @@ impl Provider for OpenAi {
                 .collect();
         } else {
             let text = resp.text().await?;
-            let v: Value = serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+            let v: Value =
+                serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
             let msg = &v["choices"][0]["message"];
             finish = v["choices"][0]["finish_reason"]
                 .as_str()
@@ -221,7 +228,9 @@ impl Provider for OpenAi {
                 tx.send(ApiEvent::Usage {
                     input: u["prompt_tokens"].as_u64().unwrap_or(0),
                     output: u["completion_tokens"].as_u64().unwrap_or(0),
-                    cached: u["prompt_tokens_details"]["cached_tokens"].as_u64().unwrap_or(0),
+                    cached: u["prompt_tokens_details"]["cached_tokens"]
+                        .as_u64()
+                        .unwrap_or(0),
                 })
                 .map_err(|_| anyhow::anyhow!("closed"))?;
             }

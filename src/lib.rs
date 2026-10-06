@@ -12,26 +12,26 @@ pub mod files;
 pub mod fmt;
 pub mod jstools;
 pub mod lsp;
-pub mod md;
-pub mod models;
 pub mod mcp;
 pub mod mcpauth;
+pub mod md;
+pub mod models;
 pub mod patch;
 pub mod perm;
 pub mod provider;
+pub mod sandbox;
 pub mod search;
 pub mod seed;
 pub mod sessions;
 pub mod skills;
-pub mod sandbox;
 pub mod snapshot;
 pub mod sshx;
 pub mod todo;
 pub mod tools;
 pub mod ui;
+pub mod web;
 #[cfg(windows)]
 mod winjob;
-pub mod web;
 
 const MAX_AGENTS_MD: usize = 16 * 1024;
 

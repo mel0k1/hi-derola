@@ -191,7 +191,9 @@ pub fn parse_redirect(uri: Option<&str>) -> (u16, String) {
     let Some(u) = uri.and_then(|s| Url::parse(s).ok()) else {
         return (CALLBACK_PORT, CALLBACK_PATH.into());
     };
-    let port = u.port().unwrap_or(if u.scheme() == "https" { 443 } else { 80 });
+    let port = u
+        .port()
+        .unwrap_or(if u.scheme() == "https" { 443 } else { 80 });
     let path = if u.path().is_empty() {
         CALLBACK_PATH.into()
     } else {
@@ -275,7 +277,9 @@ async fn fetch_auth_meta(http: &Client, issuer: &str) -> Result<Value> {
     let issuer = issuer.trim_end_matches('/');
     let mut cands = Vec::new();
     if !path.is_empty() {
-        cands.push(format!("{origin}/.well-known/oauth-authorization-server{path}"));
+        cands.push(format!(
+            "{origin}/.well-known/oauth-authorization-server{path}"
+        ));
     }
     cands.push(format!("{issuer}/.well-known/oauth-authorization-server"));
     cands.push(format!("{issuer}/.well-known/openid-configuration"));
@@ -288,7 +292,11 @@ async fn fetch_auth_meta(http: &Client, issuer: &str) -> Result<Value> {
     bail!("no OAuth metadata at issuer {issuer}")
 }
 
-async fn discover(http: &Client, server_url: &str, oauth: Option<&McpOAuthCfg>) -> Result<AuthEndpoints> {
+async fn discover(
+    http: &Client,
+    server_url: &str,
+    oauth: Option<&McpOAuthCfg>,
+) -> Result<AuthEndpoints> {
     // a pinned authorization server metadata url skips every RFC 9728 probe
     // (no 401 initialize, no protected-resource fetch); the resource is
     // pinned to the mcp server url itself
@@ -378,9 +386,7 @@ async fn discover(http: &Client, server_url: &str, oauth: Option<&McpOAuthCfg>) 
 }
 
 /// the four fields we care about from an authorization server metadata doc
-fn endpoints_from_meta(
-    meta: &Value,
-) -> Result<(String, String, Option<String>, Option<String>)> {
+fn endpoints_from_meta(meta: &Value) -> Result<(String, String, Option<String>, Option<String>)> {
     let scopes = meta["scopes_supported"]
         .as_array()
         .map(|a| {
@@ -574,12 +580,7 @@ pub fn wait_for_callback(port: u16, path: &str, state: &str, timeout: Duration) 
                         Some((url_decode(k), url_decode(v)))
                     })
                     .collect();
-                let p = |k: &str| {
-                    params
-                        .iter()
-                        .find(|(a, _)| a == k)
-                        .map(|(_, v)| v.clone())
-                };
+                let p = |k: &str| params.iter().find(|(a, _)| a == k).map(|(_, v)| v.clone());
                 let Some(st) = p("state") else {
                     respond(
                         &mut stream,
@@ -661,7 +662,9 @@ fn client_secret_for(name: &str, oauth: Option<&McpOAuthCfg>) -> Option<String> 
             return Some(s.clone());
         }
     }
-    get(name).and_then(|e| e.client_info).and_then(|c| c.client_secret)
+    get(name)
+        .and_then(|e| e.client_info)
+        .and_then(|c| c.client_secret)
 }
 
 async fn do_refresh(
@@ -696,9 +699,10 @@ async fn do_refresh(
         Ok(t) => {
             let access = t.access_token.clone();
             mutate(name, Some(server_url), |e| {
-                let keep_refresh = t.refresh_token.clone().or_else(|| {
-                    e.tokens.as_ref().and_then(|x| x.refresh_token.clone())
-                });
+                let keep_refresh = t
+                    .refresh_token
+                    .clone()
+                    .or_else(|| e.tokens.as_ref().and_then(|x| x.refresh_token.clone()));
                 e.tokens = Some(Tokens {
                     refresh_token: keep_refresh,
                     ..t.clone()
@@ -762,7 +766,9 @@ pub async fn start_auth(name: &str, cfgs: &[McpConfig]) -> Result<AuthStart> {
         .iter()
         .find(|c| c.name == name)
         .with_context(|| format!("mcp {name}: not in config"))?;
-    let oauth = cfg.oauth_cfg().context("mcp: OAuth is disabled in config")?;
+    let oauth = cfg
+        .oauth_cfg()
+        .context("mcp: OAuth is disabled in config")?;
     let server_url = cfg
         .url
         .clone()
@@ -844,17 +850,21 @@ pub async fn finish_auth(name: &str, cfgs: &[McpConfig], code: &str) -> Result<S
         .iter()
         .find(|c| c.name == name)
         .with_context(|| format!("mcp {name}: not in config"))?;
-    let oauth = cfg.oauth_cfg().context("mcp: OAuth is disabled in config")?;
+    let oauth = cfg
+        .oauth_cfg()
+        .context("mcp: OAuth is disabled in config")?;
     let server_url = cfg
         .url
         .clone()
         .context("mcp: OAuth applies to remote servers only")?;
     let entry = get(name)
         .with_context(|| format!("mcp {name}: nothing stored — run /mcpauth {name} first"))?;
-    let verifier = entry.code_verifier
-        .with_context(|| format!("mcp {name}: no pending oauth flow — run /mcpauth {name} first"))?;
-    let ep = entry.token_endpoint
-        .with_context(|| format!("mcp {name}: no token endpoint stored — run /mcpauth {name} first"))?;
+    let verifier = entry.code_verifier.with_context(|| {
+        format!("mcp {name}: no pending oauth flow — run /mcpauth {name} first")
+    })?;
+    let ep = entry.token_endpoint.with_context(|| {
+        format!("mcp {name}: no token endpoint stored — run /mcpauth {name} first")
+    })?;
     let redirect = entry
         .redirect_uri
         .or_else(|| oauth.redirect_uri.clone())
@@ -864,10 +874,12 @@ pub async fn finish_auth(name: &str, cfgs: &[McpConfig], code: &str) -> Result<S
         .clone()
         .or_else(|| entry.client_info.as_ref().map(|c| c.client_id.clone()))
         .context("no client_id for the exchange")?;
-    let client_secret = oauth
-        .client_secret
-        .clone()
-        .or_else(|| entry.client_info.as_ref().and_then(|c| c.client_secret.clone()));
+    let client_secret = oauth.client_secret.clone().or_else(|| {
+        entry
+            .client_info
+            .as_ref()
+            .and_then(|c| c.client_secret.clone())
+    });
     // RFC 8707: the same resource indicator pinned at flow start rides the
     // token exchange
     let resource = entry.resource.clone();
@@ -915,11 +927,10 @@ pub async fn authorize_flow(name: &str, cfgs: &[McpConfig]) -> Result<String> {
     }
     let (port, path) = start.callback;
     let state = start.state.clone();
-    let waited = tokio::task::spawn_blocking(move || {
-        wait_for_callback(port, &path, &state, AUTH_TIMEOUT)
-    })
-    .await
-    .context("callback task failed")?;
+    let waited =
+        tokio::task::spawn_blocking(move || wait_for_callback(port, &path, &state, AUTH_TIMEOUT))
+            .await
+            .context("callback task failed")?;
     let code = waited.map_err(|e| {
         anyhow::anyhow!(
             "{e:#} — approve in the browser and finish with: /mcpauth {name} <code>\n{}",
@@ -980,16 +991,15 @@ mod tests {
                 let method = parts.next().unwrap_or("").to_string();
                 let target = parts.next().unwrap_or("/").to_string();
                 let path = target.split('?').next().unwrap_or("/").to_string();
-                let body = req
-                    .split("\r\n\r\n")
-                    .nth(1)
-                    .unwrap_or("")
-                    .to_string();
-                log2.lock().unwrap().push(format!("{method} {path} :: {body}"));
-                let (status, extra, resp_body) = routes
-                    .get(&path)
-                    .cloned()
-                    .unwrap_or((404, String::new(), "not found".into()));
+                let body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+                log2.lock()
+                    .unwrap()
+                    .push(format!("{method} {path} :: {body}"));
+                let (status, extra, resp_body) =
+                    routes
+                        .get(&path)
+                        .cloned()
+                        .unwrap_or((404, String::new(), "not found".into()));
                 let reason = match status {
                     200 => "OK",
                     401 => "Unauthorized",
@@ -1103,8 +1113,10 @@ mod tests {
         rx.recv().unwrap();
         std::thread::sleep(Duration::from_millis(150));
         let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-        s.write_all(b"GET /mcp/oauth/callback?code=abc%2Bd&state=st123 HTTP/1.1\r\nHost: x\r\n\r\n")
-            .unwrap();
+        s.write_all(
+            b"GET /mcp/oauth/callback?code=abc%2Bd&state=st123 HTTP/1.1\r\nHost: x\r\n\r\n",
+        )
+        .unwrap();
         let mut resp = String::new();
         let _ = s.read_to_string(&mut resp);
         assert!(resp.contains("200 OK"), "got: {resp}");
@@ -1139,7 +1151,10 @@ mod tests {
         let _ = s3.read_to_string(&mut resp3);
         assert!(resp3.contains("200 OK"));
         let err = h3.join().unwrap().unwrap_err().to_string();
-        assert!(err.contains("access_denied") || err.contains("nope"), "{err}");
+        assert!(
+            err.contains("access_denied") || err.contains("nope"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1151,9 +1166,7 @@ mod tests {
                 "/mcp".to_string(),
                 (
                     401u16,
-                    format!(
-                        "WWW-Authenticate: Bearer resource_metadata=\"{base}/rs\"\r\n"
-                    ),
+                    format!("WWW-Authenticate: Bearer resource_metadata=\"{base}/rs\"\r\n"),
                     json!({"error": "unauthorized"}).to_string(),
                 ),
             );
@@ -1338,22 +1351,24 @@ mod tests {
         drop(reqs);
 
         // RFC 8707: a stored resource indicator rides every refresh
-        mutate(
-            "t",
-            Some(&format!("{base}/mcp")),
-            |e| {
-                e.tokens = Some(Tokens {
-                    access_token: "old".into(),
-                    refresh_token: Some("rt1".into()),
-                    ..Default::default()
-                });
-                e.token_endpoint = Some(format!("{base}/token"));
-                e.resource = Some("https://rs.example.com/mcp".into());
-            },
-        )
+        mutate("t", Some(&format!("{base}/mcp")), |e| {
+            e.tokens = Some(Tokens {
+                access_token: "old".into(),
+                refresh_token: Some("rt1".into()),
+                ..Default::default()
+            });
+            e.token_endpoint = Some(format!("{base}/token"));
+            e.resource = Some("https://rs.example.com/mcp".into());
+        })
         .unwrap();
         let access = rt
-            .block_on(do_refresh(&http, "t", &format!("{base}/mcp"), Some(&oauth), "rt1"))
+            .block_on(do_refresh(
+                &http,
+                "t",
+                &format!("{base}/mcp"),
+                Some(&oauth),
+                "rt1",
+            ))
             .unwrap();
         assert_eq!(access, "at1");
         let reqs = log.lock().unwrap();
@@ -1504,7 +1519,10 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(get("srv").unwrap().server_url.as_deref(), Some("http://x/mcp"));
+        assert_eq!(
+            get("srv").unwrap().server_url.as_deref(),
+            Some("http://x/mcp")
+        );
         assert!(get_for_url("srv", "http://x/mcp").is_some());
         assert!(get_for_url("srv", "http://other/mcp").is_none());
         assert_eq!(is_expired("srv"), Some(false));
@@ -1679,9 +1697,7 @@ mod tests {
         assert_eq!(entry.oauth_state.as_deref(), Some(start.state.as_str()));
         assert_eq!(
             entry.redirect_uri.as_deref(),
-            Some(
-                format!("http://127.0.0.1:{CALLBACK_PORT}{CALLBACK_PATH}").as_str()
-            )
+            Some(format!("http://127.0.0.1:{CALLBACK_PORT}{CALLBACK_PATH}").as_str())
         );
         assert_eq!(
             entry.token_endpoint.as_deref(),

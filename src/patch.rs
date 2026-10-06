@@ -2,9 +2,18 @@ use anyhow::{anyhow, bail, Result};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Op {
-    Add { path: String, content: String },
-    Update { path: String, move_to: Option<String>, hunks: Vec<Hunk> },
-    Delete { path: String },
+    Add {
+        path: String,
+        content: String,
+    },
+    Update {
+        path: String,
+        move_to: Option<String>,
+        hunks: Vec<Hunk>,
+    },
+    Delete {
+        path: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -31,9 +40,19 @@ impl Hunk {
 }
 
 enum Active {
-    Add { path: String, lines: Vec<String> },
-    Update { path: String, move_to: Option<String>, hunks: Vec<Hunk>, cur: Hunk },
-    Delete { path: String },
+    Add {
+        path: String,
+        lines: Vec<String>,
+    },
+    Update {
+        path: String,
+        move_to: Option<String>,
+        hunks: Vec<Hunk>,
+        cur: Hunk,
+    },
+    Delete {
+        path: String,
+    },
 }
 
 impl Default for Hunk {
@@ -57,7 +76,12 @@ impl Active {
                 },
                 path,
             },
-            Active::Update { path, move_to, mut hunks, cur } => {
+            Active::Update {
+                path,
+                move_to,
+                mut hunks,
+                cur,
+            } => {
                 if !cur.rows.is_empty() {
                     hunks.push(cur);
                 }
@@ -66,7 +90,11 @@ impl Active {
                         "apply_patch: Update File: {path}: no hunks (expected ' '/-/+ lines or @@ sections)"
                     );
                 }
-                Op::Update { path, move_to, hunks }
+                Op::Update {
+                    path,
+                    move_to,
+                    hunks,
+                }
             }
             Active::Delete { path } => Op::Delete { path },
         })
@@ -96,7 +124,10 @@ pub fn parse(text: &str) -> Result<Vec<Op>> {
             if p.is_empty() {
                 bail!("apply_patch: Add File: path required");
             }
-            active = Some(Active::Add { path: p.to_string(), lines: Vec::new() });
+            active = Some(Active::Add {
+                path: p.to_string(),
+                lines: Vec::new(),
+            });
             continue;
         }
         if let Some(rest) = header.strip_prefix("Delete File:") {
@@ -107,7 +138,9 @@ pub fn parse(text: &str) -> Result<Vec<Op>> {
             if p.is_empty() {
                 bail!("apply_patch: Delete File: path required");
             }
-            active = Some(Active::Delete { path: p.to_string() });
+            active = Some(Active::Delete {
+                path: p.to_string(),
+            });
             continue;
         }
         if let Some(rest) = header.strip_prefix("Update File:") {
@@ -198,7 +231,11 @@ fn find_hunk(body: &[String], h: &Hunk, path: &str, idx: usize) -> Result<(usize
         );
     }
     for off in 0..=body.len() - old.len() {
-        if old.iter().zip(&body[off..off + old.len()]).all(|(a, b)| *a == b) {
+        if old
+            .iter()
+            .zip(&body[off..off + old.len()])
+            .all(|(a, b)| *a == b)
+        {
             return Ok((off, false));
         }
     }
@@ -216,14 +253,14 @@ fn find_hunk(body: &[String], h: &Hunk, path: &str, idx: usize) -> Result<(usize
     )
 }
 
-/// returns (display, write target, patched content)
-fn apply_update(
+/// returns (display, write target, patched content) — pure: the raw file
+/// content comes in, callers decide where it is read from (host fs or VM)
+fn update_content(
+    raw: &str,
     path: &str,
     move_to: &Option<String>,
     hunks: &[Hunk],
 ) -> Result<(String, String, String)> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| anyhow!("apply_patch: Update File: {path}: {e}"))?;
     let crlf = raw.contains("\r\n");
     let had_nl = raw.ends_with('\n');
     let mut body: Vec<String> = raw
@@ -269,7 +306,11 @@ fn apply_update(
         Some(to) => format!("{path} -> {to}"),
         None => path.to_string(),
     };
-    Ok((display, move_to.clone().unwrap_or_else(|| path.to_string()), content))
+    Ok((
+        display,
+        move_to.clone().unwrap_or_else(|| path.to_string()),
+        content,
+    ))
 }
 
 pub struct Planned {
@@ -281,6 +322,21 @@ pub struct Planned {
 /// Validate ops against the filesystem and compute patched contents without
 /// writing anything; commit() applies the plan.
 pub fn plan(ops: Vec<Op>) -> Result<Planned> {
+    plan_with(
+        ops,
+        &|p| std::fs::read_to_string(p).map_err(|e| anyhow!("apply_patch: {p}: {e}")),
+        &|p| Ok(std::path::Path::new(p).exists()),
+    )
+}
+
+/// same as plan(), but reads file contents and existence through the given
+/// closures — the sandbox guest tools use this to validate and patch VM
+/// files over ssh instead of host paths
+pub fn plan_with(
+    ops: Vec<Op>,
+    read: &dyn Fn(&str) -> Result<String>,
+    exists: &dyn Fn(&str) -> Result<bool>,
+) -> Result<Planned> {
     let mut write: Vec<(String, String)> = Vec::new();
     let mut delete: Vec<String> = Vec::new();
     let mut items: Vec<(char, String)> = Vec::new();
@@ -298,21 +354,27 @@ pub fn plan(ops: Vec<Op>) -> Result<Planned> {
         }
         match op {
             Op::Add { path, content } => {
-                if std::path::Path::new(&path).exists() {
+                if exists(&path)? {
                     bail!("apply_patch: Add File: {path}: already exists");
                 }
                 write.push((path.clone(), content));
                 items.push(('A', path));
             }
             Op::Delete { path } => {
-                if !std::path::Path::new(&path).exists() {
+                if !exists(&path)? {
                     bail!("apply_patch: Delete File: {path}: not found");
                 }
                 delete.push(path.clone());
                 items.push(('D', path));
             }
-            Op::Update { path, move_to, hunks } => {
-                let (display, target, content) = apply_update(&path, &move_to, &hunks)?;
+            Op::Update {
+                path,
+                move_to,
+                hunks,
+            } => {
+                let raw = read(&path)
+                    .map_err(|e| anyhow!("apply_patch: Update File: {path}: {:#}", e))?;
+                let (display, target, content) = update_content(&raw, &path, &move_to, &hunks)?;
                 write.push((target, content));
                 if let Some(from) = (&move_to).as_deref().filter(|t| *t != path) {
                     delete.push(path.clone());
@@ -322,7 +384,11 @@ pub fn plan(ops: Vec<Op>) -> Result<Planned> {
             }
         }
     }
-    Ok(Planned { write, delete, items })
+    Ok(Planned {
+        write,
+        delete,
+        items,
+    })
 }
 
 /// applies the plan and returns the written file paths (moves target the new path)
@@ -331,8 +397,7 @@ pub fn commit(p: Planned) -> Result<Vec<String>> {
         let fp = std::path::Path::new(path);
         if let Some(parent) = fp.parent() {
             if !parent.as_os_str().is_empty() {
-                std::fs::create_dir_all(parent)
-                    .map_err(|e| anyhow!("apply_patch: {path}: {e}"))?;
+                std::fs::create_dir_all(parent).map_err(|e| anyhow!("apply_patch: {path}: {e}"))?;
             }
         }
         std::fs::write(fp, content).map_err(|e| anyhow!("apply_patch: {path}: {e}"))?;
@@ -402,7 +467,11 @@ pub fn preview(text: &str) -> Vec<Preview> {
                 .ok()
                 .and_then(|p| p.write.into_iter().next().map(|(_, c)| c));
                 if new.is_some() {
-                    out.push(Preview { label: path, old, new });
+                    out.push(Preview {
+                        label: path,
+                        old,
+                        new,
+                    });
                 }
             }
         }
@@ -459,6 +528,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d.join("f.txt").display().to_string()
+    }
+
+    #[test]
+    fn plan_with_closures_behave_like_plan() {
+        // the guest apply_patch path plans against closures instead of the
+        // host fs — semantics must be identical
+        let mut files = std::collections::BTreeMap::new();
+        files.insert("a.txt".to_string(), "one\ntwo\n".to_string());
+        let read = |p: &str| -> Result<String> {
+            files.get(p).cloned().ok_or_else(|| anyhow!("missing {p}"))
+        };
+        let exists = |p: &str| -> Result<bool> { Ok(files.contains_key(p)) };
+
+        // deleting a missing file must fail before anything is planned
+        let patch = "*** Begin Patch\n*** Add File: b.txt\n+hello\n*** Delete File: nope.txt\n*** End Patch";
+        assert!(plan_with(parse(patch).unwrap(), &read, &exists).is_err());
+
+        // add + update go through
+        let patch =
+            "*** Begin Patch\n*** Add File: b.txt\n+hello\n*** Update File: a.txt\n@@\n one\n-two\n+TWO\n*** End Patch";
+        let planned = plan_with(parse(patch).unwrap(), &read, &exists).unwrap();
+        assert_eq!(
+            planned.write,
+            vec![
+                ("b.txt".to_string(), "hello\n".to_string()),
+                ("a.txt".to_string(), "one\nTWO\n".to_string()),
+            ]
+        );
+        assert_eq!(planned.delete, Vec::<String>::new());
+        assert!(planned.items.contains(&('A', "b.txt".to_string())));
+        assert!(planned.items.contains(&('M', "a.txt".to_string())));
+
+        // moving a file writes the new path and deletes the old one
+        files.insert("m.txt".to_string(), "x\n".to_string());
+        let read2 = |p: &str| -> Result<String> {
+            files.get(p).cloned().ok_or_else(|| anyhow!("missing {p}"))
+        };
+        let exists2 = |p: &str| -> Result<bool> { Ok(files.contains_key(p)) };
+        let patch =
+            "*** Begin Patch\n*** Update File: m.txt\n*** Move to: n.txt\n@@\n-x\n+y\n*** End Patch";
+        let planned = plan_with(parse(patch).unwrap(), &read2, &exists2).unwrap();
+        assert_eq!(
+            planned.write,
+            vec![("n.txt".to_string(), "y\n".to_string())]
+        );
+        assert_eq!(planned.delete, vec!["m.txt".to_string()]);
     }
 
     #[test]

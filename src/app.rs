@@ -196,7 +196,7 @@ impl App {
     /// create and the bash route attach/detach (GUI parity lives in the
     /// sandbox tab of the window)
     fn sandbox_command(&mut self, arg: &str) {
-        const USAGE: &str = "usage: /sandbox [list] · /sandbox start|stop|attach|detach <id|name> · /sandbox new <name> [debian|debian-std|ubuntu|ubuntu-std|custom=<path>] [ram=2048] [cpus=2] [disk=20] [login=x] [root=on|off]";
+        const USAGE: &str = "usage: /sandbox [list] · /sandbox start|stop|attach|detach <id|name> · /sandbox fetch <id|name> <vm-path> [host-path] · /sandbox new <name> [debian|debian-std|ubuntu|ubuntu-std|custom=<path>] [ram=2048] [cpus=2] [disk=20] [login=x] [root=on|off]";
         let m = crate::sandbox::SandboxManager::global();
         let mut parts = arg.split_whitespace();
         let sub = parts.next().unwrap_or("");
@@ -317,6 +317,43 @@ impl App {
                     s.spec.kind.label(),
                     s.spec.id
                 ));
+            }
+            "fetch" => {
+                let mut it = parts;
+                let Some(key) = it.next() else {
+                    self.info(format!(
+                        "/sandbox fetch <id|name> <vm-path> [host-path] — {USAGE}"
+                    ));
+                    return;
+                };
+                let Some(vm_path) = it.next() else {
+                    self.info("usage: /sandbox fetch <id|name> <vm-path> [host-path]");
+                    return;
+                };
+                let host_path = it.next().map(str::to_string).unwrap_or_else(|| {
+                    let base = vm_path.rsplit('/').next().unwrap_or(vm_path);
+                    std::env::current_dir()
+                        .unwrap_or_default()
+                        .join(base)
+                        .display()
+                        .to_string()
+                });
+                let key = key.to_lowercase();
+                let Some(s) = m.list().into_iter().find(|s| {
+                    s.spec.id == key
+                        || s.spec.name == key
+                        || s.spec.id.starts_with(&key)
+                        || s.spec.name.to_lowercase().contains(&key)
+                }) else {
+                    self.info(format!(
+                        "no sandbox matches \"{key}\" — /sandbox lists them"
+                    ));
+                    return;
+                };
+                match crate::sandbox::fetch_from_vm(&s.spec.id, vm_path, &host_path) {
+                    Ok(msg) => self.info(msg),
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
             }
             "start" | "stop" => {
                 let Some(key) = parts.next() else {

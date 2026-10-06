@@ -694,9 +694,8 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
                 bail!("apply_patch: patch required");
             };
             if crate::sandbox::shell_route().is_some() {
-                bail!(
-                    "apply_patch is not available while a sandbox VM is attached — use write_file/edit (they run inside the VM) or the bash tool"
-                );
+                let patch = patch.to_string();
+                return vm_tool(move || crate::sandbox::guest_apply_patch(&patch)).await;
             }
             let ops = crate::patch::parse(patch)?;
             let planned = crate::patch::plan(ops)?;

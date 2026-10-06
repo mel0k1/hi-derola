@@ -306,8 +306,10 @@ mod tests {
 
     #[test]
     fn agent_shell_option() {
-        let cfg: Config =
-            toml::from_str(&format!("{MINIMAL}[agent]\nshell = \"/opt/homebrew/bin/fish\"\n")).unwrap();
+        let cfg: Config = toml::from_str(&format!(
+            "{MINIMAL}[agent]\nshell = \"/opt/homebrew/bin/fish\"\n"
+        ))
+        .unwrap();
         assert_eq!(cfg.agent.shell.as_deref(), Some("/opt/homebrew/bin/fish"));
         let cfg: Config = toml::from_str(MINIMAL).unwrap();
         assert_eq!(cfg.agent.shell, None);
@@ -321,8 +323,7 @@ mod tests {
         let cfg: Config = toml::from_str(MINIMAL).unwrap();
         assert_eq!(cfg.agent.mcp_timeout, None, "absent keeps the default");
         // round-trips through save/load without losing the value
-        let cfg: Config =
-            toml::from_str(&format!("{MINIMAL}[agent]\nmcp_timeout = 45\n")).unwrap();
+        let cfg: Config = toml::from_str(&format!("{MINIMAL}[agent]\nmcp_timeout = 45\n")).unwrap();
         let raw = toml::to_string_pretty(&cfg).unwrap();
         let back: Config = toml::from_str(&raw).unwrap();
         assert_eq!(back.agent.mcp_timeout, Some(45));
@@ -358,7 +359,10 @@ mod tests {
         );
         let cfg: Config = toml::from_str(&raw).unwrap();
         assert_eq!(cfg.mcp[0].sampling, Some(false));
-        assert_eq!(cfg.mcp[1].sampling, None, "absent keeps the default (enabled)");
+        assert_eq!(
+            cfg.mcp[1].sampling, None,
+            "absent keeps the default (enabled)"
+        );
     }
 
     #[test]
@@ -368,7 +372,10 @@ mod tests {
         );
         let cfg: Config = toml::from_str(&raw).unwrap();
         assert_eq!(cfg.mcp[0].elicitation, Some(false));
-        assert_eq!(cfg.mcp[1].elicitation, None, "absent keeps the default (enabled)");
+        assert_eq!(
+            cfg.mcp[1].elicitation, None,
+            "absent keeps the default (enabled)"
+        );
     }
 
     #[test]
@@ -401,7 +408,10 @@ mod tests {
         assert_eq!(cfg.mcp[0].startup_timeout, Some(10));
         assert_eq!(cfg.mcp[0].catalog_timeout, Some(45));
         assert_eq!(cfg.mcp[0].execution_timeout, Some(7200));
-        assert_eq!(cfg.mcp[1].startup_timeout, None, "absent keeps the defaults");
+        assert_eq!(
+            cfg.mcp[1].startup_timeout, None,
+            "absent keeps the defaults"
+        );
         // round-trip keeps the fields
         let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
         assert_eq!(back.mcp[0].execution_timeout, Some(7200));
@@ -431,7 +441,10 @@ mod tests {
         let cfg: Config = toml::from_str(&raw).unwrap();
         assert_eq!(cfg.mcp[0].protocol_version.as_deref(), Some("auto"));
         assert_eq!(cfg.mcp[1].protocol_version.as_deref(), Some("2025-06-18"));
-        assert_eq!(cfg.mcp[2].protocol_version, None, "absent = legacy handshake");
+        assert_eq!(
+            cfg.mcp[2].protocol_version, None,
+            "absent = legacy handshake"
+        );
         // round-trip keeps the field
         let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
         assert_eq!(back.mcp[0].protocol_version.as_deref(), Some("auto"));
@@ -556,8 +569,12 @@ impl Config {
             }
         }
         match self.provider.kind.as_str() {
-            "openai" => std::env::var("OPENAI_API_KEY").ok().filter(|k| !k.trim().is_empty()),
-            "anthropic" => std::env::var("ANTHROPIC_API_KEY").ok().filter(|k| !k.trim().is_empty()),
+            "openai" => std::env::var("OPENAI_API_KEY")
+                .ok()
+                .filter(|k| !k.trim().is_empty()),
+            "anthropic" => std::env::var("ANTHROPIC_API_KEY")
+                .ok()
+                .filter(|k| !k.trim().is_empty()),
             _ => None,
         }
     }

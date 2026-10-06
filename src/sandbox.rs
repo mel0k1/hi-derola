@@ -34,7 +34,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -1471,7 +1471,7 @@ impl SandboxManager {
             &bin,
             &target,
             command,
-            Duration::from_secs(timeout_secs.unwrap_or(15).clamp(1, 300)),
+            Duration::from_secs(timeout_secs.unwrap_or(15).clamp(1, 600)),
             &cancel,
         )
         .map_err(|e| anyhow!("{e}"))
@@ -1501,7 +1501,7 @@ impl SandboxManager {
             &target,
             command,
             Some(stdin),
-            Duration::from_secs(timeout_secs.unwrap_or(30).clamp(1, 300)),
+            Duration::from_secs(timeout_secs.unwrap_or(30).clamp(1, 600)),
             &cancel,
             |line| {
                 if line.trim().is_empty() {
@@ -1573,7 +1573,7 @@ pub fn sandbox_bash(cmd: &str, timeout_secs: Option<u64>) -> Result<String> {
     let out = SandboxManager::global().ssh_exec(
         &id,
         cmd,
-        Some(timeout_secs.unwrap_or(120).clamp(1, 300)),
+        Some(timeout_secs.unwrap_or(120).clamp(1, 600)),
     )?;
     let mut text = out.stdout;
     if !out.stderr.trim().is_empty() {
@@ -1601,13 +1601,13 @@ pub fn shell_route_addendum() -> Option<String> {
         .find(|s| s.spec.id == id)?;
     Some(format!(
         "SANDBOX MODE is active: bash AND the file tools (read_file, write_file, edit, \
-         glob, grep, list_files) execute INSIDE the sandbox VM \"{}\" ({}, linux {}) \
-         over ssh, not on the host. Use unix paths and unix commands; relative paths \
-         resolve against the VM user's home directory. Background bash and apply_patch \
-         are unavailable in the VM — run commands in the foreground and change files \
-         with write_file/edit. read_file returns text only (no image preview); the \
-         formatter, LSP and diagnostics do not apply to VM files. Everything you \
-         create stays inside the VM; the host working directory is out of reach.",
+         glob, grep, list_files, apply_patch) execute INSIDE the sandbox VM \"{}\" ({}, \
+         linux {}) over ssh, not on the host. Use unix paths and unix commands; relative \
+         paths resolve against the VM user's home directory. Image files are fetched over \
+         ssh and attached like local ones; the formatter, LSP and diagnostics do not apply \
+         to VM files. Background bash works too — it becomes a remote nohup task reported \
+         through task_status and stoppable with task_kill. Everything you create stays \
+         inside the VM; the host working directory is out of reach.",
         st.spec.name,
         st.spec.kind.label(),
         std::env::consts::ARCH
@@ -1644,13 +1644,17 @@ fn guest_rel(line: &str, dir: &str) -> String {
 
 /// fetch one file's bytes from the VM (size-capped, base64 over ssh)
 fn guest_fetch(id: &str, path: &str) -> Result<Vec<u8>> {
+    guest_fetch_cap(id, path, crate::tools::MAX_ATTACH_BYTES)
+}
+
+fn guest_fetch_cap(id: &str, path: &str, cap: u64) -> Result<Vec<u8>> {
     let m = SandboxManager::global();
     let out = m.ssh_exec(id, &format!("wc -c < {}", sq(path)), Some(30))?;
     if out.code != 0 {
         bail!("{path}: {}", one_line(&out.stderr, out.code));
     }
     let size: u64 = out.stdout.trim().parse().unwrap_or(0);
-    if size > crate::tools::MAX_ATTACH_BYTES {
+    if size > cap {
         bail!("{path}: too large ({size} bytes)");
     }
     let out = m.ssh_exec(id, &format!("base64 -w0 -- {}", sq(path)), Some(60))?;
@@ -1661,6 +1665,260 @@ fn guest_fetch(id: &str, path: &str) -> Result<Vec<u8>> {
     base64::engine::general_purpose::STANDARD
         .decode(out.stdout.trim())
         .map_err(|e| anyhow!("{path}: base64 decode failed: {e}"))
+}
+
+/// apply_patch inside the VM: plan_with validates against guest files
+/// (reads via base64, existence via `test -e`), then every write and delete
+/// goes through the guest primitives — all-or-nothing like the host tool
+pub fn guest_apply_patch(patch_text: &str) -> Result<String> {
+    let (id, _) = route_target()?;
+    let m = SandboxManager::global();
+    let read = |p: &str| -> Result<String> {
+        let bytes = guest_fetch_cap(&id, p, 32 * 1024 * 1024)?;
+        String::from_utf8(bytes).map_err(|_| anyhow!("{p}: not valid utf-8"))
+    };
+    let exists = |p: &str| -> Result<bool> {
+        Ok(m.ssh_exec(&id, &format!("test -e {}", sq(p)), Some(15))?
+            .code
+            == 0)
+    };
+    let planned = crate::patch::plan_with(crate::patch::parse(patch_text)?, &read, &exists)?;
+    let items = planned.items.clone();
+    for (path, content) in &planned.write {
+        guest_push(&id, path, content.as_bytes())?;
+    }
+    for path in &planned.delete {
+        let out = m.ssh_exec(&id, &format!("rm -f -- {}", sq(path)), Some(15))?;
+        if out.code != 0 {
+            bail!("apply_patch: {path}: {}", one_line(&out.stderr, out.code));
+        }
+    }
+    let mut out = String::from("Success. Updated the following files:");
+    for (k, p) in &items {
+        out.push_str(&format!("\n{k} {p}"));
+    }
+    Ok(out)
+}
+
+/// fetch an image from the VM for vision attach — same (mime, base64) shape
+/// as files::read_image, so the chat plumbing is identical
+pub fn guest_read_image(path: &str) -> Result<(String, String)> {
+    let (id, _) = route_target()?;
+    let m = SandboxManager::global();
+    let out = m.ssh_exec(&id, &format!("wc -c < {}", sq(path)), Some(30))?;
+    if out.code != 0 {
+        bail!("{path}: {}", one_line(&out.stderr, out.code));
+    }
+    let size: u64 = out.stdout.trim().parse().unwrap_or(0);
+    if size > crate::files::MAX_IMAGE_BYTES {
+        bail!("{path}: too large for an image ({size} bytes)");
+    }
+    let out = m.ssh_exec(&id, &format!("base64 -w0 -- {}", sq(path)), Some(60))?;
+    if out.code != 0 {
+        bail!("{path}: {}", one_line(&out.stderr, out.code));
+    }
+    let ext = std::path::Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    Ok((
+        crate::files::image_mime(&ext).to_string(),
+        out.stdout.trim().to_string(),
+    ))
+}
+
+/// copy one file out of the VM onto the host (the "get my work back" path:
+/// base64 over ssh, then a plain host write)
+pub fn fetch_from_vm(id: &str, vm_path: &str, host_path: &str) -> Result<String> {
+    let out = SandboxManager::global().ssh_exec(
+        id,
+        &format!("base64 -w0 -- {}", sq(vm_path)),
+        Some(60),
+    )?;
+    if out.code != 0 {
+        bail!("{vm_path}: {}", one_line(&out.stderr, out.code));
+    }
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(out.stdout.trim())
+        .map_err(|e| anyhow!("{vm_path}: base64 decode failed: {e}"))?;
+    let host = Path::new(host_path);
+    if let Some(p) = host.parent() {
+        if !p.as_os_str().is_empty() {
+            std::fs::create_dir_all(p)?;
+        }
+    }
+    std::fs::write(host, &bytes).map_err(|e| anyhow!("{host_path}: {e}"))?;
+    Ok(format!(
+        "fetched {vm_path} -> {host_path} ({} bytes)",
+        bytes.len()
+    ))
+}
+
+// -------------------------------------------------------- vm background bash
+//
+// `background = true` while a VM is attached starts the command as a remote
+// nohup task (setsid process group, output to a guest log file, exit code
+// captured into a sibling .code file). A host-side watcher polls the log and
+// the liveness of the pid over ssh every ~2s, streams new bytes into the bg
+// registry and reports completion through the same queue/wake plumbing as
+// local background bash, so task_status / task_kill keep working unchanged.
+
+type BgVms = HashMap<String, (String, u32, String, String)>;
+
+static BG_VMS: OnceLock<Arc<Mutex<BgVms>>> = OnceLock::new();
+
+fn bg_vms() -> &'static Arc<Mutex<BgVms>> {
+    BG_VMS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+}
+
+/// remember which guest job belongs to a bg task id (for task_kill)
+pub fn vm_bg_register(bg_id: &str, sandbox: &str, pid: u32, log: &str, code_file: &str) {
+    bg_vms().lock().unwrap().insert(
+        bg_id.to_string(),
+        (
+            sandbox.to_string(),
+            pid,
+            log.to_string(),
+            code_file.to_string(),
+        ),
+    );
+}
+
+pub fn vm_bg_unregister(bg_id: &str) {
+    bg_vms().lock().unwrap().remove(bg_id);
+}
+
+fn vm_bg_lookup(bg_id: &str) -> Option<(String, u32)> {
+    bg_vms()
+        .lock()
+        .unwrap()
+        .get(bg_id)
+        .map(|(s, p, _, _)| (s.clone(), *p))
+}
+
+/// spawn a background command inside the attached VM; returns (sandbox id,
+/// guest pid, guest log path, guest code file path)
+pub fn vm_bg_spawn(cmd: &str) -> Result<(String, u32, String, String)> {
+    let (id, name) = route_target()?;
+    let inner = format!(
+        "{}; echo $? > \"$HI_BG_CODE\"",
+        cmd.trim_end_matches(['\n', ';', ' '])
+    );
+    let remote = format!(
+        "d=\"$HOME/.hi-derola-bg\"; mkdir -p \"$d\"; l=\"$d/$(date +%s%N).log\"; \
+         c=\"$l.code\"; HI_BG_CODE=\"$c\" setsid nohup sh -c {} >\"$l\" 2>&1 & p=$!; \
+         echo \"$p\"; echo \"$l\"",
+        sq(&inner)
+    );
+    let out = SandboxManager::global().ssh_exec(&id, &remote, Some(15))?;
+    if out.code != 0 {
+        bail!("{}: {}", name, one_line(&out.stderr, out.code));
+    }
+    let (pid, log) = parse_vm_bg_spawn(&out.stdout)?;
+    Ok((id, pid, log.clone(), format!("{log}.code")))
+}
+
+/// parse `vm_bg_spawn` stdout: first line = guest pid, second = log path
+fn parse_vm_bg_spawn(stdout: &str) -> Result<(u32, String)> {
+    let mut lines = stdout.lines();
+    let pid = lines
+        .next()
+        .unwrap_or("")
+        .trim()
+        .parse::<u32>()
+        .ok()
+        .filter(|p| *p > 0)
+        .ok_or_else(|| anyhow!("could not parse the background pid"))?;
+    let log = lines.next().unwrap_or("").trim().to_string();
+    if log.is_empty() {
+        bail!("could not parse the background log path");
+    }
+    Ok((pid, log))
+}
+
+/// kill the remote process group of a VM background task (best effort)
+pub fn vm_bg_kill(sandbox: &str, pid: u32) -> Result<()> {
+    SandboxManager::global().ssh_exec(
+        sandbox,
+        &format!("kill -- -{pid} 2>/dev/null || kill {pid} 2>/dev/null; true"),
+        Some(10),
+    )?;
+    Ok(())
+}
+
+/// kill by bg task id (used by the bg registry kill hook)
+pub fn vm_bg_kill_by_id(bg_id: &str) -> String {
+    match vm_bg_lookup(bg_id) {
+        Some((sandbox, pid)) => match vm_bg_kill(&sandbox, pid) {
+            Ok(()) => format!("task {bg_id} killed (remote process group)"),
+            Err(e) => format!("task {bg_id}: remote kill failed: {e:#}"),
+        },
+        None => format!("task {bg_id} has no remote process to kill"),
+    }
+}
+
+/// one watcher poll: how many bytes the log has now, the new bytes, and
+/// whether the remote process is still alive (with its exit code when gone)
+pub struct VmBgPoll {
+    pub size: u64,
+    pub chunk: String,
+    pub alive: bool,
+    pub code: Option<i32>,
+}
+
+pub fn vm_bg_poll(
+    sandbox: &str,
+    pid: u32,
+    log: &str,
+    code_file: &str,
+    offset: u64,
+) -> Result<VmBgPoll> {
+    let m = SandboxManager::global();
+    let remote = format!(
+        "s=$(wc -c < {} 2>/dev/null || echo 0); echo \"$s\"; \
+         [ \"$s\" -gt {} ] && tail -c +{} {} 2>/dev/null; true",
+        sq(log),
+        offset,
+        offset + 1,
+        sq(log)
+    );
+    let out = m.ssh_exec(sandbox, &remote, Some(15))?;
+    if out.code != 0 && out.stdout.trim().is_empty() {
+        bail!("log read failed: {}", one_line(&out.stderr, out.code));
+    }
+    let (size_line, chunk) = match out.stdout.split_once('\n') {
+        Some((a, b)) => (a, b.to_string()),
+        None => (out.stdout.trim(), String::new()),
+    };
+    let size: u64 = size_line.trim().parse().unwrap_or(0);
+    let remote2 = format!(
+        "if kill -0 {pid} 2>/dev/null; then echo RUNNING; else echo DONE; \
+         cat {} 2>/dev/null || echo 0; fi",
+        sq(code_file)
+    );
+    let out2 = m.ssh_exec(sandbox, &remote2, Some(10))?;
+    let (alive, code) = parse_vm_bg_alive(&out2.stdout);
+    Ok(VmBgPoll {
+        size,
+        chunk,
+        alive,
+        code,
+    })
+}
+
+/// parse the liveness probe output: "RUNNING" while alive, else
+/// "DONE" followed by the captured exit code line
+fn parse_vm_bg_alive(stdout: &str) -> (bool, Option<i32>) {
+    if stdout.contains("RUNNING") {
+        return (true, None);
+    }
+    let code = stdout
+        .lines()
+        .skip(1)
+        .find_map(|l| l.trim().parse::<i32>().ok());
+    (false, code)
 }
 
 /// push bytes into a VM file (parent dirs created), `cat >` over ssh stdin
@@ -2027,6 +2285,32 @@ mod tests {
         assert_eq!(one_line("  \n", 1), "command failed (exit 1)");
         let err = "bash: line 1: /tmp: Is a directory\nbash: error: x";
         assert_eq!(one_line(err, 1), "bash: error: x");
+    }
+
+    #[test]
+    fn vm_bg_spawn_output_parse() {
+        let (pid, log) = parse_vm_bg_spawn("12345\n/root/.hi-derola-bg/x.log\n").unwrap();
+        assert_eq!(pid, 12345);
+        assert_eq!(log, "/root/.hi-derola-bg/x.log");
+        // whitespace tolerant
+        let (pid, log) = parse_vm_bg_spawn(" 42 \n /tmp/l.log \n").unwrap();
+        assert_eq!(pid, 42);
+        assert_eq!(log, "/tmp/l.log");
+        // garbage is a clean error, not a bogus task
+        assert!(parse_vm_bg_spawn("").is_err());
+        assert!(parse_vm_bg_spawn("abc\n/x.log\n").is_err());
+        assert!(parse_vm_bg_spawn("0\n/x.log\n").is_err());
+        assert!(parse_vm_bg_spawn("7\n").is_err());
+    }
+
+    #[test]
+    fn vm_bg_alive_output_parse() {
+        assert_eq!(parse_vm_bg_alive("RUNNING\n"), (true, None));
+        assert_eq!(parse_vm_bg_alive("DONE\n0\n"), (false, Some(0)));
+        assert_eq!(parse_vm_bg_alive("DONE\n127\n"), (false, Some(127)));
+        // no code file -> the `|| echo 0` fallback already ran; a bare DONE
+        // yields no code (treated as -1 by the caller)
+        assert_eq!(parse_vm_bg_alive("DONE\n"), (false, None));
     }
 
     #[test]

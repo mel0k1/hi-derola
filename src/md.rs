@@ -67,7 +67,10 @@ pub fn render(src: &str) -> Vec<Line<'static>> {
                         *c += 1;
                     }
                     let indent = "  ".repeat(lists.len().saturating_sub(1));
-                    cur.push(Span::styled(format!("{indent}{marker}"), Style::new().fg(ACCENT)));
+                    cur.push(Span::styled(
+                        format!("{indent}{marker}"),
+                        Style::new().fg(ACCENT),
+                    ));
                 }
                 Tag::Strong => style = style.add_modifier(Modifier::BOLD),
                 Tag::Emphasis => style = style.add_modifier(Modifier::ITALIC),
@@ -120,7 +123,10 @@ pub fn render(src: &str) -> Vec<Line<'static>> {
             Event::SoftBreak | Event::HardBreak => flush(&mut out, &mut cur, quote),
             Event::Rule => {
                 flush(&mut out, &mut cur, quote);
-                out.push(Line::from(Span::styled("────────────", Style::new().fg(DIM))));
+                out.push(Line::from(Span::styled(
+                    "────────────",
+                    Style::new().fg(DIM),
+                )));
             }
             Event::TaskListMarker(done) => {
                 cur.push(Span::styled(

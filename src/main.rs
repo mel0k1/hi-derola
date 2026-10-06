@@ -18,7 +18,9 @@ fn main() -> Result<()> {
         || std::env::var_os("DISPLAY").is_some()
         || std::env::var_os("WAYLAND_DISPLAY").is_some();
     if has_display && !tui {
-        eprintln!("desktop gui lives in hi-derola-gui: cargo run -p hi-derola-gui (starting tui now)");
+        eprintln!(
+            "desktop gui lives in hi-derola-gui: cargo run -p hi-derola-gui (starting tui now)"
+        );
     }
     runtime.block_on(async move {
         let mut terminal = ratatui::init();

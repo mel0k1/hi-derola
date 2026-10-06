@@ -24,7 +24,11 @@ async fn main() {
 
     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 
-    std::fs::write(&p, "fn main() {\n    let _x: i32 = \"oops\";\n    let _y: f64 = 1;\n}\n").unwrap();
+    std::fs::write(
+        &p,
+        "fn main() {\n    let _x: i32 = \"oops\";\n    let _y: f64 = 1;\n}\n",
+    )
+    .unwrap();
     let t1 = std::time::Instant::now();
     match lsp::diagnose(&path).await {
         Some(out) => println!("OK call 2 ({:.1}s):\n{out}", t1.elapsed().as_secs_f32()),

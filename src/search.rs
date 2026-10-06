@@ -80,7 +80,10 @@ fn match_segments(p: &[&str], f: &[&str]) -> bool {
 }
 
 fn match_one(pat: &str, name: &str) -> bool {
-    match_chars(&pat.chars().collect::<Vec<_>>(), &name.chars().collect::<Vec<_>>())
+    match_chars(
+        &pat.chars().collect::<Vec<_>>(),
+        &name.chars().collect::<Vec<_>>(),
+    )
 }
 
 fn match_chars(p: &[char], n: &[char]) -> bool {
@@ -167,11 +170,16 @@ pub fn grep(root: &str, pattern: &str, include: Option<&str>) -> Result<Vec<Grep
             let name = f.rsplit('/').next().unwrap_or(f);
             let rel = f.strip_prefix(root).unwrap_or(f);
             let rel = rel.trim_start_matches('/');
-            if !pats.iter().any(|p| glob_match(p, name) || glob_match(p, rel)) {
+            if !pats
+                .iter()
+                .any(|p| glob_match(p, name) || glob_match(p, rel))
+            {
                 continue;
             }
         }
-        let Ok(bytes) = std::fs::read(f) else { continue };
+        let Ok(bytes) = std::fs::read(f) else {
+            continue;
+        };
         if bytes.len() > 1_000_000 || bytes.contains(&0) {
             continue;
         }

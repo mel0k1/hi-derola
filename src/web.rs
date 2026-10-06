@@ -125,14 +125,12 @@ pub struct SearchHit {
 }
 
 pub fn parse_results(html: &str, max: usize) -> Vec<SearchHit> {
-    let link_re = regex::Regex::new(
-        r#"<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>"#,
-    )
-    .unwrap();
-    let link_re2 = regex::Regex::new(
-        r#"<a[^>]*href="([^"]+)"[^>]*class="result__a"[^>]*>([\s\S]*?)</a>"#,
-    )
-    .unwrap();
+    let link_re =
+        regex::Regex::new(r#"<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)</a>"#)
+            .unwrap();
+    let link_re2 =
+        regex::Regex::new(r#"<a[^>]*href="([^"]+)"[^>]*class="result__a"[^>]*>([\s\S]*?)</a>"#)
+            .unwrap();
     let snippet_re =
         regex::Regex::new(r#"<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)</a>"#).unwrap();
 
@@ -338,9 +336,32 @@ fn mark(md: &mut Md, s: &str) {
     }
 }
 const BLOCK: &[&str] = &[
-    "p", "div", "section", "article", "header", "footer", "main", "nav", "aside", "figure",
-    "figcaption", "form", "table", "thead", "tbody", "ul", "ol", "dl", "blockquote", "h1", "h2",
-    "h3", "h4", "h5", "h6", "tr",
+    "p",
+    "div",
+    "section",
+    "article",
+    "header",
+    "footer",
+    "main",
+    "nav",
+    "aside",
+    "figure",
+    "figcaption",
+    "form",
+    "table",
+    "thead",
+    "tbody",
+    "ul",
+    "ol",
+    "dl",
+    "blockquote",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "tr",
 ];
 
 fn tag_name(raw: &str) -> String {
@@ -387,7 +408,9 @@ pub fn html_to_md(html: &str) -> String {
             i = next;
             continue;
         }
-        let Some(end) = html[i..].find('>') else { break };
+        let Some(end) = html[i..].find('>') else {
+            break;
+        };
         let raw = &html[i + 1..i + end];
         i += end + 1;
         let closing = raw.starts_with('/');
@@ -541,7 +564,10 @@ mod tests {
     fn url_tools() {
         assert_eq!(urlencode("a b&c"), "a%20b%26c");
         assert_eq!(urldecode("a%20b+c%26d"), "a b c&d");
-        assert_eq!(resolve_ddg_href("//x/l/?uddg=https%3A//a.io&rut=1"), "https://a.io");
+        assert_eq!(
+            resolve_ddg_href("//x/l/?uddg=https%3A//a.io&rut=1"),
+            "https://a.io"
+        );
     }
 
     #[test]
@@ -571,7 +597,8 @@ mod tests {
 
     #[test]
     fn nested_links_and_entities() {
-        let md = html_to_md("<p><a href='/a'><b>bold</b> link</a></p><p>x &#65; &copy; &mdash;</p>");
+        let md =
+            html_to_md("<p><a href='/a'><b>bold</b> link</a></p><p>x &#65; &copy; &mdash;</p>");
         assert!(md.contains("[**bold** link](/a)"), "{md}");
         assert!(md.contains("x A \u{a9} \u{2014}"), "{md}");
     }
@@ -585,7 +612,9 @@ mod tests {
 
     #[test]
     fn url_check() {
-        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
         rt.block_on(async {
             assert!(fetch("ftp://x", 5).await.is_err());
             assert!(fetch("example.com", 5).await.is_err());

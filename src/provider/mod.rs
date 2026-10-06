@@ -26,16 +26,39 @@ pub struct Reply {
 pub enum ApiEvent {
     Chunk(String),
     Reasoning(String),
-    Usage { input: u64, output: u64, cached: u64 },
+    Usage {
+        input: u64,
+        output: u64,
+        cached: u64,
+    },
     Note(String),
-    Tool { name: String, detail: String, diff: Vec<crate::diff::Row>, paths: Vec<String> },
-    Confirm { name: String, args: String, rx: tokio::sync::oneshot::Sender<ConfirmReply> },
-    Ask { name: String, args: String, rx: tokio::sync::oneshot::Sender<String> },
+    Tool {
+        name: String,
+        detail: String,
+        diff: Vec<crate::diff::Row>,
+        paths: Vec<String>,
+    },
+    Confirm {
+        name: String,
+        args: String,
+        rx: tokio::sync::oneshot::Sender<ConfirmReply>,
+    },
+    Ask {
+        name: String,
+        args: String,
+        rx: tokio::sync::oneshot::Sender<String>,
+    },
     Todo(String),
     /// plan mode flipped at runtime (plan_exit approval): true = on, false = off
     Plan(bool),
-    BgOut { id: String, chunk: String },
-    Done { text: String, messages: Vec<Message> },
+    BgOut {
+        id: String,
+        chunk: String,
+    },
+    Done {
+        text: String,
+        messages: Vec<Message>,
+    },
     Failed(String),
     Wake,
     /// submit text as a user message and start a run (e.g. an mcp prompt)
@@ -135,11 +158,7 @@ pub async fn list_models(kind: &str, base_url: Option<&str>, api_key: &str) -> R
 }
 
 pub fn truncate(s: &str) -> String {
-    let end = s
-        .char_indices()
-        .nth(300)
-        .map(|(i, _)| i)
-        .unwrap_or(s.len());
+    let end = s.char_indices().nth(300).map(|(i, _)| i).unwrap_or(s.len());
     let mut out = s[..end].to_string();
     out.push('\n');
     out
@@ -200,7 +219,9 @@ pub async fn send(
         let outcome = req.send().await;
         match outcome {
             Ok(resp) if resp.status().is_success() => return Ok(resp),
-            Ok(resp) if attempt < RETRY_MAX_ATTEMPTS && retryable_status(resp.status().as_u16()) => {
+            Ok(resp)
+                if attempt < RETRY_MAX_ATTEMPTS && retryable_status(resp.status().as_u16()) =>
+            {
                 let status = resp.status();
                 let wait = retry_after_ms(resp.headers()).unwrap_or_else(|| backoff_ms(attempt));
                 let _ = tx.send(ApiEvent::Note(format!(

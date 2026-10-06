@@ -122,8 +122,8 @@ pub fn build_seed_image(path: &Path, user_data: &str, meta_data: &str) -> Result
     .map_err(|e| anyhow!("format seed volume: {e}"))?;
     let fs_opts = FsOptions::new();
     {
-        let fs = fatfs::FileSystem::new(file, fs_opts)
-            .map_err(|e| anyhow!("open seed volume: {e}"))?;
+        let fs =
+            fatfs::FileSystem::new(file, fs_opts).map_err(|e| anyhow!("open seed volume: {e}"))?;
         let root = fs.root_dir();
         let mut ud = root
             .create_file("user-data")
@@ -193,11 +193,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn temp_dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "hiderola-seed-{}-{}",
-            tag,
-            std::process::id()
-        ));
+        let d = std::env::temp_dir().join(format!("hiderola-seed-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -244,8 +240,12 @@ mod tests {
     #[test]
     fn keypair_roundtrip() {
         let kp = generate_keypair("hiderola-t").unwrap();
-        assert!(kp.private_pem.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
-        assert!(kp.private_pem.ends_with("-----END OPENSSH PRIVATE KEY-----\n"));
+        assert!(kp
+            .private_pem
+            .starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
+        assert!(kp
+            .private_pem
+            .ends_with("-----END OPENSSH PRIVATE KEY-----\n"));
         let pubk = ssh_key::PublicKey::from_openssh(&kp.authorized_key).unwrap();
         assert_eq!(pubk.algorithm(), ssh_key::Algorithm::Ed25519);
         assert_eq!(pubk.comment(), "hiderola-t");
@@ -266,11 +266,8 @@ mod tests {
         let fs = fatfs::FileSystem::new(file, FsOptions::new()).unwrap();
         let read = |name: &str| {
             let mut s = String::new();
-            std::io::Read::read_to_string(
-                &mut fs.root_dir().open_file(name).unwrap(),
-                &mut s,
-            )
-            .unwrap();
+            std::io::Read::read_to_string(&mut fs.root_dir().open_file(name).unwrap(), &mut s)
+                .unwrap();
             s
         };
         assert_eq!(read("user-data"), "USERDATA-CONTENT");

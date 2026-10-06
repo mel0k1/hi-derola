@@ -65,9 +65,21 @@ pub fn parse(list: &Value) -> Result<Vec<Todo>> {
     let mut out = Vec::new();
     for t in arr {
         let content = t["content"].as_str().unwrap_or("").trim().to_string();
-        let status = t["status"].as_str().unwrap_or("pending").trim().to_lowercase();
-        let priority = t["priority"].as_str().unwrap_or("medium").trim().to_lowercase();
-        out.push(Todo { content, status, priority });
+        let status = t["status"]
+            .as_str()
+            .unwrap_or("pending")
+            .trim()
+            .to_lowercase();
+        let priority = t["priority"]
+            .as_str()
+            .unwrap_or("medium")
+            .trim()
+            .to_lowercase();
+        out.push(Todo {
+            content,
+            status,
+            priority,
+        });
     }
     Ok(out)
 }
@@ -120,7 +132,11 @@ mod tests {
     use super::*;
 
     fn t(content: &str, status: &str, priority: &str) -> Todo {
-        Todo { content: content.into(), status: status.into(), priority: priority.into() }
+        Todo {
+            content: content.into(),
+            status: status.into(),
+            priority: priority.into(),
+        }
     }
 
     #[test]
@@ -165,7 +181,11 @@ mod tests {
 
     #[test]
     fn write_updates_state() {
-        let out = write(vec![t("probe a", "in_progress", "high"), t("probe b", "pending", "low")]).unwrap();
+        let out = write(vec![
+            t("probe a", "in_progress", "high"),
+            t("probe b", "pending", "low"),
+        ])
+        .unwrap();
         assert!(out.contains("[~] probe a"));
         let r = read_render();
         assert!(r.contains("probe b"));

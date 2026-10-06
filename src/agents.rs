@@ -144,7 +144,10 @@ fn split_frontmatter(text: &str) -> (Front, String) {
             read_only = v.trim().eq_ignore_ascii_case("true");
         }
     }
-    ((description, model, temperature, read_only), body.trim().to_string())
+    (
+        (description, model, temperature, read_only),
+        body.trim().to_string(),
+    )
 }
 
 #[cfg(test)]

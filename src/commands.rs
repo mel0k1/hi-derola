@@ -17,7 +17,14 @@ pub fn init_prompt(cwd: &str) -> String {
 
 /// Render a session as markdown for /export.
 pub fn export_markdown(title: &str, msgs: &[Message]) -> String {
-    let mut out = format!("# {}\n", if title.trim().is_empty() { "hi-derola session" } else { title });
+    let mut out = format!(
+        "# {}\n",
+        if title.trim().is_empty() {
+            "hi-derola session"
+        } else {
+            title
+        }
+    );
     for m in msgs {
         match m.role {
             Role::User => out.push_str(&format!("\n## user\n\n{}\n", m.content.trim())),
@@ -27,7 +34,14 @@ pub fn export_markdown(title: &str, msgs: &[Message]) -> String {
                     out.push_str(&format!("\n## assistant\n\n{body}\n"));
                 }
                 for c in &m.tool_calls {
-                    let args: String = c.args.lines().next().unwrap_or("").chars().take(80).collect();
+                    let args: String = c
+                        .args
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(80)
+                        .collect();
                     out.push_str(&format!("\n*tool call: `{}` — {}*\n", c.name, args));
                 }
             }

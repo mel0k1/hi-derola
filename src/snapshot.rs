@@ -109,7 +109,10 @@ fn ensure_git_repo(root: &Path) -> Result<()> {
         .arg(&dir)
         .output()?;
     if !out.status.success() {
-        bail!("git init failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+        bail!(
+            "git init failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
     }
     // self-contained identity: commits must work without a global git config
     let excludes = dir.join("excludes");

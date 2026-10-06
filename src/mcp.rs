@@ -254,7 +254,10 @@ fn render_resource_contents(res: &Value) -> String {
             if !out.is_empty() {
                 out.push_str("\n\n");
             }
-            out.push_str(&format!("[binary resource {uri}, ~{} bytes]", b.len() * 3 / 4));
+            out.push_str(&format!(
+                "[binary resource {uri}, ~{} bytes]",
+                b.len() * 3 / 4
+            ));
         }
     }
     if out.is_empty() {
@@ -358,7 +361,9 @@ pub struct McpHooks {
 impl McpHooks {
     /// expose one workspace dir (defaults to cwd) as a root
     pub fn workspace(dir: Option<std::path::PathBuf>) -> Self {
-        let dir = dir.or_else(|| std::env::current_dir().ok()).unwrap_or_default();
+        let dir = dir
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_default();
         let s = dir.display().to_string();
         Self {
             roots: Arc::new(RwLock::new(if s.is_empty() { Vec::new() } else { vec![s] })),
@@ -384,10 +389,7 @@ impl McpHooks {
 
     /// current chat session id for _meta passthrough (empty = not stamped)
     pub fn session_id(&self) -> String {
-        self.session
-            .read()
-            .map(|g| g.clone())
-            .unwrap_or_default()
+        self.session.read().map(|g| g.clone()).unwrap_or_default()
     }
 
     pub fn with_sampler(mut self, sampler: Sampler) -> Self {
@@ -491,17 +493,19 @@ fn enum_pick(choices: &[Value], names: Option<&Vec<Value>>, val: &Value) -> Opti
             return Some(choices[n - 1].clone());
         }
     }
-    if let Some(i) = choices
-        .iter()
-        .position(|v| v.as_str().map(|vs| vs.eq_ignore_ascii_case(&t)).unwrap_or(false))
-    {
+    if let Some(i) = choices.iter().position(|v| {
+        v.as_str()
+            .map(|vs| vs.eq_ignore_ascii_case(&t))
+            .unwrap_or(false)
+    }) {
         return Some(choices[i].clone());
     }
     if let Some(names) = names {
-        if let Some(i) = names
-            .iter()
-            .position(|v| v.as_str().map(|vs| vs.eq_ignore_ascii_case(&t)).unwrap_or(false))
-        {
+        if let Some(i) = names.iter().position(|v| {
+            v.as_str()
+                .map(|vs| vs.eq_ignore_ascii_case(&t))
+                .unwrap_or(false)
+        }) {
             if i < choices.len() {
                 return Some(choices[i].clone());
             }
@@ -525,11 +529,17 @@ fn coerce_prop(def: &Value, val: &Value) -> Value {
             None => val.clone(),
         },
         "integer" => match &s {
-            Some(t) => t.parse::<i64>().map(|n| json!(n)).unwrap_or_else(|_| val.clone()),
+            Some(t) => t
+                .parse::<i64>()
+                .map(|n| json!(n))
+                .unwrap_or_else(|_| val.clone()),
             None => val.clone(),
         },
         "number" => match &s {
-            Some(t) => t.parse::<f64>().map(|n| json!(n)).unwrap_or_else(|_| val.clone()),
+            Some(t) => t
+                .parse::<f64>()
+                .map(|n| json!(n))
+                .unwrap_or_else(|_| val.clone()),
             None => val.clone(),
         },
         "array" => {
@@ -556,8 +566,7 @@ fn coerce_prop(def: &Value, val: &Value) -> Value {
         }
         _ => match def["enum"].as_array() {
             Some(vals) if !vals.is_empty() => {
-                enum_pick(vals, def["enumNames"].as_array(), val)
-                    .unwrap_or_else(|| val.clone())
+                enum_pick(vals, def["enumNames"].as_array(), val).unwrap_or_else(|| val.clone())
             }
             _ => val.clone(),
         },
@@ -633,10 +642,7 @@ fn elicit_question(message: &str, schema: &Value) -> (String, Vec<Value>, bool) 
                 if let Some(f) = def["format"].as_str() {
                     h.push_str(&format!(" format {f}"));
                 }
-                match (
-                    def["minLength"].as_u64(),
-                    def["maxLength"].as_u64(),
-                ) {
+                match (def["minLength"].as_u64(), def["maxLength"].as_u64()) {
                     (Some(a), Some(b)) => h.push_str(&format!(" length {a}-{b}")),
                     (Some(a), None) => h.push_str(&format!(" min length {a}")),
                     (None, Some(b)) => h.push_str(&format!(" max length {b}")),
@@ -661,8 +667,7 @@ fn elicit_question(message: &str, schema: &Value) -> (String, Vec<Value>, bool) 
                 }
             }
             if let Some(vals) = def["items"]["enum"].as_array() {
-                let labels =
-                    enum_option_labels(vals, def["items"]["enumNames"].as_array());
+                let labels = enum_option_labels(vals, def["items"]["enumNames"].as_array());
                 h.push_str(&format!(" pick multiple of: {}", labels.join(" | ")));
                 if prop_count == 1 {
                     multiple = true;
@@ -789,7 +794,11 @@ fn open_in_browser(url: String) {
             c
         }
     };
-    let Ok(child) = cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn() else {
+    let Ok(child) = cmd
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
         return;
     };
     // reap so the launcher process does not linger as a zombie
@@ -805,7 +814,11 @@ fn open_in_browser(url: String) {
 /// as notifications/elicitation/complete); untrusted urls decline
 async fn url_mode_elicitation(shared: &Arc<Shared>, params: &Value) -> Value {
     let url = params["url"].as_str().unwrap_or("").trim().to_string();
-    let id = params["elicitationId"].as_str().unwrap_or("").trim().to_string();
+    let id = params["elicitationId"]
+        .as_str()
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let message = params["message"].as_str().unwrap_or("").trim().to_string();
     if id.is_empty() || url.is_empty() || !url_mode_origin_ok(shared.origin.as_deref(), &url) {
         push_log_entry(
@@ -891,7 +904,11 @@ fn with_proto(
     req: reqwest::RequestBuilder,
     proto: &std::sync::Mutex<Option<String>>,
 ) -> reqwest::RequestBuilder {
-    match proto.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone() {
+    match proto
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+    {
         Some(v) => req.header("MCP-Protocol-Version", v),
         None => req,
     }
@@ -1101,7 +1118,10 @@ pub fn instructions_block(pairs: &[(String, String)]) -> String {
     }
     let mut out = String::from("<mcp_instructions>");
     for (name, text) in pairs {
-        out.push_str(&format!("\n<server name=\"{name}\">\n{}\n</server>", text.trim()));
+        out.push_str(&format!(
+            "\n<server name=\"{name}\">\n{}\n</server>",
+            text.trim()
+        ));
     }
     out.push_str("\n</mcp_instructions>");
     out
@@ -1230,11 +1250,7 @@ impl Drop for McpServer {
 
 fn extract_result(v: Value, name: &str) -> Result<Value> {
     if let Some(e) = v.get("error") {
-        bail!(
-            "mcp {}: {}",
-            name,
-            e["message"].as_str().unwrap_or("error")
-        );
+        bail!("mcp {}: {}", name, e["message"].as_str().unwrap_or("error"));
     }
     Ok(v["result"].clone())
 }
@@ -1249,8 +1265,13 @@ async fn dispatch_incoming(shared: &Arc<Shared>, pending: &Pending, v: Value) {
     let id = v.get("id").cloned();
     match (method, id) {
         (Some(method), Some(id)) => {
-            handle_server_request(shared, id, &method, v.get("params").cloned().unwrap_or(json!({})))
-                .await;
+            handle_server_request(
+                shared,
+                id,
+                &method,
+                v.get("params").cloned().unwrap_or(json!({})),
+            )
+            .await;
         }
         (Some(method), None) => {
             let params = v.get("params").cloned().unwrap_or(json!({}));
@@ -1454,7 +1475,8 @@ async fn handle_server_request(shared: &Arc<Shared>, id: Value, method: &str, pa
                                 arr.iter()
                                     .filter_map(|m| {
                                         let role = m["role"].as_str()?.to_string();
-                                        let text = if m["content"]["type"].as_str() == Some("text") {
+                                        let text = if m["content"]["type"].as_str() == Some("text")
+                                        {
                                             m["content"]["text"].as_str()?.to_string()
                                         } else {
                                             String::new()
@@ -1478,7 +1500,8 @@ async fn handle_server_request(shared: &Arc<Shared>, id: Value, method: &str, pa
                                 max_tokens: params["maxTokens"]
                                     .as_u64()
                                     .unwrap_or(512)
-                                    .clamp(1, MAX_SAMPLING_TOKENS as u64) as u32,
+                                    .clamp(1, MAX_SAMPLING_TOKENS as u64)
+                                    as u32,
                             };
                             match tokio::time::timeout(exec_to(&shared), sampler(req)).await {
                                 Ok(Ok(out)) => Ok(json!({
@@ -1824,7 +1847,12 @@ async fn connect_remote(
     hooks: &McpHooks,
     sampling: bool,
     elicitation: bool,
-) -> Result<(Arc<Shared>, Pending, Value, Vec<tokio::task::JoinHandle<()>>)> {
+) -> Result<(
+    Arc<Shared>,
+    Pending,
+    Value,
+    Vec<tokio::task::JoinHandle<()>>,
+)> {
     let url = cfg.url.clone().context("mcp: url required")?;
     let http = reqwest::Client::builder().user_agent("hi-derola").build()?;
     let mode = proto_mode(cfg);
@@ -1862,12 +1890,21 @@ async fn connect_remote(
         })),
     );
     let to = cfg_connect_timeout(cfg);
-    let first_err = match request(&http_shared, &pending, to, "initialize", init_params.clone()).await {
+    let first_err = match request(
+        &http_shared,
+        &pending,
+        to,
+        "initialize",
+        init_params.clone(),
+    )
+    .await
+    {
         Ok(v) => {
             let negotiated = negotiated_version(&mode, &requested, &v)?;
             if let Reply::Http(ctx) = &http_shared.reply {
-                *ctx.proto.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    Some(negotiated);
+                *ctx.proto
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(negotiated);
             }
             return Ok((http_shared, pending, v, Vec::new()));
         }
@@ -1894,13 +1931,17 @@ async fn connect_remote(
         })),
     );
     let mut tasks = Vec::new();
-    tasks.push(tokio::spawn(sse_live(sse_shared.clone(), sse_pending.clone())));
+    tasks.push(tokio::spawn(sse_live(
+        sse_shared.clone(),
+        sse_pending.clone(),
+    )));
     match request(&sse_shared, &sse_pending, to, "initialize", init_params).await {
         Ok(v) => {
             let negotiated = negotiated_version(&mode, &requested, &v)?;
             if let Reply::Sse(ctx) = &sse_shared.reply {
-                *ctx.proto.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-                    Some(negotiated);
+                *ctx.proto
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(negotiated);
             }
             Ok((sse_shared, sse_pending, v, tasks))
         }
@@ -2126,8 +2167,8 @@ async fn http_send(
     body: &Value,
     refresh_auth: bool,
 ) -> Result<reqwest::Response> {
-    let token = crate::mcpauth::bearer(name, &ctx.url, ctx.oauth.as_ref(), &ctx.http, refresh_auth)
-        .await?;
+    let token =
+        crate::mcpauth::bearer(name, &ctx.url, ctx.oauth.as_ref(), &ctx.http, refresh_auth).await?;
     let mut req = ctx
         .http
         .post(ctx.url.as_str())
@@ -2254,7 +2295,11 @@ async fn http_post(
     let status = resp.status();
     if !status.is_success() {
         let text = capped_body(resp, name).await.unwrap_or_default();
-        bail!("mcp {name}: {} {}", status, crate::provider::truncate(&text).trim());
+        bail!(
+            "mcp {name}: {} {}",
+            status,
+            crate::provider::truncate(&text).trim()
+        );
     }
     if method == "initialize" {
         if let Some(sid) = resp
@@ -2323,7 +2368,11 @@ async fn http_reinit(shared: &Arc<Shared>, ctx: &HttpCtx) -> Result<()> {
     if !resp.status().is_success() {
         let status = resp.status();
         let text = capped_body(resp, name).await.unwrap_or_default();
-        bail!("mcp {name}: reinitialize failed: {} {}", status, crate::provider::truncate(&text).trim());
+        bail!(
+            "mcp {name}: reinitialize failed: {} {}",
+            status,
+            crate::provider::truncate(&text).trim()
+        );
     }
     if let Some(sid) = resp
         .headers()
@@ -2530,7 +2579,9 @@ impl McpServer {
 
     async fn notify_t(&self, method: &str) -> Result<()> {
         let msg = json!({"jsonrpc": "2.0", "method": method});
-        send_msg(&self.shared, &self.pending, &msg).await.map(|_| ())
+        send_msg(&self.shared, &self.pending, &msg)
+            .await
+            .map(|_| ())
     }
 
     /// subscribe to resource updates; the uri registers before the request so
@@ -2548,7 +2599,11 @@ impl McpServer {
             }
         }
         match self
-            .request_t(req_to(&self.shared), "resources/subscribe", json!({"uri": uri}))
+            .request_t(
+                req_to(&self.shared),
+                "resources/subscribe",
+                json!({"uri": uri}),
+            )
             .await
         {
             Ok(_) => Ok(()),
@@ -2567,7 +2622,11 @@ impl McpServer {
             g.retain(|u| u != uri);
         }
         let _ = self
-            .request_t(req_to(&self.shared), "resources/unsubscribe", json!({"uri": uri}))
+            .request_t(
+                req_to(&self.shared),
+                "resources/unsubscribe",
+                json!({"uri": uri}),
+            )
             .await;
         Ok(())
     }
@@ -2628,7 +2687,16 @@ impl McpServer {
                     stdin: Arc::new(Mutex::new(stdin)),
                 },
             );
-            (sh, pd, Some(child), Some(tokio::io::BufReader::new(stdout)), stderr, Vec::new(), None, tree)
+            (
+                sh,
+                pd,
+                Some(child),
+                Some(tokio::io::BufReader::new(stdout)),
+                stderr,
+                Vec::new(),
+                None,
+                tree,
+            )
         };
         let mut s = Self {
             shared,
@@ -2659,17 +2727,13 @@ impl McpServer {
                 s.pending.clone(),
             )));
         } else {
-            s.tasks.push(tokio::spawn(http_live(
-                s.shared.clone(),
-                s.pending.clone(),
-            )));
+            s.tasks
+                .push(tokio::spawn(http_live(s.shared.clone(), s.pending.clone())));
         }
         // how the stdio child died feeds the "server closed" crash message
         if let Some(c) = &s.child {
-            s.tasks.push(tokio::spawn(exit_monitor(
-                c.clone(),
-                s.shared.clone(),
-            )));
+            s.tasks
+                .push(tokio::spawn(exit_monitor(c.clone(), s.shared.clone())));
         }
         s.tasks.extend(pre_tasks);
         // optional keepalive: periodic pings note alive <-> unresponsive flips
@@ -2883,7 +2947,10 @@ pub fn parse_add(spec: &str) -> Result<McpConfig> {
     if name.is_empty() || rest.is_empty() {
         return Err(bad());
     }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
         bail!("server name must be alphanumeric, _ or -");
     }
     if rest.contains("://") {
@@ -3282,7 +3349,11 @@ pub async fn status(slot: &McpSlot, cfgs: &[McpConfig]) -> Vec<McpStatusEntry> {
     }
     let failures = CONNECT_FAILURES
         .lock()
-        .map(|g| g.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>())
+        .map(|g| {
+            g.iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
     let mut out = Vec::new();
     for c in cfgs {
@@ -3290,11 +3361,9 @@ pub async fn status(slot: &McpSlot, cfgs: &[McpConfig]) -> Vec<McpStatusEntry> {
         // every branch computes the pair, then one push moves it (avoids
         // borrowing `name` in a detail format after the struct shorthand)
         let (state, detail) = if c.enabled == Some(false) {
-            (
-                "disabled",
-                "enabled = false in config".to_string(),
-            )
-        } else if let Some((_, sum, exited, alive)) = servers.iter().find(|(n, _, _, _)| *n == name) {
+            ("disabled", "enabled = false in config".to_string())
+        } else if let Some((_, sum, exited, alive)) = servers.iter().find(|(n, _, _, _)| *n == name)
+        {
             if let Some(exit) = exited {
                 (
                     "crashed",
@@ -3333,16 +3402,10 @@ pub async fn status(slot: &McpSlot, cfgs: &[McpConfig]) -> Vec<McpStatusEntry> {
                     "auth expired",
                     format!("not connected — /mcpauth {name} refreshes the tokens"),
                 ),
-                _ => (
-                    "not connected",
-                    format!("/mcpconnect {name} connects it"),
-                ),
+                _ => ("not connected", format!("/mcpconnect {name} connects it")),
             }
         } else {
-            (
-                "not connected",
-                format!("/mcpconnect {name} connects it"),
-            )
+            ("not connected", format!("/mcpconnect {name} connects it"))
         };
         out.push(McpStatusEntry {
             name,
@@ -3407,7 +3470,10 @@ mod tests {
         assert_eq!(weird.len(), 1);
         assert_eq!(weird[0].schema, json!({"type": "object", "properties": {}}));
         let missing = parse_tools(&[json!({"name": "noschema"})]);
-        assert_eq!(missing[0].schema, json!({"type": "object", "properties": {}}));
+        assert_eq!(
+            missing[0].schema,
+            json!({"type": "object", "properties": {}})
+        );
 
         let res = parse_resources(&[
             json!({"uri": "file:///a", "name": "a", "description": "d", "mimeType": "text/plain"}),
@@ -3429,7 +3495,10 @@ mod tests {
             {"uri": "u2", "blob": "aGVsbG8="}
         ]}));
         assert_eq!(contents, "one\n\n[binary resource u2, ~6 bytes]");
-        assert_eq!(render_resource_contents(&json!({"contents": []})), "(empty resource)");
+        assert_eq!(
+            render_resource_contents(&json!({"contents": []})),
+            "(empty resource)"
+        );
 
         let msgs = parse_prompt_messages(&json!({"messages": [
             {"role": "user", "content": {"type": "text", "text": "hi"}},
@@ -3442,7 +3511,10 @@ mod tests {
     #[test]
     fn capability_detection() {
         assert!(has_cap(&json!({"resources": {}}), "resources"));
-        assert!(has_cap(&json!({"resources": {"subscribe": true}}), "resources"));
+        assert!(has_cap(
+            &json!({"resources": {"subscribe": true}}),
+            "resources"
+        ));
         assert!(has_cap(&json!({"prompts": true}), "prompts"));
         assert!(!has_cap(&json!({}), "tools"));
         assert!(!has_cap(&json!({"tools": false}), "tools"));
@@ -3611,9 +3683,7 @@ mod tests {
                     if mode == "tree" {
                         // spawn a grandchild the client must take down with
                         // the tree; its pid rides the log buffer to the test
-                        if let Ok(gc) =
-                            std::process::Command::new("sleep").arg("30").spawn()
-                        {
+                        if let Ok(gc) = std::process::Command::new("sleep").arg("30").spawn() {
                             let pid = gc.id();
                             let note = json!({"jsonrpc": "2.0", "method": "notifications/message",
                                 "params": {"level": "info", "logger": "tree",
@@ -3679,26 +3749,27 @@ mod tests {
                         hang_id = Some(id);
                         continue;
                     } else {
-                    // progress for the in-flight token, then a stale token
-                    // the client must ignore; live refresh trigger last
-                    let tok = v["params"]["_meta"]["progressToken"].clone();
-                    let notes = [
-                        json!({"jsonrpc": "2.0", "method": "notifications/progress",
+                        // progress for the in-flight token, then a stale token
+                        // the client must ignore; live refresh trigger last
+                        let tok = v["params"]["_meta"]["progressToken"].clone();
+                        let notes = [
+                            json!({"jsonrpc": "2.0", "method": "notifications/progress",
                             "params": {"progressToken": tok, "progress": 1, "total": 2, "message": "halfway"}}),
-                        json!({"jsonrpc": "2.0", "method": "notifications/progress",
+                            json!({"jsonrpc": "2.0", "method": "notifications/progress",
                             "params": {"progressToken": tok, "progress": 1.5, "total": 2}}),
-                        json!({"jsonrpc": "2.0", "method": "notifications/progress",
+                            json!({"jsonrpc": "2.0", "method": "notifications/progress",
                             "params": {"progressToken": 987654, "progress": 1, "total": 1}}),
-                    ];
-                    for n in notes {
+                        ];
+                        for n in notes {
+                            writeln!(out, "{n}").unwrap();
+                        }
+                        out.flush().unwrap();
+                        // live refresh trigger: notify before answering
+                        let n =
+                            json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"});
                         writeln!(out, "{n}").unwrap();
-                    }
-                    out.flush().unwrap();
-                    // live refresh trigger: notify before answering
-                    let n = json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"});
-                    writeln!(out, "{n}").unwrap();
-                    out.flush().unwrap();
-                    json!({"content": [{"type": "text", "text": json!({
+                        out.flush().unwrap();
+                        json!({"content": [{"type": "text", "text": json!({
                         "caps": caps_seen,
                         "proto": proto_seen,
                         "roots": roots_reply,
@@ -3725,8 +3796,10 @@ mod tests {
                 "resources/read" => json!({"contents": [
                     {"uri": v["params"]["uri"], "mimeType": "text/plain", "text": "hello resource"}
                 ]}),
-                "prompts/list" => json!({"prompts": [{"name": "review", "description": "review code",
-                    "arguments": [{"name": "lang", "description": "language", "required": true}]}]}),
+                "prompts/list" => {
+                    json!({"prompts": [{"name": "review", "description": "review code",
+                    "arguments": [{"name": "lang", "description": "language", "required": true}]}]})
+                }
                 "prompts/get" => json!({"messages": [
                     {"role": "user", "content": {"type": "text", "text": "review the code in lang"}}
                 ]}),
@@ -3834,7 +3907,9 @@ mod tests {
     #[tokio::test]
     async fn resources_and_prompts_roundtrip() {
         let cfg = child_cfg("1");
-        let s = McpServer::connect(&cfg, &McpHooks::default()).await.unwrap();
+        let s = McpServer::connect(&cfg, &McpHooks::default())
+            .await
+            .unwrap();
         assert_eq!(s.tools.len(), 1);
         assert_eq!(s.resources.len(), 2, "pagination follows nextCursor");
         assert_eq!(s.resources[0].uri, "file:///a.txt");
@@ -3876,7 +3951,10 @@ mod tests {
             .unwrap();
         let dump: Value =
             serde_json::from_str(res["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(dump["caps"]["roots"]["listChanged"], true, "roots cap declared");
+        assert_eq!(
+            dump["caps"]["roots"]["listChanged"], true,
+            "roots cap declared"
+        );
         assert_eq!(dump["caps"]["sampling"], json!({}), "sampling cap declared");
         assert_eq!(dump["roots"]["roots"][0]["uri"], "file:///tmp/ws");
         assert_eq!(dump["roots"]["roots"][0]["name"], "ws");
@@ -3884,7 +3962,11 @@ mod tests {
         assert_eq!(dump["sampling"]["model"], "test-model");
         assert_eq!(dump["sampling"]["content"]["text"], "sampled:say hi");
         assert_eq!(dump["sampling_error"], false);
-        assert_eq!(dump["ping_reply"], json!({}), "server ping answered with empty result");
+        assert_eq!(
+            dump["ping_reply"],
+            json!({}),
+            "server ping answered with empty result"
+        );
 
         // the ping reply was preceded by notifications/tools/list_changed:
         // the next specs() must re-list and see the second tool
@@ -3956,7 +4038,11 @@ mod tests {
             .unwrap();
         let dump: Value =
             serde_json::from_str(res["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(dump["caps"]["elicitation"], json!({}), "elicitation cap declared");
+        assert_eq!(
+            dump["caps"]["elicitation"],
+            json!({}),
+            "elicitation cap declared"
+        );
         assert_eq!(dump["elicit_error"], false);
         assert_eq!(dump["elicitation"]["action"], "accept");
         assert_eq!(dump["elicitation"]["content"]["color"], "green");
@@ -3987,7 +4073,10 @@ mod tests {
             .unwrap();
         let dump: Value =
             serde_json::from_str(res["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert!(dump["caps"]["elicitation"].is_null(), "no cap when disabled");
+        assert!(
+            dump["caps"]["elicitation"].is_null(),
+            "no cap when disabled"
+        );
         assert_eq!(dump["elicitation"]["action"], "decline");
     }
 
@@ -3996,7 +4085,9 @@ mod tests {
     async fn wait_for_log(logs: &McpLogBuf, needle: &str) -> bool {
         for _ in 0..40 {
             {
-                let g = logs.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                let g = logs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if g.iter().any(|e| e.data.contains(needle)) {
                     return true;
                 }
@@ -4010,8 +4101,7 @@ mod tests {
     async fn url_mode_elicitation_validates_and_completes() {
         // no eliciter hook: url-mode needs none (no form input is collected)
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws")))
-            .with_notes(tx);
+        let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws"))).with_notes(tx);
         let logs = hooks.logs.clone();
         let cfg = child_cfg("urlmode");
         let s = McpServer::connect(&cfg, &hooks).await.unwrap();
@@ -4026,10 +4116,18 @@ mod tests {
         let dump: Value =
             serde_json::from_str(res["content"][0]["text"].as_str().unwrap()).unwrap();
         // the trusted https url got the spec reply: the empty result
-        assert_eq!(dump["elicitation"], json!({}), "url-mode replies empty result");
+        assert_eq!(
+            dump["elicitation"],
+            json!({}),
+            "url-mode replies empty result"
+        );
         // the cross-host http url was declined
         assert_eq!(dump["url_reply"]["action"], "decline");
-        assert_eq!(dump["caps"]["elicitation"], json!({}), "cap advertised without eliciter");
+        assert_eq!(
+            dump["caps"]["elicitation"],
+            json!({}),
+            "cap advertised without eliciter"
+        );
         // surfacing, rejection and completion all landed in /mcplog
         assert!(
             wait_for_log(&logs, "url elicitation login-1: sign in to continue").await,
@@ -4162,8 +4260,14 @@ mod tests {
         );
         assert!(elicit_content(&schema, "").is_none(), "empty cancels");
         assert!(elicit_content(&schema, "  ").is_none(), "blank cancels");
-        assert!(elicit_content(&schema, "green").is_none(), "multi-property raw text cancels");
-        assert!(elicit_content(&json!({}), "x").is_none(), "no properties cancels");
+        assert!(
+            elicit_content(&schema, "green").is_none(),
+            "multi-property raw text cancels"
+        );
+        assert!(
+            elicit_content(&json!({}), "x").is_none(),
+            "no properties cancels"
+        );
     }
 
     #[test]
@@ -4178,7 +4282,10 @@ mod tests {
         assert!(q.contains("range 1..120"), "bounds in hint: {q}");
         assert!(q.contains("format email"), "format in hint: {q}");
         assert!(q.contains("length 3-254"), "string bounds in hint: {q}");
-        assert!(q.contains("one of: Admin | Developer"), "enumNames in hint: {q}");
+        assert!(
+            q.contains("one of: Admin | Developer"),
+            "enumNames in hint: {q}"
+        );
         assert!(opts.is_empty(), "multi-property schemas get no buttons");
         assert!(!multiple);
 
@@ -4188,7 +4295,10 @@ mod tests {
         }}});
         let (q, opts, multiple) = elicit_question("pick", &multi);
         assert!(multiple, "array property flags multiple");
-        assert!(q.contains("pick multiple of: Aa | Bb"), "multiselect hint: {q}");
+        assert!(
+            q.contains("pick multiple of: Aa | Bb"),
+            "multiselect hint: {q}"
+        );
         assert_eq!(q.contains("comma-separated"), true);
         assert_eq!(
             opts,
@@ -4202,7 +4312,10 @@ mod tests {
         assert!(!multiple);
         assert!(q.contains("one of: red | green"));
         assert_eq!(q.contains("comma-separated"), false);
-        assert_eq!(opts, vec![json!({"label": "red"}), json!({"label": "green"})]);
+        assert_eq!(
+            opts,
+            vec![json!({"label": "red"}), json!({"label": "green"})]
+        );
     }
 
     #[tokio::test]
@@ -4283,12 +4396,7 @@ mod tests {
 
         // the token registry is cleaned up after the call
         let servers = client.servers.lock().await;
-        assert!(servers[0]
-            .shared
-            .progress
-            .lock()
-            .unwrap()
-            .is_empty());
+        assert!(servers[0].shared.progress.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -4301,7 +4409,10 @@ mod tests {
         // (the mode-1 child does note its error log message, that one is fine)
         tokio::time::sleep(Duration::from_millis(2500)).await;
         while let Ok(crate::provider::ApiEvent::Note(n)) = nrx.try_recv() {
-            assert!(!n.contains("keepalive"), "healthy server must not note: {n}");
+            assert!(
+                !n.contains("keepalive"),
+                "healthy server must not note: {n}"
+            );
         }
     }
 
@@ -4331,17 +4442,18 @@ mod tests {
     #[tokio::test]
     async fn server_without_caps_still_connects() {
         let cfg = child_cfg("min");
-        let s = McpServer::connect(&cfg, &McpHooks::default()).await.unwrap();
+        let s = McpServer::connect(&cfg, &McpHooks::default())
+            .await
+            .unwrap();
         assert!(s.tools.is_empty(), "tools/list error tolerated without cap");
         assert!(s.resources.is_empty());
         assert!(s.prompts.is_empty());
         assert_eq!(s.summary(), "0 tools");
-        let err = s
-            .subscribe("mem://x")
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("does not support resource subscriptions"), "{err}");
+        let err = s.subscribe("mem://x").await.unwrap_err().to_string();
+        assert!(
+            err.contains("does not support resource subscriptions"),
+            "{err}"
+        );
     }
 
     #[tokio::test]
@@ -4367,9 +4479,7 @@ mod tests {
         for _ in 0..10 {
             match tokio::time::timeout(Duration::from_secs(2), nrx.recv()).await {
                 Ok(Some(crate::provider::ApiEvent::Note(n))) => {
-                    if n.contains("resource mem://stats updated")
-                        && n.contains("hello resource")
-                    {
+                    if n.contains("resource mem://stats updated") && n.contains("hello resource") {
                         saw_update = true;
                         break;
                     }
@@ -4399,8 +4509,7 @@ mod tests {
         let mut ready = false;
         for _ in 0..100 {
             let g = hooks.logs.lock().unwrap();
-            ready = g.iter().any(|e| e.logger == "stderr")
-                && g.iter().any(|e| e.logger == "db");
+            ready = g.iter().any(|e| e.logger == "stderr") && g.iter().any(|e| e.logger == "db");
             drop(g);
             if ready {
                 break;
@@ -4409,7 +4518,10 @@ mod tests {
         }
         assert!(ready, "stderr probe and log entry must both drain");
         let logs = hooks.logs.lock().unwrap();
-        let boom = logs.iter().find(|e| e.logger == "db").expect("log entry buffered");
+        let boom = logs
+            .iter()
+            .find(|e| e.logger == "db")
+            .expect("log entry buffered");
         assert_eq!(boom.server, "t");
         assert_eq!(boom.level, "error");
         assert_eq!(boom.data, "boom");
@@ -4570,8 +4682,14 @@ mod tests {
             Err(_) => panic!("connect did not surface the crash in time"),
         };
         let msg = format!("{err:#}");
-        assert!(msg.contains("exit code 3"), "exit code in the message: {msg}");
-        assert!(msg.contains("boom-2: giving up"), "stderr tail in the message: {msg}");
+        assert!(
+            msg.contains("exit code 3"),
+            "exit code in the message: {msg}"
+        );
+        assert!(
+            msg.contains("boom-2: giving up"),
+            "stderr tail in the message: {msg}"
+        );
     }
 
     #[tokio::test]
@@ -4583,7 +4701,11 @@ mod tests {
             "a jumbo frame must not kill the connection: {logs:?}"
         );
         let client = client.unwrap();
-        assert_eq!(client.specs().await.len(), 1, "real replies still processed");
+        assert_eq!(
+            client.specs().await.len(),
+            1,
+            "real replies still processed"
+        );
         let logs = hooks.logs.lock().unwrap();
         assert!(
             logs.iter()
@@ -4619,7 +4741,11 @@ mod tests {
     /// forcing the client's session-expiry reconnect; fail_lists serves that
     /// many 503s for list-phase methods (retried by the client), fail_calls
     /// does the same for tools/call (which must NOT be retried)
-    fn spawn_fake_streamable(expires: bool, fail_lists: usize, fail_calls: usize) -> (u16, Arc<FakeHttpState>) {
+    fn spawn_fake_streamable(
+        expires: bool,
+        fail_lists: usize,
+        fail_calls: usize,
+    ) -> (u16, Arc<FakeHttpState>) {
         let state = Arc::new(FakeHttpState {
             inits: 0.into(),
             non_init: 0.into(),
@@ -4706,12 +4832,8 @@ mod tests {
                             json!({"protocolVersion": v["params"]["protocolVersion"], "capabilities": {"tools": {}, "resources": {}, "prompts": {}}}),
                         );
                         let _ = s.write_all(
-                            answer(
-                                "200 OK",
-                                &format!("mcp-session-id: s{n}\r\n"),
-                                result,
-                            )
-                            .as_bytes(),
+                            answer("200 OK", &format!("mcp-session-id: s{n}\r\n"), result)
+                                .as_bytes(),
                         );
                         return;
                     }
@@ -4840,7 +4962,10 @@ mod tests {
     async fn protocol_negotiation_stdio_modes() {
         // legacy (absent and explicit): classic stdio version, roots kept
         let d = neg_dump(None).await;
-        assert_eq!(d["proto"], "2024-11-05", "default stays on the legacy handshake");
+        assert_eq!(
+            d["proto"], "2024-11-05",
+            "default stays on the legacy handshake"
+        );
         assert_eq!(d["caps"]["roots"]["listChanged"], true, "roots advertised");
         let d = neg_dump(Some("legacy")).await;
         assert_eq!(d["proto"], "2024-11-05");
@@ -4849,7 +4974,10 @@ mod tests {
         // auto: newest revision offered, deprecated roots dropped
         let d = neg_dump(Some("auto")).await;
         assert_eq!(d["proto"], LATEST_PROTOCOL_VERSION);
-        assert!(d["caps"]["roots"].is_null(), "roots not advertised for 2026-07-28");
+        assert!(
+            d["caps"]["roots"].is_null(),
+            "roots not advertised for 2026-07-28"
+        );
         assert_eq!(d["caps"]["elicitation"], json!({}), "other caps untouched");
 
         // pin: exact version; roots kept below the deprecation revision
@@ -4858,7 +4986,10 @@ mod tests {
         assert_eq!(d["caps"]["roots"]["listChanged"], true);
         let d = neg_dump(Some("2026-07-28")).await;
         assert_eq!(d["proto"], "2026-07-28");
-        assert!(d["caps"]["roots"].is_null(), "pin at the deprecation revision drops roots");
+        assert!(
+            d["caps"]["roots"].is_null(),
+            "pin at the deprecation revision drops roots"
+        );
     }
 
     #[tokio::test]
@@ -4873,7 +5004,10 @@ mod tests {
             Ok(_) => panic!("auto must reject the bogus version"),
         };
         assert!(err.contains("1999-01-01"), "error names the version: {err}");
-        assert!(err.contains("protocol_version"), "error hints at the config: {err}");
+        assert!(
+            err.contains("protocol_version"),
+            "error hints at the config: {err}"
+        );
 
         // legacy trusts the answer: the same server still connects
         let mut cfg = child_cfg("badproto");
@@ -4890,7 +5024,10 @@ mod tests {
             .unwrap();
         let dump: Value =
             serde_json::from_str(res["content"][0]["text"].as_str().unwrap()).unwrap();
-        assert_eq!(dump["proto"], "2024-11-05", "connect succeeded in legacy mode");
+        assert_eq!(
+            dump["proto"], "2024-11-05",
+            "connect succeeded in legacy mode"
+        );
     }
 
     #[tokio::test]
@@ -4898,8 +5035,7 @@ mod tests {
         let (port, state) = spawn_fake_streamable(false, 0, 0);
         let mut cfg = remote_cfg(port);
         cfg.protocol_version = Some("auto".to_string());
-        let (client, logs) =
-            connect_all(&[cfg], &McpHooks::workspace(None)).await;
+        let (client, logs) = connect_all(&[cfg], &McpHooks::workspace(None)).await;
         let client = match client {
             Some(c) => c,
             None => panic!("server must connect: {logs:?}"),
@@ -4986,7 +5122,8 @@ mod tests {
         let on = child_cfg("1");
         let (client, logs) = connect_all(&[off, on], &hooks).await;
         assert!(
-            logs.iter().any(|l| l.contains("mcp off: disabled (enabled = false)")),
+            logs.iter()
+                .any(|l| l.contains("mcp off: disabled (enabled = false)")),
             "disabled server is logged: {logs:?}"
         );
         let client = client.expect("the enabled server still connects");
@@ -5014,7 +5151,9 @@ mod tests {
         // a real dir: connect works
         let mut cfg = child_cfg("1");
         cfg.cwd = Some(std::env::temp_dir().display().to_string());
-        McpServer::connect(&cfg, &hooks).await.expect("valid cwd connects");
+        McpServer::connect(&cfg, &hooks)
+            .await
+            .expect("valid cwd connects");
         // a bogus dir: clear error before the spawn
         cfg.cwd = Some("/nonexistent-hi-derola-dir/xyz".into());
         match McpServer::connect(&cfg, &hooks).await {
@@ -5046,7 +5185,9 @@ mod tests {
     #[tokio::test]
     async fn aborted_call_notifies_server() {
         let hooks = McpHooks::workspace(None);
-        let s = McpServer::connect(&child_cfg("hang"), &hooks).await.unwrap();
+        let s = McpServer::connect(&child_cfg("hang"), &hooks)
+            .await
+            .unwrap();
         let shared = s.shared.clone();
         let pending = s.pending.clone();
         let j = tokio::spawn(async move {
@@ -5101,7 +5242,9 @@ mod tests {
     #[tokio::test]
     async fn disconnect_kills_the_server_process_tree() {
         let hooks = McpHooks::workspace(None);
-        let s = McpServer::connect(&child_cfg("tree"), &hooks).await.unwrap();
+        let s = McpServer::connect(&child_cfg("tree"), &hooks)
+            .await
+            .unwrap();
         let pid: u32 = hooks
             .logs
             .lock()
@@ -5172,13 +5315,22 @@ mod tests {
         // local command with args
         let c = parse_add("fs npx -y @modelcontextprotocol/server-filesystem /tmp").unwrap();
         assert_eq!(c.command, "npx");
-        assert_eq!(c.args, vec!["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]);
+        assert_eq!(
+            c.args,
+            vec!["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+        );
         assert!(c.url.is_none());
         // bad specs
         assert!(parse_add("").is_err());
         assert!(parse_add("justname").is_err());
-        assert!(parse_add("bad!name npx").is_err(), "name must be alphanumeric, _ or -");
-        assert!(parse_add("srv https://bad url with spaces").is_err(), "url must parse");
+        assert!(
+            parse_add("bad!name npx").is_err(),
+            "name must be alphanumeric, _ or -"
+        );
+        assert!(
+            parse_add("srv https://bad url with spaces").is_err(),
+            "url must parse"
+        );
     }
 
     #[tokio::test]
@@ -5206,7 +5358,10 @@ mod tests {
         );
 
         // disconnect drops it, a second disconnect errors
-        assert_eq!(client.disconnect("t2").await.unwrap(), "mcp t2: disconnected");
+        assert_eq!(
+            client.disconnect("t2").await.unwrap(),
+            "mcp t2: disconnected"
+        );
         let names: Vec<String> = client.specs().await.into_iter().map(|t| t.name).collect();
         assert!(!names.iter().any(|n| n.starts_with("mcp__t2__")));
         let err = client.disconnect("t2").await.unwrap_err().to_string();
@@ -5296,9 +5451,7 @@ mod tests {
         assert!(logs.iter().any(|l| l.contains("connected")), "{logs:?}");
         // initialize rode the sse transport: instructions arrived over the stream
         assert_eq!(
-            client
-                .instructions(&crate::perm::PermCfg::default())
-                .await,
+            client.instructions(&crate::perm::PermCfg::default()).await,
             vec![("t".to_string(), "via legacy sse".to_string())]
         );
     }

@@ -142,8 +142,7 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
                     .input
                     .chars()
                     .count()
-                    .min(inner.width.saturating_sub(1) as usize)
-                    as u16;
+                    .min(inner.width.saturating_sub(1) as usize) as u16;
             f.set_cursor_position(ratatui::layout::Position::new(cursor_x, inner.y));
         }
     }
@@ -155,11 +154,8 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         Phase::Ask => "enter answer · esc skip",
         _ => "enter send · esc quit · /help",
     };
-    let cols = Layout::horizontal([
-        Constraint::Min(10),
-        Constraint::Length(hints.len() as u16),
-    ])
-    .split(area);
+    let cols = Layout::horizontal([Constraint::Min(10), Constraint::Length(hints.len() as u16)])
+        .split(area);
     let left = Line::from(vec![
         Span::styled(
             " hi-derola",
@@ -168,7 +164,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         Span::styled(format!(" · {}", app.status), Style::new().fg(DIM)),
     ]);
     f.render_widget(Paragraph::new(left), cols[0]);
-    let right = Paragraph::new(Span::styled(hints, Style::new().fg(DIM)))
-        .alignment(Alignment::Right);
+    let right =
+        Paragraph::new(Span::styled(hints, Style::new().fg(DIM))).alignment(Alignment::Right);
     f.render_widget(right, cols[1]);
 }

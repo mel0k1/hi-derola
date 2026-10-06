@@ -18,9 +18,8 @@
 //! same name; names colliding with built-ins are rejected at load time.
 
 use boa_engine::{
-    js_string, native_function::NativeFunction, object::builtins::JsPromise,
-    object::JsObject, property::Attribute, builtins::promise::PromiseState, Context, JsValue,
-    Source,
+    builtins::promise::PromiseState, js_string, native_function::NativeFunction,
+    object::builtins::JsPromise, object::JsObject, property::Attribute, Context, JsValue, Source,
 };
 use serde_json::{json, Value};
 use std::cell::RefCell;
@@ -232,7 +231,11 @@ thread_local! {
     static EXEC: RefCell<Option<(Vec<String>, Instant)>> = const { RefCell::new(None) };
 }
 
-fn console_native(_this: &JsValue, args: &[JsValue], ctx: &mut Context) -> boa_engine::JsResult<JsValue> {
+fn console_native(
+    _this: &JsValue,
+    args: &[JsValue],
+    ctx: &mut Context,
+) -> boa_engine::JsResult<JsValue> {
     let mut line = String::new();
     for v in args {
         if !line.is_empty() {
@@ -308,12 +311,10 @@ fn run_in_thread(tool: &JsTool, input: &Value) -> (Result<String, String>, Vec<S
             let p = JsPromise::from_object(ret.as_object().unwrap().clone()).unwrap();
             return match p.state() {
                 PromiseState::Fulfilled(v) => Ok(crate::codemode::js_value_text(v, &mut ctx)),
-                PromiseState::Rejected(err) => {
-                    Err(crate::codemode::js_error_text(&err, &mut ctx))
-                }
-                PromiseState::Pending => {
-                    Err("tool returned a promise that never settled (no timers in the sandbox)".into())
-                }
+                PromiseState::Rejected(err) => Err(crate::codemode::js_error_text(&err, &mut ctx)),
+                PromiseState::Pending => Err(
+                    "tool returned a promise that never settled (no timers in the sandbox)".into(),
+                ),
             };
         }
         Ok(crate::codemode::js_value_text(ret, &mut ctx))
@@ -445,7 +446,11 @@ mod tests {
         assert_eq!(specs.len(), 2, "both tools load");
         assert_eq!(by_name("slugify").unwrap().name, "slugify");
         assert!(by_name("slugify").unwrap().parameters["required"][0] == "text");
-        assert_eq!(by_name("adder").unwrap().name, "adder", "name falls back to the file stem");
+        assert_eq!(
+            by_name("adder").unwrap().name,
+            "adder",
+            "name falls back to the file stem"
+        );
 
         let out = block(run_tool("slugify", r#"{"text":"  Hello World  "}"#)).unwrap();
         assert_eq!(out, "hello-world\n\nLogs:\nslug it");
@@ -479,7 +484,11 @@ mod tests {
         {
             let c = cache();
             let names: Vec<String> = c.tools.iter().map(|t| t.name.clone()).collect();
-            assert!(names.contains(&"logged".to_string()), "loaded {names:?} skipped {:?}", c.skipped);
+            assert!(
+                names.contains(&"logged".to_string()),
+                "loaded {names:?} skipped {:?}",
+                c.skipped
+            );
         }
         let out = block(run_tool("logged", r#"{"n":21}"#)).unwrap();
         assert!(out.starts_with("42"), "{out}");
@@ -516,9 +525,22 @@ mod tests {
         reload();
         let skipped = cache().skipped.clone();
         let reasons: Vec<&str> = skipped.iter().map(|(_, r)| r.as_str()).collect();
-        assert!(reasons.iter().any(|r| r.contains("SyntaxError") || r.contains("Unexpected")), "{reasons:?}");
-        assert!(reasons.iter().any(|r| r.contains("execute must be a function")), "{reasons:?}");
-        assert!(reasons.iter().any(|r| r.contains("built-in")), "{reasons:?}");
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.contains("SyntaxError") || r.contains("Unexpected")),
+            "{reasons:?}"
+        );
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.contains("execute must be a function")),
+            "{reasons:?}"
+        );
+        assert!(
+            reasons.iter().any(|r| r.contains("built-in")),
+            "{reasons:?}"
+        );
         assert!(reasons.iter().any(|r| r.contains("mcp__")), "{reasons:?}");
         set_dir_override(None);
     }

@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::{sse_lines, send, ApiEvent, ChatRequest, Provider, Reply};
+use super::{send, sse_lines, ApiEvent, ChatRequest, Provider, Reply};
 use crate::chat::{Message, Role, ToolCall};
 
 pub struct Anthropic {
@@ -44,7 +44,9 @@ fn conv_msgs(messages: &[Message]) -> Vec<Value> {
                 }
                 for c in &m.tool_calls {
                     let input: Value = serde_json::from_str(&c.args).unwrap_or(json!({}));
-                    content.push(json!({"type": "tool_use", "id": c.id, "name": c.name, "input": input}));
+                    content.push(
+                        json!({"type": "tool_use", "id": c.id, "name": c.name, "input": input}),
+                    );
                 }
                 out.push((false, json!({"role": "assistant", "content": content})));
             }
@@ -179,7 +181,9 @@ impl Provider for Anthropic {
                         let cache_read = u["cache_read_input_tokens"].as_u64().unwrap_or(0);
                         let cache_write = u["cache_creation_input_tokens"].as_u64().unwrap_or(0);
                         tx.send(ApiEvent::Usage {
-                            input: u["input_tokens"].as_u64().unwrap_or(0) + cache_read + cache_write,
+                            input: u["input_tokens"].as_u64().unwrap_or(0)
+                                + cache_read
+                                + cache_write,
                             output: 0,
                             cached: cache_read,
                         })
@@ -209,12 +213,17 @@ impl Provider for Anthropic {
                 .map(|e| ToolCall {
                     id: e.1,
                     name: e.2,
-                    args: if e.3.trim().is_empty() { "{}".into() } else { e.3 },
+                    args: if e.3.trim().is_empty() {
+                        "{}".into()
+                    } else {
+                        e.3
+                    },
                 })
                 .collect();
         } else {
             let text = resp.text().await?;
-            let v: Value = serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
+            let v: Value =
+                serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("bad response: {e}"))?;
             stop = v["stop_reason"].as_str().unwrap_or("").to_string();
             for block in v["content"].as_array().into_iter().flatten() {
                 match block["type"].as_str() {
@@ -241,7 +250,9 @@ impl Provider for Anthropic {
                 let _ = tx.send(ApiEvent::Chunk(full.clone()));
             }
             let cache_read = v["usage"]["cache_read_input_tokens"].as_u64().unwrap_or(0);
-            let cache_write = v["usage"]["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+            let cache_write = v["usage"]["cache_creation_input_tokens"]
+                .as_u64()
+                .unwrap_or(0);
             tx.send(ApiEvent::Usage {
                 input: v["usage"]["input_tokens"].as_u64().unwrap_or(0) + cache_read + cache_write,
                 output: v["usage"]["output_tokens"].as_u64().unwrap_or(0),
@@ -281,10 +292,7 @@ mod tests {
         assert_eq!(blocks[0]["cache_control"]["type"], "ephemeral");
 
         let plain = conv_msgs(&[Message::new(Role::User, "hello")]);
-        assert_eq!(
-            plain[0]["content"][0]["cache_control"]["type"],
-            "ephemeral"
-        );
+        assert_eq!(plain[0]["content"][0]["cache_control"]["type"], "ephemeral");
         assert_eq!(plain[0]["content"][0]["text"], "hello");
     }
 }

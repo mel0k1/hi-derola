@@ -437,9 +437,7 @@ pub async fn run(
                 let v: Value = serde_json::from_str(&call.args).unwrap_or(Value::Null);
                 if v["background"].as_bool().unwrap_or(false) {
                     if crate::sandbox::shell_route().is_some() {
-                        // the sandbox route has no remote task machinery yet;
-                        // nudge the model to run the command in the foreground
-                        "bash: background tasks are not available inside the sandbox VM — run the command in the foreground (timeout up to 600s)".to_string()
+                        run_bash_background_vm(&v, &tx, queue.clone(), cfg.output_budget).await
                     } else {
                         run_bash_background(&v, &tx, queue.clone(), cfg.output_budget)
                     }
@@ -551,14 +549,35 @@ pub async fn run(
                 let v: Value = serde_json::from_str(&call.args).unwrap_or(Value::Null);
                 let p = v["path"].as_str().unwrap_or("").to_string();
                 if !p.is_empty() && crate::files::is_image(&p) {
-                    match crate::files::read_image(&p) {
-                        Ok((mime, data)) => {
-                            let msg =
-                                format!("Image loaded: {p} ({mime}); the image is attached in the next message.");
-                            pending_images.push((p.clone(), crate::chat::Image { mime, data }));
-                            msg
+                    if crate::sandbox::shell_route().is_some() {
+                        // the image lives inside the VM — fetch it over ssh
+                        let p2 = p.clone();
+                        match tokio::task::spawn_blocking(move || {
+                            crate::sandbox::guest_read_image(&p2)
+                        })
+                        .await
+                        {
+                            Ok(Ok((mime, data))) => {
+                                let mime2 = mime.clone();
+                                pending_images.push((p.clone(), crate::chat::Image { mime, data }));
+                                format!(
+                                    "Image loaded from the sandbox VM: {p} ({mime2}); the image is attached in the next message."
+                                )
+                            }
+                            Ok(Err(e)) => format!("error: {e:#}"),
+                            Err(e) => format!("error: {e}"),
                         }
-                        Err(e) => format!("error: {e:#}"),
+                    } else {
+                        match crate::files::read_image(&p) {
+                            Ok((mime, data)) => {
+                                let msg = format!(
+                                    "Image loaded: {p} ({mime}); the image is attached in the next message."
+                                );
+                                pending_images.push((p.clone(), crate::chat::Image { mime, data }));
+                                msg
+                            }
+                            Err(e) => format!("error: {e:#}"),
+                        }
                     }
                 } else {
                     match tools::execute("read_file", &call.args, mcp_now.as_deref()).await {
@@ -710,6 +729,156 @@ fn run_bash_background(
     });
     format!(
         "Command moved to the background (task {id}). You will be notified automatically when it finishes; the notification will include the output. Do not poll task_status for completion; keep working on anything that does not depend on the result. Use task_kill to stop it."
+    )
+}
+
+/// background bash inside the attached sandbox VM: the command becomes a
+/// remote nohup task (own process group, guest log file, .code file with the
+/// exit status); a watcher polls the log over ssh every ~2s and reports
+/// completion through the same queue/wake plumbing as local background bash
+async fn run_bash_background_vm(
+    v: &Value,
+    tx: &UnboundedSender<ApiEvent>,
+    queue: Arc<Mutex<Vec<String>>>,
+    budget: usize,
+) -> String {
+    let Some(cmd) = v["command"].as_str().filter(|s| !s.trim().is_empty()) else {
+        return "error: bash: command required".to_string();
+    };
+    let timeout = v["timeout"].as_u64();
+    let desc: String = cmd.lines().next().unwrap_or("").chars().take(60).collect();
+    let cmd_owned = cmd.to_string();
+    let spawned =
+        match tokio::task::spawn_blocking(move || crate::sandbox::vm_bg_spawn(&cmd_owned)).await {
+            Ok(Ok(x)) => x,
+            Ok(Err(e)) => return format!("error: bash: {e:#}"),
+            Err(e) => return format!("error: bash: {e}"),
+        };
+    let (sandbox, pid, log, code_file) = spawned;
+    let id = crate::bg::start("bash", &format!("{desc} · in VM"));
+    crate::sandbox::vm_bg_register(&id, &sandbox, pid, &log, &code_file);
+    crate::bg::attach_kill(
+        &id,
+        std::sync::Arc::new(move |bg_id: &str| crate::sandbox::vm_bg_kill_by_id(bg_id)),
+    );
+    let _ = tx.send(ApiEvent::Note(format!(
+        "background task {id} started inside the sandbox VM: {desc}"
+    )));
+
+    let tx2 = tx.clone();
+    let id2 = id.clone();
+    let desc2 = desc.clone();
+    tokio::spawn(async move {
+        let mut offset: u64 = 0;
+        let mut out_buf = String::new();
+        let mut timed_out = false;
+        let mut ssh_gone = false;
+        let mut exit_code: Option<i32> = None;
+        let deadline =
+            timeout.map(|t| std::time::Instant::now() + std::time::Duration::from_secs(t.max(1)));
+        loop {
+            if crate::bg::killed(&id2) {
+                break;
+            }
+            if let Some(d) = deadline {
+                if std::time::Instant::now() >= d {
+                    timed_out = true;
+                    let _ = crate::sandbox::vm_bg_kill(&sandbox, pid);
+                    break;
+                }
+            }
+            let poll = tokio::task::spawn_blocking({
+                let sandbox = sandbox.clone();
+                let log = log.clone();
+                let code_file = code_file.clone();
+                move || crate::sandbox::vm_bg_poll(&sandbox, pid, &log, &code_file, offset)
+            })
+            .await;
+            match poll {
+                Ok(Ok(p)) => {
+                    if !p.chunk.is_empty() {
+                        out_buf.push_str(&p.chunk);
+                        crate::bg::append(&id2, &p.chunk);
+                    }
+                    offset = p.size;
+                    if !p.alive {
+                        exit_code = p.code;
+                        break;
+                    }
+                }
+                _ => {
+                    // ssh stopped answering — the VM is gone; the tail we
+                    // already have is the best result available
+                    ssh_gone = true;
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+        if exit_code.is_some() {
+            // the process died between the log read and the liveness check —
+            // one last drain for the final bytes
+            if let Ok(Ok(p)) = tokio::task::spawn_blocking({
+                let sandbox = sandbox.clone();
+                let log = log.clone();
+                let code_file = code_file.clone();
+                move || crate::sandbox::vm_bg_poll(&sandbox, pid, &log, &code_file, offset)
+            })
+            .await
+            {
+                if !p.chunk.is_empty() {
+                    out_buf.push_str(&p.chunk);
+                    crate::bg::append(&id2, &p.chunk);
+                }
+            }
+        }
+        crate::sandbox::vm_bg_unregister(&id2);
+        let killed_now = crate::bg::killed(&id2);
+        let msg = if killed_now {
+            crate::bg::finish(&id2, Some(out_buf.clone()));
+            format!("Background task {id2} ({desc2}) was killed. Output before kill:\n{out_buf}")
+        } else if timed_out {
+            crate::bg::finish(&id2, Some(out_buf.clone()));
+            format!("Background task {id2} ({desc2}) timed out and was stopped. Output:\n{out_buf}")
+        } else if ssh_gone {
+            crate::bg::finish(&id2, None);
+            format!(
+                "Background task {id2} ({desc2}) lost its sandbox VM (ssh stopped answering). Output so far:\n{out_buf}"
+            )
+        } else {
+            let tail = if exit_code == Some(0) {
+                String::new()
+            } else {
+                format!("\nexit code: {}", exit_code.unwrap_or(-1))
+            };
+            let body = if out_buf.trim().is_empty() {
+                "(no output)".to_string()
+            } else {
+                out_buf.clone()
+            };
+            let text = format!("{body}{tail}");
+            if exit_code == Some(0) {
+                crate::bg::finish(&id2, Some(text.clone()));
+                let _ = tx2.send(ApiEvent::Note(format!(
+                    "background task {id2} finished: {desc2}"
+                )));
+                format!("Background task {id2} ({desc2}) finished. Output:\n{text}")
+            } else {
+                crate::bg::finish(&id2, Some(text.clone()));
+                let _ = tx2.send(ApiEvent::Note(format!(
+                    "background task {id2} failed (exit {exit_code:?}): {desc2}"
+                )));
+                format!("Background task {id2} ({desc2}) failed. Output:\n{text}")
+            }
+        };
+        queue
+            .lock()
+            .unwrap()
+            .push(tools::spill(msg, "task", budget));
+        let _ = tx2.send(ApiEvent::Wake);
+    });
+    format!(
+        "Command moved to the background inside the sandbox VM (task {id}). You will be notified automatically when it finishes; the notification will include the output. Do not poll task_status for completion; keep working on anything that does not depend on the result. Use task_kill to stop it."
     )
 }
 

@@ -99,13 +99,15 @@ impl PermCfg {
     /// apply_patch touches every path of the patch at once: user rules are
     /// matched against the first path, builtin protections scan all of them
     fn check_patch(&self, args: &str) -> Perm {
-        let v: serde_json::Value =
-            serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
+        let v: serde_json::Value = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
         let paths = v["patch"]
             .as_str()
             .map(crate::patch::paths)
             .unwrap_or_default();
-        if let Some(p) = self.rules_perm("apply_patch", paths.first().map(String::as_str).unwrap_or("")) {
+        if let Some(p) = self.rules_perm(
+            "apply_patch",
+            paths.first().map(String::as_str).unwrap_or(""),
+        ) {
             return p;
         }
         for p in &paths {
@@ -228,9 +230,7 @@ fn lexical_abs(p: &str) -> std::path::PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
     } else {
-        std::env::current_dir()
-            .unwrap_or_default()
-            .join(path)
+        std::env::current_dir().unwrap_or_default().join(path)
     }
 }
 
@@ -400,7 +400,10 @@ mod tests {
             bash: Some("ask".into()),
             ..Default::default()
         };
-        assert_eq!(cfg.check("bash", r#"{"command":"git status"}"#), Perm::Allow);
+        assert_eq!(
+            cfg.check("bash", r#"{"command":"git status"}"#),
+            Perm::Allow
+        );
         assert_eq!(cfg.check("bash", r#"{"command":"ls -la"}"#), Perm::Ask);
         assert_eq!(cfg.check("read_file", r#"{"path":"x"}"#), Perm::Allow);
         assert_eq!(cfg.check("write_file", r#"{"path":"x"}"#), Perm::Ask);
@@ -440,7 +443,10 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(wf.check("webfetch", r#"{"url":"https://x"}"#), Perm::Deny);
-        assert_eq!(PermCfg::default().check("webfetch", r#"{"url":"https://x"}"#), Perm::Allow);
+        assert_eq!(
+            PermCfg::default().check("webfetch", r#"{"url":"https://x"}"#),
+            Perm::Allow
+        );
         assert_eq!(
             PermCfg::default().check("webfetch", r#"{"url":"https://evil.com"}"#),
             Perm::Allow
@@ -500,13 +506,19 @@ mod tests {
     fn env_and_external_protection() {
         let cfg = PermCfg::default();
         assert_eq!(cfg.check("read_file", r#"{"path":".env"}"#), Perm::Ask);
-        assert_eq!(cfg.check("read_file", r#"{"path":"config/.env.local"}"#), Perm::Ask);
+        assert_eq!(
+            cfg.check("read_file", r#"{"path":"config/.env.local"}"#),
+            Perm::Ask
+        );
         assert_eq!(cfg.check("read_file", r#"{"path":"prod.env"}"#), Perm::Ask);
         assert_eq!(
             cfg.check("read_file", r#"{"path":"config/.env.example"}"#),
             Perm::Allow
         );
-        assert_eq!(cfg.check("read_file", r#"{"path":"src/main.rs"}"#), Perm::Allow);
+        assert_eq!(
+            cfg.check("read_file", r#"{"path":"src/main.rs"}"#),
+            Perm::Allow
+        );
 
         // an explicit user rule overrides the builtin
         let allow_env = PermCfg {
@@ -517,7 +529,10 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert_eq!(allow_env.check("read_file", r#"{"path":".env"}"#), Perm::Allow);
+        assert_eq!(
+            allow_env.check("read_file", r#"{"path":".env"}"#),
+            Perm::Allow
+        );
 
         // outside the working directory -> ask, even for allowed tools
         let ext = std::env::temp_dir().join("hi-derola-perm-test.txt");
@@ -531,7 +546,10 @@ mod tests {
         };
         assert_eq!(allowed_edit.check("edit", &edit_json), Perm::Ask);
         // internal paths stay allowed
-        assert_eq!(allowed_edit.check("edit", r#"{"path":"src/lib.rs"}"#), Perm::Allow);
+        assert_eq!(
+            allowed_edit.check("edit", r#"{"path":"src/lib.rs"}"#),
+            Perm::Allow
+        );
         // relative reads stay internal
         assert_eq!(cfg.check("list_files", r#"{"path":"."}"#), Perm::Allow);
     }
@@ -622,14 +640,25 @@ mod tests {
 
         // external read_file gets a directory rule too, internal stays "*"
         let r = derive_rule("read_file", &format!(r#"{{"path":"{}"}}"#, a.display())).unwrap();
-        assert!(r.pattern.as_deref().unwrap_or("").ends_with("/**"), "{:?}", r.pattern);
+        assert!(
+            r.pattern.as_deref().unwrap_or("").ends_with("/**"),
+            "{:?}",
+            r.pattern
+        );
         let r = derive_rule("read_file", r#"{"path":"src/main.rs"}"#).unwrap();
         assert_eq!(r.pattern.as_deref(), Some("*"));
 
         // apply_patch: the first external path scopes the rule
-        let patch = format!("*** Begin Patch\n*** Update File: {}\n@@\n-x\n+y\n", a.display());
+        let patch = format!(
+            "*** Begin Patch\n*** Update File: {}\n@@\n-x\n+y\n",
+            a.display()
+        );
         let args = serde_json::json!({ "patch": patch }).to_string();
         let r = derive_rule("apply_patch", &args).unwrap();
-        assert!(r.pattern.as_deref().unwrap_or("").ends_with("/**"), "{:?}", r.pattern);
+        assert!(
+            r.pattern.as_deref().unwrap_or("").ends_with("/**"),
+            "{:?}",
+            r.pattern
+        );
     }
 }

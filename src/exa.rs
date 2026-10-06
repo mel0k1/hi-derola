@@ -67,7 +67,8 @@ pub async fn mcp_call(url: &str, tool: &str, args: &Value, timeout: u64) -> Resu
         .unwrap_or("")
         .to_string();
     let body = read_body(resp).await?;
-    let is_sse = ctype.contains("text/event-stream") || body.lines().any(|l| l.starts_with("data:"));
+    let is_sse =
+        ctype.contains("text/event-stream") || body.lines().any(|l| l.starts_with("data:"));
     if is_sse {
         parse_sse(&body)
     } else {
@@ -146,8 +147,8 @@ fn text_from_rpc(v: &Value) -> Result<String> {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
-    use std::sync::{Arc, Mutex};
     use std::io::{Read, Write};
+    use std::sync::{Arc, Mutex};
 
     /// routes: path -> (status, content-type, body); captures "path :: body"
     /// per request; the routes closure receives the real bound port
@@ -177,12 +178,10 @@ mod tests {
                 let mut parts = req.split_whitespace();
                 let method = parts.next().unwrap_or("").to_string();
                 let path = parts.next().unwrap_or("/").to_string();
-                let body = req
-                    .split("\r\n\r\n")
-                    .nth(1)
-                    .unwrap_or("")
-                    .to_string();
-                log2.lock().unwrap().push(format!("{method} {path} :: {body}"));
+                let body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+                log2.lock()
+                    .unwrap()
+                    .push(format!("{method} {path} :: {body}"));
                 let Some((status, ctype, text)) = routes.get(&path) else {
                     let _ = write_all(
                         &mut s,
@@ -216,10 +215,7 @@ mod tests {
     async fn sse_result_passthrough() {
         let sse = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"const x = 1; // useful docs\"}]}}\n\n";
         let (port, log) = spawn_fake_http(|_p| {
-            BTreeMap::from([(
-                "/mcp".into(),
-                (200, "text/event-stream".into(), sse.into()),
-            )])
+            BTreeMap::from([("/mcp".into(), (200, "text/event-stream".into(), sse.into()))])
         });
         let out = codesearch_at(&base(port), "react hooks", 5_000, 10)
             .await
@@ -235,12 +231,10 @@ mod tests {
 
     #[tokio::test]
     async fn tokens_clamped_and_bare_json_reply() {
-        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"docs body"}]}}"#;
+        let body =
+            r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"docs body"}]}}"#;
         let (port, _log) = spawn_fake_http(|_p| {
-            BTreeMap::from([(
-                "/mcp".into(),
-                (200, "application/json".into(), body.into()),
-            )])
+            BTreeMap::from([("/mcp".into(), (200, "application/json".into(), body.into()))])
         });
         let out = codesearch_at(&base(port), "q", 99_999, 10).await.unwrap();
         assert_eq!(out, "docs body");
@@ -248,7 +242,8 @@ mod tests {
 
     #[tokio::test]
     async fn empty_content_means_no_results() {
-        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"   "}]}}"#;
+        let body =
+            r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"   "}]}}"#;
         let (port, _log) = spawn_fake_http(|_p| {
             BTreeMap::from([(
                 "/mcp".into(),
@@ -282,7 +277,10 @@ mod tests {
         let (port, _log) = spawn_fake_http(|_p| {
             BTreeMap::from([
                 ("/err".into(), (500, "text/plain".into(), "boom".into())),
-                ("/junk".into(), (200, "application/json".into(), "{not json".into())),
+                (
+                    "/junk".into(),
+                    (200, "application/json".into(), "{not json".into()),
+                ),
                 (
                     "/shape".into(),
                     (200, "application/json".into(), r#"{"result":{}}"#.into()),

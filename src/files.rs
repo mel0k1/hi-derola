@@ -7,7 +7,7 @@ pub struct WriteBlock {
 }
 
 const MAX_ATTACH_BYTES: u64 = 128 * 1024;
-const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
+pub(crate) const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
 
 pub fn is_image(path: &str) -> bool {
     matches!(
@@ -21,7 +21,7 @@ pub fn is_image(path: &str) -> bool {
     )
 }
 
-fn image_mime(ext: &str) -> &'static str {
+pub(crate) fn image_mime(ext: &str) -> &'static str {
     match ext {
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
@@ -72,8 +72,7 @@ pub fn apply(block: &WriteBlock) -> Result<usize> {
     let path = std::path::Path::new(&block.path);
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| anyhow::anyhow!("{}: {e}", block.path))?;
+            std::fs::create_dir_all(parent).map_err(|e| anyhow::anyhow!("{}: {e}", block.path))?;
         }
     }
     std::fs::write(path, &block.content).map_err(|e| anyhow::anyhow!("{}: {e}", block.path))?;
@@ -198,7 +197,11 @@ mod tests {
         walk_files(&dir.display().to_string(), &mut out);
         let rel: Vec<String> = out
             .iter()
-            .map(|p| p.strip_prefix(&format!("{}/", dir.display())).unwrap_or(p).to_string())
+            .map(|p| {
+                p.strip_prefix(&format!("{}/", dir.display()))
+                    .unwrap_or(p)
+                    .to_string()
+            })
             .collect();
         assert!(rel.contains(&"src/main.rs".to_string()));
         assert!(rel.contains(&"Cargo.toml".to_string()));
