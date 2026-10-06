@@ -14,6 +14,12 @@
 //! the guest (config upload + rustup + cargo install, live log) and then
 //! launched there as a TUI — so the agent works on VM files, never on yours.
 //!
+//! Phase 3 wires the VM into the agent loop: every distro comes in a
+//! minimal / standard pair (the wizard and the TUI /sandbox command can
+//! pick either), and the chat can attach to a running VM so the bash tool
+//! executes inside it over ssh ("shell route") — the model works on VM
+//! files without its commands ever touching the host.
+//!
 //! Storage layout under `<config dir>/hi-derola/sandboxes/`:
 //! ```text
 //! <id>/sandbox.json   the SandboxSpec the wizard produced
@@ -40,10 +46,17 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// variant, built for virtual machines; boots both BIOS and UEFI)
 pub const DEBIAN_TRIXIE_URL: &str =
     "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2";
+/// Debian 13 "trixie" standard cloud image (generic — the full variant with
+/// more packages on board, same cloud-init wiring)
+pub const DEBIAN_TRIXIE_STD_URL: &str =
+    "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2";
 /// Ubuntu 24.04 LTS *minimal* cloud image — Canonical trims it to boot
-/// smaller and faster than the standard server cloud image (a standard /
-/// minimal switch can come later; the minimal one fits the sandbox story)
+/// smaller and faster than the standard server cloud image
 pub const UBUNTU_2404_URL: &str = "https://cloud-images.ubuntu.com/minimal/releases/24.04/release/ubuntu-24.04-minimal-cloudimg-amd64.img";
+/// Ubuntu 24.04 LTS standard server cloud image (the classic one — bigger,
+/// but ships the full server toolset out of the box)
+pub const UBUNTU_2404_STD_URL: &str =
+    "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img";
 /// legacy NixOS entry: kept so old sandbox.json files still load, no longer
 /// offered by the wizard (no cloud-init → no seed/ssh login wiring)
 pub const NIXOS_URL: &str =
@@ -65,8 +78,12 @@ pub const SSH_WAIT_SECS: u64 = 600;
 #[serde(rename_all = "kebab-case")]
 pub enum ImageKind {
     DebianTrixie,
+    #[serde(rename = "debian-trixie-std")]
+    DebianTrixieStd,
     #[serde(rename = "ubuntu-24.04")]
     Ubuntu2404,
+    #[serde(rename = "ubuntu-24.04-std")]
+    Ubuntu2404Std,
     /// legacy: not offered by the wizard anymore, but old sandboxes must
     /// keep loading (see NIXOS_URL)
     Nixos,
@@ -79,7 +96,9 @@ impl ImageKind {
     pub fn label(self) -> &'static str {
         match self {
             ImageKind::DebianTrixie => "Debian 13 (trixie) minimal",
+            ImageKind::DebianTrixieStd => "Debian 13 (trixie) standard",
             ImageKind::Ubuntu2404 => "Ubuntu 24.04 LTS minimal",
+            ImageKind::Ubuntu2404Std => "Ubuntu 24.04 LTS standard",
             ImageKind::Nixos => "NixOS minimal",
             ImageKind::Custom => "own image",
         }
@@ -88,7 +107,9 @@ impl ImageKind {
     pub fn url(self) -> Option<&'static str> {
         match self {
             ImageKind::DebianTrixie => Some(DEBIAN_TRIXIE_URL),
+            ImageKind::DebianTrixieStd => Some(DEBIAN_TRIXIE_STD_URL),
             ImageKind::Ubuntu2404 => Some(UBUNTU_2404_URL),
+            ImageKind::Ubuntu2404Std => Some(UBUNTU_2404_STD_URL),
             ImageKind::Nixos => Some(NIXOS_URL),
             ImageKind::Custom => None,
         }
@@ -101,7 +122,13 @@ impl ImageKind {
     /// kinds that ship cloud-init and therefore get a seed image, an ssh
     /// keypair and the wait/install tooling
     pub fn wants_seed(self) -> bool {
-        matches!(self, ImageKind::DebianTrixie | ImageKind::Ubuntu2404)
+        matches!(
+            self,
+            ImageKind::DebianTrixie
+                | ImageKind::DebianTrixieStd
+                | ImageKind::Ubuntu2404
+                | ImageKind::Ubuntu2404Std
+        )
     }
 }
 
@@ -366,7 +393,9 @@ pub fn parse_accel_list(output: &str) -> String {
 }
 
 fn run_version(path: &Path) -> Option<String> {
-    let out = silent(&mut Command::new(path).arg("--version")).output().ok()?;
+    let out = silent(&mut Command::new(path).arg("--version"))
+        .output()
+        .ok()?;
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&out.stdout),
@@ -473,10 +502,7 @@ pub fn build_qemu_args(spec: &SandboxSpec, dir: &Path, accel: &str) -> Vec<Strin
         "-netdev".into(),
         // loopback bind: the guest ssh is reachable from this machine only
         // (and no firewall prompt on windows)
-        format!(
-            "user,id=n0,hostfwd=tcp:127.0.0.1:{}-:22",
-            spec.ssh_port
-        ),
+        format!("user,id=n0,hostfwd=tcp:127.0.0.1:{}-:22", spec.ssh_port),
         "-device".into(),
         "virtio-net-pci,netdev=n0".into(),
         "-device".into(),
@@ -493,7 +519,11 @@ pub fn build_qemu_args(spec: &SandboxSpec, dir: &Path, accel: &str) -> Vec<Strin
 pub fn build_img_args(kind: ImageKind, dir: &Path, disk_gib: u32) -> Vec<String> {
     let disk = dir.join("disk.qcow2");
     match kind {
-        ImageKind::DebianTrixie | ImageKind::Ubuntu2404 | ImageKind::Nixos => vec![
+        ImageKind::DebianTrixie
+        | ImageKind::DebianTrixieStd
+        | ImageKind::Ubuntu2404
+        | ImageKind::Ubuntu2404Std
+        | ImageKind::Nixos => vec![
             "create".into(),
             "-f".into(),
             "qcow2".into(),
@@ -725,7 +755,10 @@ impl SandboxManager {
         let disk_gib = req.disk_gib.unwrap_or(20).clamp(DISK_MIN, DISK_MAX);
         let ram_mib = req.ram_mib.unwrap_or(2048).clamp(RAM_MIN, RAM_MAX);
         let cpus = req.cpus.unwrap_or(2).clamp(1, CPU_MAX);
-        let ssh_port = req.ssh_port.unwrap_or(DEFAULT_PORT).clamp(PORT_MIN, PORT_MAX);
+        let ssh_port = req
+            .ssh_port
+            .unwrap_or(DEFAULT_PORT)
+            .clamp(PORT_MIN, PORT_MAX);
         let map = self.inner.lock().unwrap();
         if map.values().any(|e| e.spec.name == name) {
             bail!("a sandbox named \"{name}\" already exists");
@@ -778,8 +811,7 @@ impl SandboxManager {
     pub fn create(self: &Arc<Self>, req: &NewSandbox) -> Result<SandboxStatus> {
         let spec = self.prepare_spec(req)?;
         let dir = self.sandbox_dir(&spec.id);
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("create {}", dir.display()))?;
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         let raw = serde_json::to_string_pretty(&spec)?;
         std::fs::write(dir.join("sandbox.json"), raw)?;
         self.persist_pid(&spec.id, None);
@@ -847,7 +879,9 @@ impl SandboxManager {
     pub fn start(self: &Arc<Self>, id: &str) -> Result<SandboxStatus> {
         let spec = {
             let map = self.inner.lock().unwrap();
-            let e = map.get(id).ok_or_else(|| anyhow!("sandbox \"{id}\" not found"))?;
+            let e = map
+                .get(id)
+                .ok_or_else(|| anyhow!("sandbox \"{id}\" not found"))?;
             match e.state {
                 VmState::Downloading => bail!("download still in progress"),
                 VmState::Running => bail!("sandbox is already running"),
@@ -865,7 +899,8 @@ impl SandboxManager {
 
         // ensure the disk exists (custom disk images skip this entirely)
         let disk = dir.join("disk.qcow2");
-        let custom_disk_boot = spec.kind == ImageKind::Custom && !is_iso_path(spec.iso_path.as_deref());
+        let custom_disk_boot =
+            spec.kind == ImageKind::Custom && !is_iso_path(spec.iso_path.as_deref());
         if !custom_disk_boot {
             if spec.kind.needs_download() && !dir.join("image.qcow2").is_file() {
                 // image not there (deleted / failed download) -> retry the download
@@ -878,9 +913,13 @@ impl SandboxManager {
                 return Ok(self.status_of(id)?);
             }
             if !disk.is_file() {
-                let out = silent(&mut Command::new(&img).args(build_img_args(spec.kind, &dir, spec.disk_gib)))
-                    .output()
-                    .map_err(|e| anyhow!("qemu-img: {e}"))?;
+                let out = silent(&mut Command::new(&img).args(build_img_args(
+                    spec.kind,
+                    &dir,
+                    spec.disk_gib,
+                )))
+                .output()
+                .map_err(|e| anyhow!("qemu-img: {e}"))?;
                 if !out.status.success() {
                     let err = String::from_utf8_lossy(&out.stderr);
                     bail!("qemu-img failed: {}", err.trim());
@@ -950,7 +989,9 @@ impl SandboxManager {
     pub fn stop(&self, id: &str) -> Result<SandboxStatus> {
         let pid = {
             let mut map = self.inner.lock().unwrap();
-            let e = map.get_mut(id).ok_or_else(|| anyhow!("sandbox \"{id}\" not found"))?;
+            let e = map
+                .get_mut(id)
+                .ok_or_else(|| anyhow!("sandbox \"{id}\" not found"))?;
             e.stopping = true;
             e.state = VmState::Stopped;
             e.error = None;
@@ -975,9 +1016,12 @@ impl SandboxManager {
     /// delete the sandbox dir; a running VM is stopped first, an in-flight
     /// download is cancelled, ssh/install threads are interrupted
     pub fn delete(self: &Arc<Self>, id: &str) -> Result<()> {
+        clear_shell_route_if(id);
         let pid = {
             let map = self.inner.lock().unwrap();
-            let e = map.get(id).ok_or_else(|| anyhow!("sandbox \"{id}\" not found"))?;
+            let e = map
+                .get(id)
+                .ok_or_else(|| anyhow!("sandbox \"{id}\" not found"))?;
             if let Some(p) = &e.prog {
                 p.cancel.store(true, Ordering::Relaxed);
             }
@@ -995,8 +1039,7 @@ impl SandboxManager {
         self.persist_pid(id, None); // keep state.json consistent if dir removal races
         let dir = self.sandbox_dir(id);
         if dir.exists() {
-            std::fs::remove_dir_all(&dir)
-                .with_context(|| format!("remove {}", dir.display()))?;
+            std::fs::remove_dir_all(&dir).with_context(|| format!("remove {}", dir.display()))?;
         }
         Ok(())
     }
@@ -1051,7 +1094,9 @@ impl SandboxManager {
                 e.state = final_state;
                 e.error = if final_state == VmState::Failed {
                     Some(
-                        error.clone().unwrap_or_else(|| "download failed".to_string()),
+                        error
+                            .clone()
+                            .unwrap_or_else(|| "download failed".to_string()),
                     )
                 } else {
                     None
@@ -1077,11 +1122,7 @@ async fn download_to_file(url: &str, dest: &Path, prog: &ProgShared) -> Result<(
         .store(resp.content_length().unwrap_or(0), Ordering::Relaxed);
     let mut file = std::fs::File::create(dest).map_err(|e| format!("create: {e}"))?;
     let mut downloaded: u64 = 0;
-    while let Some(chunk) = resp
-        .chunk()
-        .await
-        .map_err(|e| format!("read: {e}"))?
-    {
+    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("read: {e}"))? {
         if prog.cancel.load(Ordering::Relaxed) {
             return Err("cancelled".to_string());
         }
@@ -1129,6 +1170,9 @@ impl SandboxManager {
                     e.state = VmState::Stopped;
                 } else {
                     e.state = VmState::Failed;
+                    // the route would just error on the next bash call anyway
+                    // (self-heal there), detaching now keeps the state honest
+                    clear_shell_route_if(&id);
                     let mut msg = reason;
                     let log = mgr.sandbox_dir(&id).join("qemu.log");
                     let tail = tail_file(&log, 300);
@@ -1322,7 +1366,14 @@ impl SandboxManager {
                 Ok(cfg) => {
                     live.push_log("[*] uploading the host config (provider, api key)");
                     let remote = "mkdir -p \"$HOME/.config/hi-derola\" && cat > \"$HOME/.config/hi-derola/config.toml\"";
-                    match crate::sshx::stream(&bin, &target, remote, Some(cfg.as_bytes()), cancel, |_| {}) {
+                    match crate::sshx::stream(
+                        &bin,
+                        &target,
+                        remote,
+                        Some(cfg.as_bytes()),
+                        cancel,
+                        |_| {},
+                    ) {
                         Ok(0) => {}
                         Ok(c) => {
                             mgr.fail_install(&id, format!("config upload exited with {c}"));
@@ -1336,7 +1387,9 @@ impl SandboxManager {
                     }
                 }
                 Err(_) => {
-                    live.push_log("[!] no host config found — the agent will start without an api key");
+                    live.push_log(
+                        "[!] no host config found — the agent will start without an api key",
+                    );
                 }
             }
 
@@ -1359,9 +1412,10 @@ impl SandboxManager {
                         });
                         live.push_log("[ok] agent is ready — \"run agent\" opens it inside the VM");
                     }
-                    Ok(_) => {
-                        mgr.fail_install(&id, "install reported success but the binary is missing".into())
-                    }
+                    Ok(_) => mgr.fail_install(
+                        &id,
+                        "install reported success but the binary is missing".into(),
+                    ),
                     Err(e) => mgr.fail_install(&id, format!("verify: {e}")),
                 },
                 Ok(c) => mgr.fail_install(&id, format!("install script exited with code {c}")),
@@ -1408,8 +1462,7 @@ impl SandboxManager {
         if live.info.lock().unwrap().state != SshState::Ready {
             bail!("ssh is not ready yet");
         }
-        let bin =
-            crate::sshx::find_ssh().ok_or_else(|| anyhow!("no ssh client on the host"))?;
+        let bin = crate::sshx::find_ssh().ok_or_else(|| anyhow!("no ssh client on the host"))?;
         let target = Self::ssh_target(&dir, &spec);
         let cancel = AtomicBool::new(false);
         crate::sshx::exec(
@@ -1421,6 +1474,88 @@ impl SandboxManager {
         )
         .map_err(|e| anyhow!("{e}"))
     }
+}
+
+// ------------------------------------------------------------- shell route
+
+/// id of the sandbox the bash tool currently executes in ("shell route",
+/// attached via the TUI /sandbox command); global, so both frontends route
+/// the same way and the flag survives across chat sessions in one process
+static SHELL_ROUTE: Mutex<Option<String>> = Mutex::new(None);
+
+/// the attached sandbox id, if any
+pub fn shell_route() -> Option<String> {
+    SHELL_ROUTE.lock().unwrap().clone()
+}
+
+/// attach / detach shell routing; callers validate the target first
+pub fn set_shell_route(id: Option<String>) {
+    *SHELL_ROUTE.lock().unwrap() = id;
+}
+
+/// drop the route when it points at a sandbox that just stopped, failed or
+/// was deleted; a no-op when another sandbox is attached
+fn clear_shell_route_if(id: &str) {
+    let mut r = SHELL_ROUTE.lock().unwrap();
+    if r.as_deref() == Some(id) {
+        *r = None;
+    }
+}
+
+/// run one bash-tool command inside the attached VM over ssh and format the
+/// result like the local bash tool does (stdout+stderr combined, "(no
+/// output)" for silence, exit code appended on failure). Detaches itself
+/// when the VM is gone so a stale route cannot wedge the agent.
+pub fn sandbox_bash(cmd: &str, timeout_secs: Option<u64>) -> Result<String> {
+    let id = shell_route().ok_or_else(|| anyhow!("no sandbox attached"))?;
+    let m = SandboxManager::global();
+    let Some(st) = m.list().into_iter().find(|s| s.spec.id == id) else {
+        clear_shell_route_if(&id);
+        bail!("attached sandbox \"{id}\" no longer exists — shell routing detached");
+    };
+    if st.state != VmState::Running {
+        clear_shell_route_if(&id);
+        bail!(
+            "sandbox \"{}\" is not running — shell routing detached",
+            st.spec.name
+        );
+    }
+    let out = m.ssh_exec(&id, cmd, Some(timeout_secs.unwrap_or(120).clamp(1, 300)))?;
+    let mut text = out.stdout;
+    if !out.stderr.trim().is_empty() {
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&out.stderr);
+    }
+    if text.trim().is_empty() {
+        text.push_str("(no output)");
+    }
+    if out.code != 0 {
+        text.push_str(&format!("\nexit code: {}", out.code));
+    }
+    Ok(text)
+}
+
+/// system-prompt addendum while the shell route is active: the model must
+/// know its commands run inside a linux VM, not on the host
+pub fn shell_route_addendum() -> Option<String> {
+    let id = shell_route()?;
+    let st = SandboxManager::global()
+        .list()
+        .into_iter()
+        .find(|s| s.spec.id == id)?;
+    Some(format!(
+        "SANDBOX MODE is active: bash commands execute INSIDE the sandbox VM \"{}\" \
+         ({}, linux {}) over ssh, not on the host. Use unix paths and unix commands; \
+         the workdir parameter does not apply. Background bash is unavailable in the \
+         VM — run commands in the foreground. Your file tools (read_file, write_file, \
+         edit, glob, grep, list_files) still operate on the host working directory, \
+         not inside the VM; use bash (cat, tee, sed, find, grep) for VM files.",
+        st.spec.name,
+        st.spec.kind.label(),
+        std::env::consts::ARCH
+    ))
 }
 
 /// last `max` bytes of a file, char-boundary safe, as one trimmed line block
@@ -1436,7 +1571,10 @@ fn tail_file(path: &Path, max: usize) -> String {
         start += 1;
     }
     let text = String::from_utf8_lossy(&raw[start..]);
-    text.lines().map(|l| l.trim_end()).collect::<Vec<_>>().join(" | ")
+    text.lines()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 // ------------------------------------------------------------- ids & misc
@@ -1472,7 +1610,13 @@ fn unique_id(base: &str, mut taken: impl FnMut(&str) -> bool) -> String {
             return cand;
         }
     }
-    format!("{base}-{}", SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0))
+    format!(
+        "{base}-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    )
 }
 
 /// hide the console window a helper process would flash on Windows
@@ -1504,20 +1648,27 @@ fn pid_is_qemu(pid: u32) -> bool {
     }
     #[cfg(windows)]
     {
-        let Ok(out) =
-            silent(&mut Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"]))
-                .output()
-        else {
+        let Ok(out) = silent(&mut Command::new("tasklist").args([
+            "/FI",
+            &format!("PID eq {pid}"),
+            "/NH",
+            "/FO",
+            "CSV",
+        ]))
+        .output() else {
             return false;
         };
-        String::from_utf8_lossy(&out.stdout).to_lowercase().contains("qemu")
+        String::from_utf8_lossy(&out.stdout)
+            .to_lowercase()
+            .contains("qemu")
     }
 }
 
 #[cfg(windows)]
 fn pid_alive(pid: u32) -> bool {
-    let Ok(out) = silent(&mut Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH"]))
-        .output()
+    let Ok(out) =
+        silent(&mut Command::new("tasklist").args(["/FI", &format!("PID eq {pid}"), "/NH"]))
+            .output()
     else {
         return false;
     };
@@ -1553,11 +1704,7 @@ mod tests {
     use super::*;
 
     fn temp_dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "hiderola-sbx-{}-{}",
-            tag,
-            std::process::id()
-        ));
+        let d = std::env::temp_dir().join(format!("hiderola-sbx-{}-{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -1603,8 +1750,14 @@ mod tests {
             serde_json::to_string(&ImageKind::Ubuntu2404).unwrap(),
             "\"ubuntu-24.04\""
         );
-        assert_eq!(serde_json::to_string(&ImageKind::Nixos).unwrap(), "\"nixos\"");
-        assert_eq!(serde_json::to_string(&ImageKind::Custom).unwrap(), "\"custom\"");
+        assert_eq!(
+            serde_json::to_string(&ImageKind::Nixos).unwrap(),
+            "\"nixos\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ImageKind::Custom).unwrap(),
+            "\"custom\""
+        );
         let k: ImageKind = serde_json::from_str("\"ubuntu-24.04\"").unwrap();
         assert_eq!(k, ImageKind::Ubuntu2404);
         // legacy kinds keep loading
@@ -1616,26 +1769,97 @@ mod tests {
         assert!(ImageKind::Ubuntu2404.needs_download());
         assert!(!ImageKind::Custom.needs_download());
         assert!(DEBIAN_TRIXIE_URL.starts_with("https://cloud.debian.org/images/cloud/trixie/"));
-        assert!(UBUNTU_2404_URL.starts_with("https://cloud-images.ubuntu.com/minimal/releases/24.04/"));
+        assert!(
+            UBUNTU_2404_URL.starts_with("https://cloud-images.ubuntu.com/minimal/releases/24.04/")
+        );
         assert!(UBUNTU_2404_URL.ends_with("ubuntu-24.04-minimal-cloudimg-amd64.img"));
+    }
+
+    #[test]
+    fn standard_variants_roundtrip_and_urls() {
+        assert_eq!(
+            serde_json::to_string(&ImageKind::DebianTrixieStd).unwrap(),
+            "\"debian-trixie-std\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ImageKind::Ubuntu2404Std).unwrap(),
+            "\"ubuntu-24.04-std\""
+        );
+        let k: ImageKind = serde_json::from_str("\"debian-trixie-std\"").unwrap();
+        assert_eq!(k, ImageKind::DebianTrixieStd);
+        let k: ImageKind = serde_json::from_str("\"ubuntu-24.04-std\"").unwrap();
+        assert_eq!(k, ImageKind::Ubuntu2404Std);
+        assert_eq!(
+            ImageKind::DebianTrixieStd.url(),
+            Some(DEBIAN_TRIXIE_STD_URL)
+        );
+        assert_eq!(ImageKind::Ubuntu2404Std.url(), Some(UBUNTU_2404_STD_URL));
+        assert!(DEBIAN_TRIXIE_STD_URL.ends_with("debian-13-generic-amd64.qcow2"));
+        assert!(UBUNTU_2404_STD_URL.ends_with("ubuntu-24.04-server-cloudimg-amd64.img"));
+        assert_eq!(
+            ImageKind::DebianTrixie.label(),
+            "Debian 13 (trixie) minimal"
+        );
+        assert_eq!(
+            ImageKind::DebianTrixieStd.label(),
+            "Debian 13 (trixie) standard"
+        );
+        assert_eq!(ImageKind::Ubuntu2404.label(), "Ubuntu 24.04 LTS minimal");
+        assert_eq!(
+            ImageKind::Ubuntu2404Std.label(),
+            "Ubuntu 24.04 LTS standard"
+        );
+        assert!(ImageKind::DebianTrixieStd.needs_download());
+        assert!(ImageKind::Ubuntu2404Std.needs_download());
     }
 
     #[test]
     fn seed_only_for_cloud_init_kinds() {
         assert!(ImageKind::DebianTrixie.wants_seed());
         assert!(ImageKind::Ubuntu2404.wants_seed());
+        assert!(ImageKind::DebianTrixieStd.wants_seed());
+        assert!(ImageKind::Ubuntu2404Std.wants_seed());
         // no cloud-init -> no seed/ssh wiring
         assert!(!ImageKind::Nixos.wants_seed());
         assert!(!ImageKind::Custom.wants_seed());
     }
 
     #[test]
+    fn shell_route_set_clear_and_detach() {
+        set_shell_route(None);
+        assert!(shell_route().is_none());
+
+        // attach + pointwise clear of a different id keeps the route
+        set_shell_route(Some("vm-a".into()));
+        clear_shell_route_if("vm-b");
+        assert_eq!(shell_route().as_deref(), Some("vm-a"));
+        clear_shell_route_if("vm-a");
+        assert!(shell_route().is_none());
+
+        // sandbox_bash without a route is a clean error
+        let err = sandbox_bash("true", None).unwrap_err().to_string();
+        assert!(err.contains("no sandbox attached"), "{err}");
+
+        // a route pointing at a nonexistent sandbox self-detaches
+        set_shell_route(Some("ghost-vm".into()));
+        let err = sandbox_bash("true", None).unwrap_err().to_string();
+        assert!(err.contains("no longer exists"), "{err}");
+        assert!(shell_route().is_none());
+        set_shell_route(None);
+    }
+
+    #[test]
     fn version_and_accel_parsing() {
-        let v = parse_version_line("QEMU emulator version 8.2.0 (Debian 1:8.2.0+ds-1)\nCopyright (c) 2003-2023");
+        let v = parse_version_line(
+            "QEMU emulator version 8.2.0 (Debian 1:8.2.0+ds-1)\nCopyright (c) 2003-2023",
+        );
         assert!(v.unwrap().contains("8.2.0"));
         assert_eq!(parse_version_line("no version here"), None);
         assert_eq!(parse_version_line(""), None);
-        assert_eq!(parse_accel_list("Accelerators supported with machine default:\nwhpx\ntcg\n"), "whpx");
+        assert_eq!(
+            parse_accel_list("Accelerators supported with machine default:\nwhpx\ntcg\n"),
+            "whpx"
+        );
         assert_eq!(parse_accel_list("kvm\ntcg\n"), "kvm");
         assert_eq!(parse_accel_list("hvf\ntcg\n"), "hvf");
         assert_eq!(parse_accel_list("tcg\n"), "tcg");
@@ -1666,7 +1890,9 @@ mod tests {
 
         let ubuntu = spec("ub", ImageKind::Ubuntu2404, None);
         let a = build_qemu_args(&ubuntu, dir, "kvm");
-        assert!(a.join(" ").contains("file=/vm/test/seed.img,format=raw,if=virtio"));
+        assert!(a
+            .join(" ")
+            .contains("file=/vm/test/seed.img,format=raw,if=virtio"));
 
         let iso = spec("ins", ImageKind::Custom, Some("/imgs/debian.iso"));
         let a = build_qemu_args(&iso, dir, "tcg");
@@ -1694,7 +1920,13 @@ mod tests {
     #[test]
     fn img_args_overlay_vs_plain() {
         let dir = Path::new("/vm/test");
-        for kind in [ImageKind::DebianTrixie, ImageKind::Ubuntu2404, ImageKind::Nixos] {
+        for kind in [
+            ImageKind::DebianTrixie,
+            ImageKind::DebianTrixieStd,
+            ImageKind::Ubuntu2404,
+            ImageKind::Ubuntu2404Std,
+            ImageKind::Nixos,
+        ] {
             let overlay = build_img_args(kind, dir, 20);
             let s = overlay.join(" ");
             assert!(s.starts_with("create -f qcow2"));
@@ -1787,7 +2019,9 @@ mod tests {
         // the manager with its wizard metadata persisted
         let dir = temp_dir("cloud");
         let mgr = Arc::new(SandboxManager::new(dir.clone()));
-        let st = mgr.create(&req("deb box", ImageKind::DebianTrixie)).unwrap();
+        let st = mgr
+            .create(&req("deb box", ImageKind::DebianTrixie))
+            .unwrap();
         assert!(matches!(
             st.state,
             VmState::Downloading | VmState::Failed | VmState::Stopped
@@ -1870,7 +2104,13 @@ mod tests {
 
         // invalid logins are refused before anything is written;
         // empty/blank logins are NOT errors — they fall back to the default
-        for bad in ["root", "Root", "9lives", "has space", "x".repeat(33).as_str()] {
+        for bad in [
+            "root",
+            "Root",
+            "9lives",
+            "has space",
+            "x".repeat(33).as_str(),
+        ] {
             let mut r = req("bad", ImageKind::Custom);
             r.iso_path = Some(iso.display().to_string());
             r.login = Some(bad.to_string());
@@ -1956,8 +2196,7 @@ mod tests {
         assert!(v.get("download").is_none());
         assert!(v.get("ssh").is_none());
         assert!(v.get("error").is_none());
-        let v: serde_json::Value =
-            serde_json::to_value(&st.clone()).unwrap();
+        let v: serde_json::Value = serde_json::to_value(&st.clone()).unwrap();
         assert!(v["spec"].is_object());
     }
 

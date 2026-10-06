@@ -1998,10 +1998,22 @@ const SBX_IMAGES = [
     hint: "official minimal cloud image, boots fast; a cloud-init seed (your login + a generated ssh key) is created automatically",
   },
   {
+    id: "debian-trixie-std",
+    label: "Debian 13 (trixie) standard",
+    size: "~800 MiB download",
+    hint: "the full generic cloud image — more packages on board than the minimal one, same cloud-init seed and ssh wiring",
+  },
+  {
     id: "ubuntu-24.04",
     label: "Ubuntu 24.04 LTS minimal",
     size: "~300 MiB download",
     hint: "Canonical's trimmed cloud image — smaller and quicker to boot than the standard server image; the cloud-init seed works out of the box",
+  },
+  {
+    id: "ubuntu-24.04-std",
+    label: "Ubuntu 24.04 LTS standard",
+    size: "~650 MiB download",
+    hint: "the standard server cloud image — ships the full server toolset; the cloud-init seed works out of the box",
   },
   {
     id: "custom",
@@ -2446,8 +2458,8 @@ function renderWizardStep3(body) {
 
   const hint = el("div", "hint sbxw-hint");
   hint.textContent =
-    SBXW.kind === "debian-trixie" || SBXW.kind === "ubuntu-24.04"
-      ? "downloads the official cloud image and generates a cloud-init seed (your login + a generated ssh key); the first boot sets the user up and the card shows when ssh is ready — then you can open a terminal or install the agent inside"
+    ["debian-trixie", "debian-trixie-std", "ubuntu-24.04", "ubuntu-24.04-std"].includes(SBXW.kind)
+      ? "downloads the official cloud image and generates a cloud-init seed (your login + a generated ssh key); the first boot sets the user up and the card shows when ssh is ready — then you can open a terminal, install the agent inside, or attach the chat with /sandbox attach in the TUI"
       : "boots from your file as-is; the VM opens its own window, guest ssh is forwarded to the host port above";
   body.appendChild(hint);
 

@@ -26,7 +26,11 @@ fn tail(s: &str, max: usize) -> String {
         start += 1;
     }
     let dropped: usize = s[..start].chars().count();
-    format!("... ({} chars truncated from the head)\n{}", dropped, &s[start..])
+    format!(
+        "... ({} chars truncated from the head)\n{}",
+        dropped,
+        &s[start..]
+    )
 }
 
 /// tool outputs are also saved to a file (so the model can read back whatever
@@ -89,7 +93,11 @@ fn save_spill(dir: &std::path::Path, tool: &str, text: &str) -> std::io::Result<
         .map(|d| d.as_millis())
         .unwrap_or(0);
     for i in 0u32..1000 {
-        let suffix = if i == 0 { String::new() } else { format!("-{i}") };
+        let suffix = if i == 0 {
+            String::new()
+        } else {
+            format!("-{i}")
+        };
         let file = dir.join(format!("{name}-{stamp}{suffix}.txt"));
         if file.exists() {
             continue;
@@ -107,7 +115,9 @@ fn spill_cleanup(dir: &std::path::Path) {
     let cutoff = std::time::SystemTime::now()
         .checked_sub(std::time::Duration::from_secs(SPILL_RETENTION_SECS));
     let Some(cutoff) = cutoff else { return };
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in rd.flatten() {
         let old = e
             .metadata()
@@ -512,10 +522,7 @@ pub fn detail(name: &str, args: &str) -> String {
         "lsp" => {
             let op = v["operation"].as_str().unwrap_or("lsp");
             let pos = match v["operation"].as_str() {
-                Some("workspace_symbols") => v["query"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string(),
+                Some("workspace_symbols") => v["query"].as_str().unwrap_or("").to_string(),
                 Some("document_symbols") => v["path"].as_str().unwrap_or("").to_string(),
                 _ => {
                     let p = v["path"].as_str().unwrap_or("");
@@ -703,7 +710,8 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
                 bail!("edit: old_str is empty");
             }
             let replace_all = v["replace_all"].as_bool().unwrap_or(false);
-            let content = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
+            let content =
+                std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
             let (updated, count) = apply_edit(&content, old, new, replace_all)
                 .map_err(|e| anyhow::anyhow!("edit: {e:#} in {path}"))?;
             std::fs::write(path, updated).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
@@ -732,7 +740,10 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
             }
             let mut s = files.join("\n");
             if files.len() >= crate::search::MAX_RESULTS {
-                s.push_str(&format!("\n... truncated at {} results", crate::search::MAX_RESULTS));
+                s.push_str(&format!(
+                    "\n... truncated at {} results",
+                    crate::search::MAX_RESULTS
+                ));
             }
             Ok(s)
         }
@@ -790,7 +801,8 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
             let Some(uri) = v["uri"].as_str().map(str::trim).filter(|s| !s.is_empty()) else {
                 bail!("mcp_resource: uri required");
             };
-            c.read_resource(v["server"].as_str().unwrap_or(""), uri).await
+            c.read_resource(v["server"].as_str().unwrap_or(""), uri)
+                .await
         }
         "task_status" => {
             let id = v["id"].as_str().filter(|s| !s.trim().is_empty());
@@ -820,13 +832,15 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
                 "hover" => crate::lsp::hover(path, line, col).await,
                 "definition" => crate::lsp::definition(path, line, col).await,
                 "implementation" => crate::lsp::implementation(path, line, col).await,
-                "references" => crate::lsp::references(
-                    path,
-                    line,
-                    col,
-                    v["include_declaration"].as_bool().unwrap_or(true),
-                )
-                .await,
+                "references" => {
+                    crate::lsp::references(
+                        path,
+                        line,
+                        col,
+                        v["include_declaration"].as_bool().unwrap_or(true),
+                    )
+                    .await
+                }
                 "document_symbols" => crate::lsp::document_symbols(path).await,
                 "workspace_symbols" => {
                     crate::lsp::workspace_symbols(v["query"].as_str().unwrap_or("")).await
@@ -844,6 +858,19 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
                 bail!("bash: command required");
             };
             let timeout = v["timeout"].as_u64().unwrap_or(120).clamp(1, 600);
+            if crate::sandbox::shell_route().is_some() {
+                // sandbox attached: the command runs inside the VM over ssh
+                // (the system ssh client blocks — keep it off the async workers)
+                let cmd = cmd.to_string();
+                return match tokio::task::spawn_blocking(move || {
+                    crate::sandbox::sandbox_bash(&cmd, Some(timeout))
+                })
+                .await
+                {
+                    Ok(res) => res,
+                    Err(e) => bail!("sandbox bash: {e}"),
+                };
+            }
             bash_run(cmd, v["workdir"].as_str(), Some(timeout)).await
         }
         _ if crate::jstools::has(name) => crate::jstools::run_tool(name, args).await,
@@ -925,10 +952,7 @@ pub async fn bash_run(cmd: &str, workdir: Option<&str>, timeout: Option<u64>) ->
         text.push_str("(no output)");
     }
     if !res.status.success() {
-        text.push_str(&format!(
-            "\nexit code: {}",
-            res.status.code().unwrap_or(-1)
-        ));
+        text.push_str(&format!("\nexit code: {}", res.status.code().unwrap_or(-1)));
     }
     Ok(text)
 }
@@ -1275,7 +1299,12 @@ fn trim_edit(
     Ok(Some((joined, count)))
 }
 
-pub fn apply_edit(content: &str, old: &str, new: &str, replace_all: bool) -> Result<(String, usize)> {
+pub fn apply_edit(
+    content: &str,
+    old: &str,
+    new: &str,
+    replace_all: bool,
+) -> Result<(String, usize)> {
     let (body, bom) = match content.strip_prefix('\u{feff}') {
         Some(rest) => (rest, true),
         None => (content, false),
@@ -1413,10 +1442,14 @@ mod tests {
     fn unicode_fallback_edit() {
         // content with smart quotes, old_str typed with ascii quotes
         let content = "const s = \u{201c}hello\u{201d};\nlet d = \u{2013} 1;";
-        let (out, n) = apply_edit(content, "const s = \"hello\";", "const s = \"bye\";", false).unwrap();
+        let (out, n) =
+            apply_edit(content, "const s = \"hello\";", "const s = \"bye\";", false).unwrap();
         assert_eq!(n, 1);
         assert!(out.contains("const s = \"bye\";"));
-        assert!(out.contains('\u{2013}'), "untouched chars must stay original");
+        assert!(
+            out.contains('\u{2013}'),
+            "untouched chars must stay original"
+        );
         // nbsp tolerance
         let (out, _) = apply_edit("a\u{00a0}b", "a b", "ab", false).unwrap();
         assert_eq!(out, "ab");
@@ -1465,7 +1498,10 @@ mod tests {
             .map(|e| e.path())
             .collect();
         assert_eq!(entries.len(), 1);
-        assert_eq!(std::fs::read_to_string(entries.pop().unwrap()).unwrap(), out);
+        assert_eq!(
+            std::fs::read_to_string(entries.pop().unwrap()).unwrap(),
+            out
+        );
         // exactly at the line threshold (2000 lines) nothing spills
         let tmp2 = std::env::temp_dir().join("hi-derola-spill-lines-edge");
         let _ = std::fs::remove_dir_all(&tmp2);
@@ -1484,7 +1520,10 @@ mod tests {
         let res = spill_into(&tmp, out.clone(), "bash", 4096);
         assert!(res.contains("full output saved to "), "{res}");
         assert!(res.contains("TAIL_MARKER"), "budgeted tail keeps the end");
-        assert!(res.ends_with("cut off here]"), "the path hint closes the reply");
+        assert!(
+            res.ends_with("cut off here]"),
+            "the path hint closes the reply"
+        );
         // exactly one spill file and it holds the verbatim output
         let mut entries: Vec<_> = std::fs::read_dir(&tmp)
             .unwrap()
@@ -1496,7 +1535,11 @@ mod tests {
         let saved = std::fs::read_to_string(&file).unwrap();
         assert_eq!(saved, out, "spill file must hold the full output");
         assert!(saved.starts_with("HEAD_MARKER\n"));
-        assert!(file.file_name().unwrap().to_string_lossy().starts_with("bash-"));
+        assert!(file
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("bash-"));
     }
 
     #[test]
@@ -1508,7 +1551,8 @@ mod tests {
         std::fs::write(&old, "stale").unwrap();
         let f = std::fs::OpenOptions::new().write(true).open(&old).unwrap();
         let stale = std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 24 * 3600);
-        f.set_times(std::fs::FileTimes::new().set_modified(stale)).unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(stale))
+            .unwrap();
         drop(f);
         let fresh = tmp.join("bash-fresh.txt");
         std::fs::write(&fresh, "keep me").unwrap();
@@ -1525,7 +1569,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         let out = "z".repeat(SPILL_MIN + 10);
         let res = spill_into(&tmp, out, "bash", 0);
-        assert_eq!(res.len(), SPILL_MIN + 10, "unlimited budget returns everything");
+        assert_eq!(
+            res.len(),
+            SPILL_MIN + 10,
+            "unlimited budget returns everything"
+        );
         assert!(!tmp.exists() || std::fs::read_dir(&tmp).unwrap().next().is_none());
     }
 
@@ -1542,14 +1590,26 @@ mod tests {
         let _ = std::fs::remove_file(&outside);
         std::fs::write(&outside, "x").unwrap();
         assert!(!path_in_dir(&tmp, &outside.display().to_string()));
-        assert!(!path_in_dir(&tmp, "src/main.rs"), "relative non-existent paths are not in");
-        assert!(!path_in_dir(&std::env::temp_dir().join("hi-derola-no-such-base"), &inside.display().to_string()));
+        assert!(
+            !path_in_dir(&tmp, "src/main.rs"),
+            "relative non-existent paths are not in"
+        );
+        assert!(!path_in_dir(
+            &std::env::temp_dir().join("hi-derola-no-such-base"),
+            &inside.display().to_string()
+        ));
     }
 
     #[test]
     fn edit_tolerant_matching() {
         let crlf = "fn main() {\r\n    let x = 1;\r\n    println!(\"{}\", x);\r\n}\r\n";
-        let (out, n) = apply_edit(crlf, "let x = 1;\n    println", "let x = 2;\n    println", false).unwrap();
+        let (out, n) = apply_edit(
+            crlf,
+            "let x = 1;\n    println",
+            "let x = 2;\n    println",
+            false,
+        )
+        .unwrap();
         assert_eq!(n, 1);
         assert!(out.contains("let x = 2;"));
         assert!(out.contains("\r\n"));
@@ -1562,7 +1622,13 @@ mod tests {
         assert!(out.contains("line TWO"));
 
         let ws = "fn a() {   \n    let y = 2;\t\n}\n";
-        let (out, n) = apply_edit(ws, "fn a() {\n    let y = 2;\n}", "fn a() {\n    let y = 3;\n}", false).unwrap();
+        let (out, n) = apply_edit(
+            ws,
+            "fn a() {\n    let y = 2;\n}",
+            "fn a() {\n    let y = 3;\n}",
+            false,
+        )
+        .unwrap();
         assert_eq!(n, 1);
         assert!(out.contains("let y = 3;"));
         assert!(out.ends_with('\n'));
@@ -1605,15 +1671,29 @@ mod tests {
         // indentation-only mismatch: the block is nested in the file while
         // old_str sits at column 0; the replacement is re-indented
         let content = "fn f() {\n    if ok {\n        go();\n    }\n}\n";
-        let (out, n) = apply_edit(content, "if ok {\n    go();\n}", "if ok {\n    go_fast();\n}", false).unwrap();
+        let (out, n) = apply_edit(
+            content,
+            "if ok {\n    go();\n}",
+            "if ok {\n    go_fast();\n}",
+            false,
+        )
+        .unwrap();
         assert_eq!(n, 1);
         assert_eq!(out, "fn f() {\n    if ok {\n        go_fast();\n    }\n}\n");
 
         // too different -> plain not found, no misleading hint
-        let err = apply_edit("one\ntwo\nthree\n", "one\ntotally different\nfive", "x", false)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("old_str not found") && !err.contains("% similar"), "{err}");
+        let err = apply_edit(
+            "one\ntwo\nthree\n",
+            "one\ntotally different\nfive",
+            "x",
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("old_str not found") && !err.contains("% similar"),
+            "{err}"
+        );
 
         // close but under the threshold -> hint pointing at the best block
         let err = apply_edit("alpha one\nbeta two\n", "alpha ona\nbeta xy", "x", false)
@@ -1668,7 +1748,10 @@ mod tests {
         // the shell ignores SIGTERM, so only the SIGKILL escalation can stop
         // it: without the escalation the marker appears at t=2.3s, while the
         // check happens at t~3.1s
-        let cmd = format!("trap '' TERM; sleep 0.3 && sleep 2 && touch {}", marker.display());
+        let cmd = format!(
+            "trap '' TERM; sleep 0.3 && sleep 2 && touch {}",
+            marker.display()
+        );
         let out = bash_run(&cmd, None, Some(1)).await.unwrap();
         assert!(out.contains("timed out"), "{out}");
         std::thread::sleep(std::time::Duration::from_secs(2));
@@ -1695,7 +1778,10 @@ mod tests {
         assert_eq!(shell_args("cmd.exe"), "/C");
         assert_eq!(shell_args("pwsh"), "-Command");
         assert_eq!(shell_args("pwsh.exe"), "-Command");
-        assert_eq!(shell_args("C:\\Program Files\\PowerShell\\7\\pwsh.exe"), "-Command");
+        assert_eq!(
+            shell_args("C:\\Program Files\\PowerShell\\7\\pwsh.exe"),
+            "-Command"
+        );
         assert_eq!(shell_args("bash"), "-c");
         assert_eq!(shell_args("/usr/bin/zsh"), "-c");
         assert_eq!(shell_args("/opt/homebrew/bin/fish"), "-c");

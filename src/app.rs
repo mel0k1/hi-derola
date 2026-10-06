@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind, EnableMouseCapture,
-    DisableMouseCapture,
+    DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+    MouseEventKind,
 };
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -83,7 +83,7 @@ pub struct App {
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
-const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /sessions      list saved sessions\n  /resume [id]   switch to a saved session (latest by default)\n  /mcpauth [name] mcp OAuth status, or authorize a remote server in browser; /mcpauth <name> <code> finishes a flow with a pasted authorization code (resume after a restart)\n  /mcpres [server]  list mcp resources and uri templates\n  /mcpstatus     per-server status: connected/failed/needs auth/crashed\n  /mcpread <server> <uri> read an mcp resource into the chat\n  /mcpprompt [server] <name> [k=v] use an mcp prompt (no args lists prompts)\n  /mcpsub <server> <uri> subscribe to mcp resource updates (land in chat)\n  /mcpunsub <server> <uri> stop the subscription\n  /mcplog [server]  recent mcp log messages; /mcplog set <server|all> <level> sets the minimum level\n  /mcpadd <name> <url|command...> add a server at runtime (saved to config) and connect it\n  /mcpconnect <name> (re)connect a configured server\n  /mcpdisconnect <name> drop the live connection (config untouched)\n  /mcplogout <name> drop the stored oauth tokens; a fresh /mcpauth flow starts on next use\n  /jstools [reload] list user JS tools (.hi-derola/tools/), optional rescan\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch/mcp_resource + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
+const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config\n  /model         show current model\n  /models        list models available for the api key\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /sessions      list saved sessions\n  /resume [id]   switch to a saved session (latest by default)\n  /mcpauth [name] mcp OAuth status, or authorize a remote server in browser; /mcpauth <name> <code> finishes a flow with a pasted authorization code (resume after a restart)\n  /mcpres [server]  list mcp resources and uri templates\n  /mcpstatus     per-server status: connected/failed/needs auth/crashed\n  /mcpread <server> <uri> read an mcp resource into the chat\n  /mcpprompt [server] <name> [k=v] use an mcp prompt (no args lists prompts)\n  /mcpsub <server> <uri> subscribe to mcp resource updates (land in chat)\n  /mcpunsub <server> <uri> stop the subscription\n  /mcplog [server]  recent mcp log messages; /mcplog set <server|all> <level> sets the minimum level\n  /mcpadd <name> <url|command...> add a server at runtime (saved to config) and connect it\n  /mcpconnect <name> (re)connect a configured server\n  /mcpdisconnect <name> drop the live connection (config untouched)\n  /mcplogout <name> drop the stored oauth tokens; a fresh /mcpauth flow starts on next use\n  /jstools [reload] list user JS tools (.hi-derola/tools/), optional rescan\n  /sandbox       local VM sandboxes: bare = list; /sandbox start|stop|attach|detach <id|name>; /sandbox new <name> [debian|debian-std|ubuntu|ubuntu-std|custom=<path>] [ram=2048] [cpus=2] [disk=20] [login=x] [root=on|off] — attach routes bash into the VM over ssh\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch/mcp_resource + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
 
 pub fn help_text() -> &'static str {
     HELP
@@ -115,6 +115,16 @@ fn fmt_age(secs: u64) -> String {
     }
 }
 
+/// human bytes for download progress in /sandbox listings (MiB until 1 GiB)
+fn fmt_mib(bytes: u64) -> String {
+    let mib = bytes as f64 / (1024.0 * 1024.0);
+    if mib >= 1024.0 {
+        format!("{:.1} GiB", mib / 1024.0)
+    } else {
+        format!("{mib:.0} MiB")
+    }
+}
+
 fn key_seq(c: char) -> usize {
     c.to_digit(10)
         .map(|d| d.saturating_sub(1) as usize)
@@ -122,12 +132,16 @@ fn key_seq(c: char) -> usize {
 }
 
 impl App {
-    pub fn new(cfg: Config, provider: Arc<dyn Provider>, tx: mpsc::UnboundedSender<ApiEvent>) -> Self {
+    pub fn new(
+        cfg: Config,
+        provider: Arc<dyn Provider>,
+        tx: mpsc::UnboundedSender<ApiEvent>,
+    ) -> Self {
         let model = cfg.provider.model.clone();
         let system = crate::base_prompt("in the user's terminal", &model);
         let status = format!("{} · {}", provider.name(), model);
         let sid = crate::sessions::new_id();
-        Self {
+        let mut app = Self {
             cfg,
             model,
             provider,
@@ -159,6 +173,276 @@ impl App {
             draft: String::new(),
             mcp: Arc::new(Mutex::new(None)),
             tx,
+        };
+        // a shell route left over from an earlier session of this process
+        // re-applies its sandbox addendum
+        if crate::sandbox::shell_route().is_some() {
+            app.refresh_system_prompt();
+        }
+        app
+    }
+
+    /// rebuild the system prompt: base (venue + model + AGENTS.md) plus the
+    /// sandbox addendum while the bash tool is routed into a VM
+    fn refresh_system_prompt(&mut self) {
+        self.session.system = crate::base_prompt("in the user's terminal", &self.model);
+        if let Some(add) = crate::sandbox::shell_route_addendum() {
+            self.session.system.push_str("\n\n");
+            self.session.system.push_str(&add);
+        }
+    }
+
+    /// /sandbox — the sandbox tab for the terminal: list, lifecycle, quick
+    /// create and the bash route attach/detach (GUI parity lives in the
+    /// sandbox tab of the window)
+    fn sandbox_command(&mut self, arg: &str) {
+        const USAGE: &str = "usage: /sandbox [list] · /sandbox start|stop|attach|detach <id|name> · /sandbox new <name> [debian|debian-std|ubuntu|ubuntu-std|custom=<path>] [ram=2048] [cpus=2] [disk=20] [login=x] [root=on|off]";
+        let m = crate::sandbox::SandboxManager::global();
+        let mut parts = arg.split_whitespace();
+        let sub = parts.next().unwrap_or("");
+        match sub {
+            "" | "list" => {
+                let list = m.list();
+                if list.is_empty() {
+                    self.info(format!(
+                        "no sandboxes yet — the GUI sandbox tab walks you through it, or:\n{USAGE}"
+                    ));
+                    return;
+                }
+                let route = crate::sandbox::shell_route();
+                let mut out = String::from("sandboxes:");
+                for s in list {
+                    out.push_str(&format!(
+                        "\n  {} [{}] · {} · {:?}",
+                        s.spec.name,
+                        s.spec.id,
+                        s.spec.kind.label(),
+                        s.state
+                    ));
+                    if let Some(d) = &s.download {
+                        if !d.done && d.total > 0 {
+                            out.push_str(&format!(
+                                " ({} / {})",
+                                fmt_mib(d.downloaded),
+                                fmt_mib(d.total)
+                            ));
+                        }
+                    }
+                    if s.state == crate::sandbox::VmState::Running {
+                        if let Some(ssh) = &s.ssh {
+                            out.push_str(&format!(
+                                " · ssh {:?}{} · agent {:?}",
+                                ssh.state,
+                                if ssh.state == crate::sandbox::SshState::Ready {
+                                    format!(" ({}s)", ssh.elapsed_secs)
+                                } else {
+                                    String::new()
+                                },
+                                ssh.agent.state
+                            ));
+                        }
+                    }
+                    if let Some(e) = &s.error {
+                        let one = e
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .chars()
+                            .take(90)
+                            .collect::<String>();
+                        out.push_str(&format!(" · {one}"));
+                    }
+                    if route.as_deref() == Some(s.spec.id.as_str()) {
+                        out.push_str("  ← bash here");
+                    }
+                }
+                out.push_str(&format!("\n{USAGE}"));
+                self.info(out);
+            }
+            "attach" | "detach" => {
+                if sub == "detach" {
+                    if crate::sandbox::shell_route().is_none() {
+                        self.info("no sandbox attached — bash already runs on the host");
+                        return;
+                    }
+                    crate::sandbox::set_shell_route(None);
+                    self.refresh_system_prompt();
+                    self.info("detached — bash is back on the host");
+                    return;
+                }
+                if !matches!(self.phase, Phase::Idle) {
+                    self.info("wait for the current run to finish, then attach");
+                    return;
+                }
+                let Some(key) = parts.next() else {
+                    self.info(format!("/sandbox attach <id|name> — {USAGE}"));
+                    return;
+                };
+                let key = key.to_lowercase();
+                let hit = m.list().into_iter().find(|s| {
+                    s.spec.id == key
+                        || s.spec.name == key
+                        || s.spec.id.starts_with(&key)
+                        || s.spec.name.to_lowercase().contains(&key)
+                });
+                let Some(s) = hit else {
+                    self.info(format!(
+                        "no sandbox matches \"{key}\" — /sandbox lists them"
+                    ));
+                    return;
+                };
+                if s.state != crate::sandbox::VmState::Running {
+                    self.info(format!(
+                        "sandbox \"{}\" is {:?} — /sandbox start {} first",
+                        s.spec.name, s.state, s.spec.id
+                    ));
+                    return;
+                }
+                let ready = s
+                    .ssh
+                    .as_ref()
+                    .map(|x| x.state == crate::sandbox::SshState::Ready)
+                    .unwrap_or(false);
+                if !ready {
+                    self.info(
+                        "ssh is not ready yet — this works only on cloud images (seed kinds) after the ready badge (/sandbox to check)",
+                    );
+                    return;
+                }
+                crate::sandbox::set_shell_route(Some(s.spec.id.clone()));
+                self.refresh_system_prompt();
+                self.info(format!(
+                    "bash now runs inside \"{}\" ({}, {}) — your host files stay out of reach; /sandbox detach returns to the host shell",
+                    s.spec.name,
+                    s.spec.kind.label(),
+                    s.spec.id
+                ));
+            }
+            "start" | "stop" => {
+                let Some(key) = parts.next() else {
+                    self.info(format!("/sandbox {sub} <id|name> — {USAGE}"));
+                    return;
+                };
+                let key = key.to_lowercase();
+                let hit = m.list().into_iter().find(|s| {
+                    s.spec.id == key
+                        || s.spec.name == key
+                        || s.spec.id.starts_with(&key)
+                        || s.spec.name.to_lowercase().contains(&key)
+                });
+                let Some(s) = hit else {
+                    self.info(format!(
+                        "no sandbox matches \"{key}\" — /sandbox lists them"
+                    ));
+                    return;
+                };
+                let res = if sub == "start" {
+                    m.start(&s.spec.id)
+                } else {
+                    m.stop(&s.spec.id)
+                };
+                match res {
+                    Ok(st) => self.info(format!(
+                        "sandbox \"{}\" is now {:?}{}",
+                        st.spec.name,
+                        st.state,
+                        if st.state == crate::sandbox::VmState::Running {
+                            " — ssh polling shows on /sandbox; attach once it is ready"
+                        } else {
+                            ""
+                        }
+                    )),
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            "new" => {
+                let rest: Vec<&str> = parts.collect();
+                if rest.is_empty() {
+                    self.info(format!(
+                        "/sandbox new <name> [kind] [key=value...] — {USAGE}"
+                    ));
+                    return;
+                }
+                let name = rest[0].to_string();
+                let mut kind = crate::sandbox::ImageKind::DebianTrixie;
+                let mut iso_path = None;
+                let mut login = crate::seed::DEFAULT_LOGIN.to_string();
+                let mut disk_gib = None;
+                let mut ram_mib = None;
+                let mut cpus = None;
+                // root defaults on for the TUI: the in-VM agent needs
+                // passwordless sudo to install itself
+                let mut root = true;
+                for a in &rest[1..] {
+                    if let Some(v) = a.strip_prefix("ram=") {
+                        ram_mib = v.parse().ok();
+                    } else if let Some(v) = a.strip_prefix("cpus=") {
+                        cpus = v.parse().ok();
+                    } else if let Some(v) = a.strip_prefix("disk=") {
+                        disk_gib = v.parse().ok();
+                    } else if let Some(v) = a.strip_prefix("login=") {
+                        login = v.to_string();
+                    } else if *a == "root=on" {
+                        root = true;
+                    } else if *a == "root=off" {
+                        root = false;
+                    } else if let Some(p) = a.strip_prefix("custom=") {
+                        kind = crate::sandbox::ImageKind::Custom;
+                        iso_path = Some(p.to_string());
+                    } else {
+                        match *a {
+                            "debian" => kind = crate::sandbox::ImageKind::DebianTrixie,
+                            "debian-std" => kind = crate::sandbox::ImageKind::DebianTrixieStd,
+                            "ubuntu" => kind = crate::sandbox::ImageKind::Ubuntu2404,
+                            "ubuntu-std" => kind = crate::sandbox::ImageKind::Ubuntu2404Std,
+                            other => {
+                                self.info(format!(
+                                    "unknown kind or option \"{other}\" — kinds: debian, debian-std, ubuntu, ubuntu-std, custom=<path>; options: ram= cpus= disk= login= root=on|off"
+                                ));
+                                return;
+                            }
+                        }
+                    }
+                }
+                let used: std::collections::HashSet<u16> =
+                    m.list().iter().map(|s| s.spec.ssh_port).collect();
+                let mut port = crate::sandbox::DEFAULT_PORT;
+                while used.contains(&port) {
+                    port += 1;
+                }
+                let req = crate::sandbox::NewSandbox {
+                    name,
+                    kind,
+                    login: Some(login),
+                    iso_path,
+                    disk_gib,
+                    ram_mib,
+                    cpus,
+                    root,
+                    ssh_port: Some(port),
+                };
+                match m.create(&req) {
+                    Ok(st) => {
+                        let mut msg = format!(
+                            "created \"{}\" [{}] id {} — ssh port {}",
+                            st.spec.name,
+                            st.spec.kind.label(),
+                            st.spec.id,
+                            st.spec.ssh_port
+                        );
+                        if st.spec.kind.needs_download() {
+                            msg.push_str(
+                                "\nthe image is downloading in the background (/sandbox shows progress); /sandbox start <id|name> boots it",
+                            );
+                        } else {
+                            msg.push_str(" — /sandbox start <id|name> boots it");
+                        }
+                        self.info(msg);
+                    }
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            _ => self.info(USAGE),
         }
     }
 
@@ -170,11 +454,11 @@ impl App {
             .with_eliciter(mcp::default_eliciter(self.tx.clone()))
             .with_mcp_timeout(self.cfg.agent.mcp_timeout)
             .with_sampler(mcp::default_sampler(
-            self.provider.clone(),
-            self.model.clone(),
-            self.cfg.provider.temperature,
-            self.tx.clone(),
-        ))
+                self.provider.clone(),
+                self.model.clone(),
+                self.cfg.provider.temperature,
+                self.tx.clone(),
+            ))
     }
 
     pub async fn connect_mcp(&mut self) {
@@ -240,7 +524,9 @@ impl App {
                 self.flush_stream();
                 self.info(s);
             }
-            ApiEvent::Tool { name, detail, diff, .. } => {
+            ApiEvent::Tool {
+                name, detail, diff, ..
+            } => {
                 self.flush_stream();
                 self.reasoning = None;
                 self.info(format!("tool {name} {detail}"));
@@ -306,7 +592,11 @@ impl App {
                 self.info(format!("todo list updated:\n{s}"));
             }
             ApiEvent::BgOut { .. } => {}
-            ApiEvent::Usage { input, output, cached } => {
+            ApiEvent::Usage {
+                input,
+                output,
+                cached,
+            } => {
                 self.tokens_in += input;
                 self.tokens_out += output;
                 self.tokens_cached += cached;
@@ -357,10 +647,7 @@ impl App {
         }
         let st = crate::sessions::StoredSession {
             id: self.sid.clone(),
-            title: self
-                .title
-                .clone()
-                .unwrap_or_else(|| "new chat".into()),
+            title: self.title.clone().unwrap_or_else(|| "new chat".into()),
             created: 0,
             updated: 0,
             system: self.session.system.clone(),
@@ -408,12 +695,10 @@ impl App {
                     kind: Kind::You,
                     text: m.content.clone(),
                 }),
-                Role::Assistant if !m.content.trim().is_empty() => {
-                    self.entries.push(Entry {
-                        kind: Kind::Bot,
-                        text: m.content.clone(),
-                    })
-                }
+                Role::Assistant if !m.content.trim().is_empty() => self.entries.push(Entry {
+                    kind: Kind::Bot,
+                    text: m.content.clone(),
+                }),
                 _ => {}
             }
         }
@@ -441,7 +726,9 @@ impl App {
         match self.phase {
             Phase::Waiting => "thinking...".into(),
             Phase::Confirm => match &self.confirm {
-                Some(c) if self.confirm_feedback => "reject feedback: type, enter sends, esc denies".into(),
+                Some(c) if self.confirm_feedback => {
+                    "reject feedback: type, enter sends, esc denies".into()
+                }
                 Some(c) => format!("run {}?  y/n/a/f", c.name),
                 None => "confirm...".into(),
             },
@@ -478,7 +765,11 @@ impl App {
                     let feedback = self.input.trim().to_string();
                     self.input.clear();
                     self.confirm_feedback = false;
-                    let _ = c.rx.send(ConfirmReply { approved: false, feedback, always: false });
+                    let _ = c.rx.send(ConfirmReply {
+                        approved: false,
+                        feedback,
+                        always: false,
+                    });
                     self.info("rejected with feedback");
                 }
                 KeyCode::Esc => {
@@ -511,11 +802,19 @@ impl App {
         }
         match code {
             KeyCode::Char('y') => {
-                let _ = c.rx.send(ConfirmReply { approved: true, feedback: String::new(), always: false });
+                let _ = c.rx.send(ConfirmReply {
+                    approved: true,
+                    feedback: String::new(),
+                    always: false,
+                });
             }
             KeyCode::Char('a') => {
                 self.allow_all.store(true, Ordering::Relaxed);
-                let _ = c.rx.send(ConfirmReply { approved: true, feedback: String::new(), always: false });
+                let _ = c.rx.send(ConfirmReply {
+                    approved: true,
+                    feedback: String::new(),
+                    always: false,
+                });
             }
             KeyCode::Char('w') => {
                 if let Some(rule) = crate::perm::derive_rule(&c.name, &c.args) {
@@ -525,7 +824,11 @@ impl App {
                     self.cfg.permissions.rules.push(rule);
                     self.info("always allowed: rule saved to config");
                 }
-                let _ = c.rx.send(ConfirmReply { approved: true, feedback: String::new(), always: true });
+                let _ = c.rx.send(ConfirmReply {
+                    approved: true,
+                    feedback: String::new(),
+                    always: true,
+                });
             }
             KeyCode::Char('f') => {
                 self.input.clear();
@@ -574,7 +877,9 @@ impl App {
                 return;
             }
             KeyCode::Char(c @ '1'..='9')
-                if self.input.is_empty() && key.modifiers.is_empty() && key_seq(c) < a.opts.len() =>
+                if self.input.is_empty()
+                    && key.modifiers.is_empty()
+                    && key_seq(c) < a.opts.len() =>
             {
                 let label = a.opts[key_seq(c)].clone();
                 self.info(format!("answered: {label}"));
@@ -797,15 +1102,19 @@ impl App {
             self.save_session();
             return;
         }
-        self.session.messages.push(
-            crate::chat::Message::new(Role::User, composed).with_images(images),
-        );
+        self.session
+            .messages
+            .push(crate::chat::Message::new(Role::User, composed).with_images(images));
         self.scroll_up = 0;
         self.start_run(inflight);
     }
 
     /// submit text as a user message and start a run (mcp prompts, Submit events)
-    pub fn submit_text(&mut self, text: String, inflight: &mut Option<tokio::task::JoinHandle<()>>) {
+    pub fn submit_text(
+        &mut self,
+        text: String,
+        inflight: &mut Option<tokio::task::JoinHandle<()>>,
+    ) {
         if text.trim().is_empty() {
             return;
         }
@@ -875,7 +1184,9 @@ impl App {
             );
         }
         let handle = tokio::spawn(async move {
-            if let Err(e) = agent::run(provider, req, tx.clone(), allow_all, mcp, queue, agent_cfg).await {
+            if let Err(e) =
+                agent::run(provider, req, tx.clone(), allow_all, mcp, queue, agent_cfg).await
+            {
                 let _ = tx.send(ApiEvent::Failed(format!("{e:#}")));
             }
         });
@@ -992,7 +1303,7 @@ impl App {
                 } else {
                     self.model = arg.to_string();
                     self.cfg.provider.model = arg.to_string();
-                    self.session.system = crate::base_prompt("in the user's terminal", &self.model);
+                    self.refresh_system_prompt();
                     match self.cfg.save() {
                         Ok(_) => self.info(format!("model: {}", self.model)),
                         Err(e) => self.info(format!("model: {} (not saved: {e:#})", self.model)),
@@ -1042,12 +1353,16 @@ impl App {
                     let mcp_slot = self.mcp.clone();
                     match code {
                         Some(code) => {
-                            self.info(format!("finishing OAuth for {name} with the pasted code..."));
+                            self.info(format!(
+                                "finishing OAuth for {name} with the pasted code..."
+                            ));
                             tokio::spawn(async move {
                                 match crate::mcpauth::finish_auth(&name, &cfgs, &code).await {
                                     Ok(msg) => {
                                         let _ = tx.send(ApiEvent::Note(msg));
-                                        for l in mcp::reconnect_one(&mcp_slot, &cfgs, &hooks, &name).await {
+                                        for l in mcp::reconnect_one(&mcp_slot, &cfgs, &hooks, &name)
+                                            .await
+                                        {
                                             let _ = tx.send(ApiEvent::Note(l));
                                         }
                                     }
@@ -1063,7 +1378,9 @@ impl App {
                                 match crate::mcpauth::authorize_flow(&name, &cfgs).await {
                                     Ok(msg) => {
                                         let _ = tx.send(ApiEvent::Note(msg));
-                                        for l in mcp::reconnect_one(&mcp_slot, &cfgs, &hooks, &name).await {
+                                        for l in mcp::reconnect_one(&mcp_slot, &cfgs, &hooks, &name)
+                                            .await
+                                        {
                                             let _ = tx.send(ApiEvent::Note(l));
                                         }
                                     }
@@ -1104,9 +1421,11 @@ impl App {
                         },
                         // no live client yet: start one with this server
                         None => {
-                            let (client, mut logs) = mcp::connect_all(std::slice::from_ref(&cfg), &hooks).await;
+                            let (client, mut logs) =
+                                mcp::connect_all(std::slice::from_ref(&cfg), &hooks).await;
                             *slot.lock().unwrap() = client;
-                            logs.pop().unwrap_or_else(|| format!("mcp {name}: connected"))
+                            logs.pop()
+                                .unwrap_or_else(|| format!("mcp {name}: connected"))
                         }
                     };
                     let _ = tx.send(ApiEvent::Note(msg));
@@ -1143,7 +1462,10 @@ impl App {
                         let _ = tx.send(ApiEvent::Note("mcp is not configured".into()));
                         return;
                     };
-                    let msg = m.disconnect(&name).await.unwrap_or_else(|e| format!("error: {e:#}"));
+                    let msg = m
+                        .disconnect(&name)
+                        .await
+                        .unwrap_or_else(|e| format!("error: {e:#}"));
                     let _ = tx.send(ApiEvent::Note(msg));
                 });
             }
@@ -1186,7 +1508,11 @@ impl App {
                     if list.is_empty() && tpls.is_empty() {
                         let _ = tx.send(ApiEvent::Note(format!(
                             "no mcp resources{}",
-                            if filter.is_empty() { String::new() } else { format!(" on {filter}") }
+                            if filter.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" on {filter}")
+                            }
                         )));
                         return;
                     }
@@ -1311,9 +1637,13 @@ impl App {
                             let _ = tx.send(ApiEvent::Note("mcp is not configured".into()));
                             return;
                         };
-                        match m.get_prompt(&server, &name, &serde_json::Value::Object(a)).await {
+                        match m
+                            .get_prompt(&server, &name, &serde_json::Value::Object(a))
+                            .await
+                        {
                             Ok(msgs) if msgs.is_empty() => {
-                                let _ = tx.send(ApiEvent::Note("prompt returned no messages".into()));
+                                let _ =
+                                    tx.send(ApiEvent::Note("prompt returned no messages".into()));
                             }
                             Ok(msgs) => {
                                 let mut text = String::new();
@@ -1365,7 +1695,11 @@ impl App {
                 let tx = self.tx.clone();
                 self.info(format!(
                     "{} {server} {uri}...",
-                    if unsub { "unsubscribing" } else { "subscribing" }
+                    if unsub {
+                        "unsubscribing"
+                    } else {
+                        "subscribing"
+                    }
                 ));
                 tokio::spawn(async move {
                     let Some(m) = mcp else {
@@ -1451,11 +1785,15 @@ impl App {
             "/jstools" => {
                 if arg.trim() == "reload" {
                     crate::jstools::reload();
-                    self.info(format!("JS tools rescanned:\n{}", crate::jstools::summary()));
+                    self.info(format!(
+                        "JS tools rescanned:\n{}",
+                        crate::jstools::summary()
+                    ));
                 } else {
                     self.info(format!("JS tools:\n{}", crate::jstools::summary()));
                 }
             }
+            "/sandbox" => self.sandbox_command(arg),
             "/file" => {
                 if arg.is_empty() {
                     self.info("usage: /file <path>");
@@ -1509,7 +1847,10 @@ impl App {
                 self.start_run(inflight);
             }
             "/compact" => {
-                if !matches!(self.phase, Phase::Idle) || self.confirm.is_some() || self.ask.is_some() {
+                if !matches!(self.phase, Phase::Idle)
+                    || self.confirm.is_some()
+                    || self.ask.is_some()
+                {
                     self.info("wait for the current run to finish");
                     return;
                 }
@@ -1586,7 +1927,9 @@ impl App {
                         }
                         s
                     };
-                    self.info(format!("unknown command: {cmd}\n{hint}\ntype /help for the built-in commands"));
+                    self.info(format!(
+                        "unknown command: {cmd}\n{hint}\ntype /help for the built-in commands"
+                    ));
                 }
             },
         }
@@ -1640,9 +1983,7 @@ pub async fn run(
                 Event::Paste(s) => app.input.push_str(&s),
                 Event::Mouse(m) => match m.kind {
                     MouseEventKind::ScrollUp => app.scroll_up = app.scroll_up.saturating_add(3),
-                    MouseEventKind::ScrollDown => {
-                        app.scroll_up = app.scroll_up.saturating_sub(3)
-                    }
+                    MouseEventKind::ScrollDown => app.scroll_up = app.scroll_up.saturating_sub(3),
                     _ => {}
                 },
                 _ => {}

@@ -227,16 +227,14 @@ pub async fn run(
             tools::specs()
         };
         if cfg.plan {
-            specs.retain(|s| {
-                s.name != "write_file" && s.name != "edit" && s.name != "apply_patch"
-            });
+            specs.retain(|s| s.name != "write_file" && s.name != "edit" && s.name != "apply_patch");
             specs.extend(tools::plan_specs());
         }
         if let Some(m) = &mcp_now {
             let mspecs = m.specs().await;
-            specs.push(crate::codemode::code_spec(&crate::codemode::catalog_from_mcp_specs(
-                &mspecs,
-            )));
+            specs.push(crate::codemode::code_spec(
+                &crate::codemode::catalog_from_mcp_specs(&mspecs),
+            ));
             specs.extend(mspecs);
         }
         specs.extend(crate::jstools::specs());
@@ -244,7 +242,15 @@ pub async fn run(
             specs.retain(|s| {
                 matches!(
                     s.name.as_str(),
-                    "read_file" | "list_files" | "glob" | "grep" | "lsp" | "mcp_resource" | "task_status" | "todoread" | "skill"
+                    "read_file"
+                        | "list_files"
+                        | "glob"
+                        | "grep"
+                        | "lsp"
+                        | "mcp_resource"
+                        | "task_status"
+                        | "todoread"
+                        | "skill"
                 ) || crate::jstools::has(&s.name)
             });
         }
@@ -336,7 +342,9 @@ pub async fn run(
             return Ok(());
         }
         empty_retries = 0;
-        msgs.push(Message::new(Role::Assistant, reply.text.clone()).with_calls(reply.calls.clone()));
+        msgs.push(
+            Message::new(Role::Assistant, reply.text.clone()).with_calls(reply.calls.clone()),
+        );
         req.messages = msgs.clone();
         let mut pending_images: Vec<(String, crate::chat::Image)> = Vec::new();
         for call in reply.calls {
@@ -347,11 +355,8 @@ pub async fn run(
                 paths: tools::paths(&call.name, &call.args),
             })
             .map_err(|_| anyhow!("closed"))?;
-            let plan_block = cfg.plan
-                && matches!(
-                    call.name.as_str(),
-                    "write_file" | "edit" | "apply_patch"
-                );
+            let plan_block =
+                cfg.plan && matches!(call.name.as_str(), "write_file" | "edit" | "apply_patch");
             let perm = if plan_block {
                 crate::perm::Perm::Deny
             } else {
@@ -385,7 +390,10 @@ pub async fn run(
                         .map_err(|_| anyhow!("closed"))?;
                         let reply = orx.await.unwrap_or_default();
                         if !reply.approved {
-                            msgs.push(Message::tool(&call.id, deny_message(&call.name, &reply.feedback)));
+                            msgs.push(Message::tool(
+                                &call.id,
+                                deny_message(&call.name, &reply.feedback),
+                            ));
                             req.messages = msgs.clone();
                             continue;
                         }
@@ -428,7 +436,13 @@ pub async fn run(
             } else if call.name == "bash" {
                 let v: Value = serde_json::from_str(&call.args).unwrap_or(Value::Null);
                 if v["background"].as_bool().unwrap_or(false) {
-                    run_bash_background(&v, &tx, queue.clone(), cfg.output_budget)
+                    if crate::sandbox::shell_route().is_some() {
+                        // the sandbox route has no remote task machinery yet;
+                        // nudge the model to run the command in the foreground
+                        "bash: background tasks are not available inside the sandbox VM — run the command in the foreground (timeout up to 600s)".to_string()
+                    } else {
+                        run_bash_background(&v, &tx, queue.clone(), cfg.output_budget)
+                    }
                 } else {
                     match tools::execute("bash", &call.args, mcp_now.as_deref()).await {
                         Ok(o) => o,
@@ -444,15 +458,16 @@ pub async fn run(
                     let specs = m.specs().await;
                     let confirm_tx = tx.clone();
                     let confirm_handle = tokio::runtime::Handle::current();
-                    let confirm: crate::codemode::ConfirmFn = Arc::new(move |key: &str, args: &str| {
-                        let (otx, orx) = oneshot::channel();
-                        let _ = confirm_tx.send(ApiEvent::Confirm {
-                            name: key.to_string(),
-                            args: args.to_string(),
-                            rx: otx,
+                    let confirm: crate::codemode::ConfirmFn =
+                        Arc::new(move |key: &str, args: &str| {
+                            let (otx, orx) = oneshot::channel();
+                            let _ = confirm_tx.send(ApiEvent::Confirm {
+                                name: key.to_string(),
+                                args: args.to_string(),
+                                rx: otx,
+                            });
+                            confirm_handle.block_on(orx).unwrap_or_default()
                         });
-                        confirm_handle.block_on(orx).unwrap_or_default()
-                    });
                     let note_tx = tx.clone();
                     let note = Arc::new(move |s: String| {
                         let _ = note_tx.send(ApiEvent::Note(s));
@@ -477,10 +492,7 @@ pub async fn run(
             } else if call.name == "subagent" {
                 let v: Value = serde_json::from_str(&call.args).unwrap_or(Value::Null);
                 let prompt = v["prompt"].as_str().unwrap_or("").to_string();
-                let desc = v["description"]
-                    .as_str()
-                    .unwrap_or("")
-                    .to_string();
+                let desc = v["description"].as_str().unwrap_or("").to_string();
                 let agent_name = v["agent"]
                     .as_str()
                     .map(str::trim)
@@ -552,7 +564,9 @@ pub async fn run(
                     match tools::execute("read_file", &call.args, mcp_now.as_deref()).await {
                         Ok(mut o) => {
                             if let Some((ip, ib)) = crate::instructions_for_file(&p) {
-                                o.push_str(&format!("\n\n---\nProject instructions from {ip}:\n{ib}"));
+                                o.push_str(&format!(
+                                    "\n\n---\nProject instructions from {ip}:\n{ib}"
+                                ));
                             }
                             o
                         }
@@ -566,13 +580,7 @@ pub async fn run(
                 }
             };
             let out = tools::spill(out, &call.name, cfg.output_budget);
-            let summary: String = out
-                .lines()
-                .next()
-                .unwrap_or("")
-                .chars()
-                .take(70)
-                .collect();
+            let summary: String = out.lines().next().unwrap_or("").chars().take(70).collect();
             let _ = tx.send(ApiEvent::Note(summary));
             msgs.push(Message::tool(&call.id, out));
             req.messages = msgs.clone();
@@ -650,10 +658,12 @@ fn run_bash_background(
             child.wait().await
         };
         let st = match timeout {
-            Some(t) => match tokio::time::timeout(std::time::Duration::from_secs(t.max(1)), wait).await {
-                Err(_) => None,
-                Ok(s) => s.ok(),
-            },
+            Some(t) => {
+                match tokio::time::timeout(std::time::Duration::from_secs(t.max(1)), wait).await {
+                    Err(_) => None,
+                    Ok(s) => s.ok(),
+                }
+            }
             None => wait.await.ok(),
         };
         let out = buf.lock().unwrap().clone();
@@ -727,7 +737,10 @@ async fn pump_bg<R: tokio::io::AsyncRead + Unpin>(
                     }
                 }
                 crate::bg::append(&id, &s);
-                let _ = tx.send(ApiEvent::BgOut { id: id.clone(), chunk: s });
+                let _ = tx.send(ApiEvent::BgOut {
+                    id: id.clone(),
+                    chunk: s,
+                });
             }
         }
     }
@@ -936,8 +949,18 @@ async fn dispatch_subagent(
         )
     } else {
         let _ = tx.send(ApiEvent::Note(format!("subagent started: {desc}")));
-        match run_subagent(provider, sub_req, sid, cfg, allow_all, tx, mcp, read_only, desc.clone())
-            .await
+        match run_subagent(
+            provider,
+            sub_req,
+            sid,
+            cfg,
+            allow_all,
+            tx,
+            mcp,
+            read_only,
+            desc.clone(),
+        )
+        .await
         {
             Ok(t) => {
                 let _ = tx.send(ApiEvent::Note(format!("subagent done: {desc}")));
@@ -973,7 +996,9 @@ pub fn resolve_sub_req(
         }
         sub_req.system = st.system;
         sub_req.messages = st.messages;
-        sub_req.messages.push(Message::new(Role::User, prompt.to_string()));
+        sub_req
+            .messages
+            .push(Message::new(Role::User, prompt.to_string()));
         Ok((sub_req, sid.to_string(), read_only))
     } else {
         Ok((sub_req, crate::sessions::new_id(), read_only))
@@ -1191,7 +1216,9 @@ async fn wrap_up(
                 break;
             }
             Ok(r) if !r.calls.is_empty() => {
-                msgs.push(Message::new(Role::Assistant, r.text.clone()).with_calls(r.calls.clone()));
+                msgs.push(
+                    Message::new(Role::Assistant, r.text.clone()).with_calls(r.calls.clone()),
+                );
                 for c in r.calls {
                     msgs.push(Message::tool(
                         &c.id,
@@ -1219,9 +1246,7 @@ async fn wrap_up(
 }
 
 fn msg_tokens(m: &Message) -> usize {
-    let chars: usize = m
-        .content
-        .len()
+    let chars: usize = m.content.len()
         + m.tool_calls
             .iter()
             .map(|c| c.args.len() + c.name.len())
@@ -1277,10 +1302,17 @@ fn transcript(msgs: &[Message]) -> String {
                     t.push_str(&format!("[assistant]\n{}\n\n", clip(&m.content, 4000)));
                 }
                 for c in &m.tool_calls {
-                    t.push_str(&format!("[assistant called tool] {} {}\n\n", c.name, clip(&c.args, 300)));
+                    t.push_str(&format!(
+                        "[assistant called tool] {} {}\n\n",
+                        c.name,
+                        clip(&c.args, 300)
+                    ));
                 }
             }
-            Role::Tool => t.push_str(&format!("[tool result]\n{}\n\n", clip(&m.content, COMPACT_TOOL_CLIP))),
+            Role::Tool => t.push_str(&format!(
+                "[tool result]\n{}\n\n",
+                clip(&m.content, COMPACT_TOOL_CLIP)
+            )),
         }
     }
     t
@@ -1359,7 +1391,9 @@ async fn compact(
         let _ = tx.send(ApiEvent::Note(
             "summary missed the template, retrying once".into(),
         ));
-        sum_req.messages.push(Message::new(Role::Assistant, summary.clone()));
+        sum_req
+            .messages
+            .push(Message::new(Role::Assistant, summary.clone()));
         sum_req.messages.push(Message::new(
             Role::User,
             "Your reply did not follow the required template. Rewrite it with the exact sections: Objective, Requirements, Decisions, Work State, Next Move, Relevant Files, Important Context.",
@@ -1542,7 +1576,8 @@ mod tests {
             .chain(std::iter::once(m(Role::Assistant, &"z".repeat(40_000))))
             .collect();
         assert_eq!(compact_split(&huge, 100), Some(8));
-        let e = anyhow::anyhow!("400 Bad Request: prompt is too long: 200000 tokens > 180000 maximum");
+        let e =
+            anyhow::anyhow!("400 Bad Request: prompt is too long: 200000 tokens > 180000 maximum");
         assert!(is_overflow(&e));
         assert!(!is_overflow(&anyhow::anyhow!("401 unauthorized")));
     }
@@ -1612,7 +1647,10 @@ mod tests {
         apply_summary(&mut first, "Objective: fix the parser");
         assert!(first.content.starts_with("fix the parser\n\n---\nSummary"));
         assert!(first.content.ends_with("Objective: fix the parser"));
-        assert_eq!(prior_summary(&first.content), Some("Objective: fix the parser"));
+        assert_eq!(
+            prior_summary(&first.content),
+            Some("Objective: fix the parser")
+        );
 
         // second compaction REPLACES the old summary instead of accumulating
         apply_summary(&mut first, "Objective: fix the parser\nWork State: done");
@@ -1662,7 +1700,7 @@ mod tests {
     #[test]
     fn prune_replaces_old_tool_outputs() {
         let big = "a".repeat(200_000); // ~50k tokens
-        // the last two user turns (t2..t3) are protected: only tool1 is old
+                                       // the last two user turns (t2..t3) are protected: only tool1 is old
         let mut msgs = vec![
             m(Role::User, "turn one"),
             call("c1", "bash"),
@@ -1672,8 +1710,15 @@ mod tests {
             tool_msg("c2", "", &big),
             m(Role::User, "turn three"),
         ];
-        assert!(prune_tool_outputs(&mut msgs, &compaction(true, 40_000, 20_000)));
-        assert!(msgs[2].content.starts_with(PRUNE_MARKER), "{}", msgs[2].content);
+        assert!(prune_tool_outputs(
+            &mut msgs,
+            &compaction(true, 40_000, 20_000)
+        ));
+        assert!(
+            msgs[2].content.starts_with(PRUNE_MARKER),
+            "{}",
+            msgs[2].content
+        );
         assert!(msgs[2].content.contains("~50000 tokens"));
         assert_eq!(msgs[5].content, big, "the previous exchange stays verbatim");
         assert_eq!(msgs[0].content, "turn one");
@@ -1689,7 +1734,10 @@ mod tests {
             m(Role::User, "t3"),
             m(Role::User, "t4"),
         ];
-        assert!(prune_tool_outputs(&mut msgs, &compaction(true, 40_000, 20_000)));
+        assert!(prune_tool_outputs(
+            &mut msgs,
+            &compaction(true, 40_000, 20_000)
+        ));
         assert!(msgs[2].content.starts_with(PRUNE_MARKER));
         assert!(msgs[5].content.starts_with(PRUNE_MARKER));
     }
@@ -1697,14 +1745,17 @@ mod tests {
     #[test]
     fn prune_protects_recent_outputs() {
         let big = "a".repeat(200_000); // ~50k tokens
-        // one exchange only: nothing is older than the last two user turns
+                                       // one exchange only: nothing is older than the last two user turns
         let mut msgs = vec![
             m(Role::User, "turn one"),
             call("c1", "bash"),
             tool_msg("c1", "", &big),
             m(Role::User, "turn two"),
         ];
-        assert!(!prune_tool_outputs(&mut msgs, &compaction(true, 40_000, 20_000)));
+        assert!(!prune_tool_outputs(
+            &mut msgs,
+            &compaction(true, 40_000, 20_000)
+        ));
         assert_eq!(msgs[2].content, big);
         // a tool output newer than the second-to-last user turn is off limits
         let mut msgs = vec![
@@ -1715,7 +1766,10 @@ mod tests {
             m(Role::User, "turn three"),
         ];
         assert!(!prune_tool_outputs(&mut msgs, &compaction(true, 0, 0)));
-        assert_eq!(msgs[3].content, big, "the newest exchange must stay verbatim");
+        assert_eq!(
+            msgs[3].content, big,
+            "the newest exchange must stay verbatim"
+        );
     }
 
     #[test]
@@ -1732,7 +1786,10 @@ mod tests {
         ];
         // protect 20k -> the old output is a candidate freeing ~25k, but the
         // 30k gate is not met -> nothing commits
-        assert!(!prune_tool_outputs(&mut msgs, &compaction(true, 20_000, 30_000)));
+        assert!(!prune_tool_outputs(
+            &mut msgs,
+            &compaction(true, 20_000, 30_000)
+        ));
         assert_eq!(msgs[2].content, mid);
         // prune = false disables the pass entirely
         assert!(!prune_tool_outputs(&mut msgs, &compaction(false, 0, 0)));
