@@ -3434,7 +3434,9 @@ $("crew-send").onclick = async () => {
     await invoke("crew_send", { text });
     $("crew-input").value = "";
     await refreshCrew();
-    invoke("crew_step", { rounds: 1 }).then(refreshCrew).catch(() => {});
+    invoke("crew_step", { rounds: 1 })
+      .then(refreshCrew)
+      .catch((e) => showPanelMsg("crew-msg", String(e)));
   } catch (e) {
     showPanelMsg("crew-msg", String(e));
   }
