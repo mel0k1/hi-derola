@@ -91,7 +91,7 @@ pub struct App {
 
 const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config (into the active profile when one is set)\n  /model         show current model\n  /models        list models available for the api key\n  /profile [name] switch provider profile (bare = list, \"none\" = back to the base [provider] section)\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /sessions      list saved sessions\n  /resume [id]   switch to a saved session (latest by default)\n  /mcpauth [name] mcp OAuth status, or authorize a remote server in browser; /mcpauth <name> <code> finishes a flow with a pasted authorization code (resume after a restart)\n  /mcpres [server]  list mcp resources and uri templates\n  /mcpstatus     per-server status: connected/failed/needs auth/crashed\n  /mcpread <server> <uri> read an mcp resource into the chat\n  /mcpprompt [server] <name> [k=v] use an mcp prompt (no args lists prompts)\n  /mcpsub <server> <uri> subscribe to mcp resource updates (land in chat)\n  /mcpunsub <server> <uri> stop the subscription\n  /mcplog [server]  recent mcp log messages; /mcplog set <server|all> <level> sets the minimum level\n  /mcpadd <name> <url|command...> add a server at runtime (saved to config) and connect it\n  /mcpconnect <name> (re)connect a configured server\n  /mcpdisconnect <name> drop the live connection (config untouched)\n  /mcplogout <name> drop the stored oauth tokens; a fresh /mcpauth flow starts on next use\n  /jstools [reload] list user JS tools (.hi-derola/tools/), optional rescan\n  /doctor        environment self-check: config/provider, ssh, qemu+accel, lsp servers, formatters, mcp, sandbox
   /update        check github releases and swap the running binary if a newer one exists
-  /usage         token/cost report for this session (per-model breakdown, prices, context fill)\n  /sandbox       local VM sandboxes: bare = list; /sandbox start|stop|attach|detach <id|name>; /sandbox new <name> [debian|debian-std|ubuntu|ubuntu-std|custom=<path>] [ram=2048] [cpus=2] [disk=20] [login=x] [root=on|off]; /sandbox fetch|push <id|name> <path> [dest]; /sandbox term <id|name> [agent]; /sandbox fwd <id|name> add <host-port> <guest-port> [guest-host] | list | del <host-port> — attach routes bash into the VM over ssh\n  /host          remote hosts: bare = list; /host add <name> <user@host:port>; /host check|attach|detach|del <id|name>; /host term <id|name> [agent]; /host pubkey <id|name> — attach routes bash + file tools over ssh; /undo covers remote edits\n  /skills        skills: bare = list; /skills toggle <name>; /skills install <git-url>\n  /crew          multi-agent sessions: bare = status; /crew new <goal>; /crew add <Name|role[|profile|model[|tools|limit=N]]>; /crew del <name>; /crew send <text>; /crew step [rounds]; /crew auto [m[rounds]; /crew stop; /crew limit <name> <n|off>; /crew memo <text>; /crew memory; /crew forget <n|all>; /crew usage; /crew show; /crew list; /crew open|resume <id>; /crew drop\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch/mcp_resource + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
+  /usage         token/cost report for this session (per-model breakdown, prices, context fill)\n  /sandbox       local VM sandboxes: bare = list; /sandbox start|stop|attach|detach <id|name>; /sandbox new <name> [debian|debian-std|ubuntu|ubuntu-std|custom=<path>] [ram=2048] [cpus=2] [disk=20] [login=x] [root=on|off]; /sandbox fetch|push <id|name> <path> [dest]; /sandbox term <id|name> [agent]; /sandbox fwd <id|name> add <host-port> <guest-port> [guest-host] | list | del <host-port> — attach routes bash into the VM over ssh\n  /host          remote hosts: bare = list; /host add <name> <user@host:port>; /host check|attach|detach|del <id|name>; /host term <id|name> [agent]; /host pubkey <id|name> — attach routes bash + file tools over ssh; /undo covers remote edits\n  /skills        skills: bare = list; /skills toggle <name>; /skills install <git-url>\n  /crew          multi-agent sessions: bare = status; /crew new <goal>; /crew add <Name|role[|profile|model[|tools|review|limit=N]]>; /crew del <name>; /crew send <text>; /crew step [rounds]; /crew auto [rounds]; /crew stop; /crew limit <name> <n|off>; /crew budget <usd|off>; /crew review <name>; /crew memo <text>; /crew memory; /crew forget <n|all>; /crew usage; /crew show; /crew list; /crew open|resume <id>; /crew drop\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch/mcp_resource + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
 
 pub fn help_text() -> &'static str {
     HELP
@@ -1778,7 +1778,7 @@ impl App {
     }
 
     fn crew_command(&mut self, arg: &str) {
-        const USAGE: &str = "usage: /crew [status] · /crew new <goal> · /crew add <Name|role[|profile|model[|tools|limit=N]]> · /crew del <name> · /crew send <text> · /crew step [rounds] · /crew auto [m[rounds] · /crew stop · /crew limit <name> <n|off> · /crew memo <text> · /crew memory · /crew forget <n|all> · /crew usage · /crew show · /crew list · /crew open|resume <id> · /crew drop";
+        const USAGE: &str = "usage: /crew [status] · /crew new <goal> · /crew add <Name|role[|profile|model[|tools|review|limit=N]]> · /crew del <name> · /crew send <text> · /crew step [rounds] · /crew auto [rounds] · /crew stop · /crew limit <name> <n|off> · /crew budget <usd|off> · /crew review <name> · /crew memo <text> · /crew memory · /crew forget <n|all> · /crew usage · /crew show · /crew list · /crew open|resume <id> · /crew drop";
         let mut parts = arg.split_whitespace();
         let sub = parts.next().unwrap_or("");
         let rest = arg.split_once(' ').map(|(_, r)| r.trim()).unwrap_or("");
@@ -1802,6 +1802,9 @@ impl App {
                         if m.tools {
                             extra.push_str(" · tools");
                         }
+                        if m.review {
+                            extra.push_str(" · review");
+                        }
                         if let Some(l) = m.limit {
                             extra.push_str(&format!(
                                 " · limit:{} used:{}",
@@ -1822,6 +1825,13 @@ impl App {
                                 .map(|x| format!(" · {x}"))
                                 .unwrap_or_default(),
                             extra,
+                        ));
+                    }
+                    if let Some(b) = c.budget {
+                        out.push_str(&format!(
+                            "\nbudget: ${:.2} spent of ${:.2} \u{2014} /crew budget <usd|off>",
+                            crate::crew::crew_spent(&c),
+                            b
                         ));
                     }
                     out.push_str(&format!(
@@ -2060,6 +2070,65 @@ impl App {
                             (Some(l), _) => format!("member \"{name}\" limit set to {l} tokens"),
                             _ => format!("member \"{name}\" limit cleared"),
                         });
+                    }
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            "budget" => {
+                let Some(id) = need_crew(self) else { return };
+                if rest.is_empty() {
+                    self.info(
+                        "/crew budget <usd|off> \u{2014} e.g. /crew budget 5 (whole-crew cost cap)",
+                    );
+                    return;
+                }
+                let budget = if rest.eq_ignore_ascii_case("off") || rest == "0" {
+                    None
+                } else {
+                    match crate::crew::parse_budget_opt(rest) {
+                        Some(v) => Some(v),
+                        None => {
+                            self.info(format!("bad budget \"{rest}\" \u{2014} use 5, 2.50 or off"));
+                            return;
+                        }
+                    }
+                };
+                match crate::crew::set_budget(&id, budget) {
+                    Ok(c) => self.info(match (c.budget, budget) {
+                        (Some(b), _) => {
+                            format!(
+                                "crew budget set to ${b:.2} (spent ${:.2})",
+                                crate::crew::crew_spent(&c)
+                            )
+                        }
+                        _ => "crew budget cleared".to_string(),
+                    }),
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            "review" => {
+                let Some(id) = need_crew(self) else { return };
+                if rest.is_empty() {
+                    self.info("/crew review <name> \u{2014} toggle a reviewer (DONE needs their APPROVE:)");
+                    return;
+                }
+                match crate::crew::load(&id) {
+                    Ok(c) => {
+                        let cur = c
+                            .members
+                            .iter()
+                            .find(|m| m.name.eq_ignore_ascii_case(rest))
+                            .map(|m| m.review);
+                        match cur {
+                            Some(cur) => match crate::crew::set_review(&id, rest, !cur) {
+                                Ok(_) => self.info(format!(
+                                    "\"{rest}\" review {} \u{2014} DONE claims now need their APPROVE:",
+                                    if !cur { "on" } else { "off" }
+                                )),
+                                Err(e) => self.info(format!("error: {e:#}")),
+                            },
+                            None => self.info(format!("no member named \"{rest}\"")),
+                        }
                     }
                     Err(e) => self.info(format!("error: {e:#}")),
                 }
