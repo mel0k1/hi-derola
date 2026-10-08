@@ -2948,11 +2948,17 @@ function renderCrew() {
     `<span class="sbx-state ${st.status === "done" ? "running" : st.status === "running" ? "waiting" : ""}">${esc(st.status)}${st.running ? " (working)" : ""}</span>`
   );
   const chips = el("div", "sbx-meta");
+  if (st.budget) {
+    chips.appendChild(
+      el("span", "sbx-kind", `budget: $${(+st.spent || 0).toFixed(2)} / $${(+st.budget).toFixed(2)}`)
+    );
+  }
   (st.members || []).forEach((m) => {
     const chip = el("span", "sbx-kind");
     let label = `${m.name} · ${m.role}`;
     if (m.model) label += ` · ${m.model}`;
     if (m.tools) label += " · tools";
+    if (m.review) label += " · review";
     if (m.limit) label += ` · ${m.used || 0}/${m.limit} tok`;
     chip.textContent = label;
     chip.title = "click to set a token limit for this member (off clears it)";
@@ -3245,7 +3251,8 @@ async function showCrewUsage() {
     const box = $("crew-usage-box");
     box.classList.remove("hidden");
     box.replaceChildren();
-    const t = el("div", "sbx-name", `tokens: ${u.rows.length} member(s) · in ${u.total.input} · out ${u.total.output} · $${(+u.total.cost).toFixed(4)}`);
+    const budget = u.budget ? ` · budget $${(+u.spent || 0).toFixed(2)}/$${(+u.budget).toFixed(2)}` : "";
+    const t = el("div", "sbx-name", `tokens: ${u.rows.length} member(s) · in ${u.total.input} · out ${u.total.output} · $${(+u.total.cost).toFixed(4)}${budget}`);
     box.appendChild(t);
     u.rows.forEach((r) => {
       box.appendChild(
@@ -3290,6 +3297,45 @@ $("btn-hosts").onclick = () => toggleHostsView();
 $("btn-skills").onclick = () => toggleSkillsView();
 $("btn-crew").onclick = () => toggleCrewView();
 $("crew-memory-btn").onclick = () => toggleCrewMemory();
+$("crew-budget").onclick = async () => {
+  const st = CREW.state;
+  const v = prompt(
+    "crew budget in USD - the whole crew stops when this is spent (off clears it)",
+    st && st.budget ? st.budget : ""
+  );
+  if (v === null) return;
+  const t = v.trim().toLowerCase().replace(/^\$/, "");
+  let budget;
+  if (!t || t === "off" || t === "0") {
+    budget = null;
+  } else {
+    budget = parseFloat(t);
+    if (!isFinite(budget) || budget <= 0) {
+      showPanelMsg("crew-msg", `bad budget "${v}" - use 5, 2.50 or off`);
+      return;
+    }
+  }
+  try {
+    const d = await invoke("crew_budget", { budget });
+    CREW.state = d.none ? null : d;
+    CREW.lastJson = null;
+    renderCrew();
+  } catch (e) {
+    showPanelMsg("crew-msg", String(e));
+  }
+};
+$("crew-review").onclick = async () => {
+  const v = prompt("member to (un)mark as reviewer - a DONE claim needs their APPROVE:", "");
+  if (!v || !v.trim()) return;
+  try {
+    const d = await invoke("crew_review", { name: v.trim() });
+    CREW.state = d.none ? null : d;
+    CREW.lastJson = null;
+    renderCrew();
+  } catch (e) {
+    showPanelMsg("crew-msg", String(e));
+  }
+};
 $("crew-memo-add").onclick = () => crewMemoAdd();
 $("crew-memo-input").addEventListener("keydown", (e) => {
   if (e.key === "Enter") {

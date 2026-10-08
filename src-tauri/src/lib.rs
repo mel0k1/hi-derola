@@ -2386,6 +2386,27 @@ async fn crew_limit(
     crew::state_json(&id).map_err(|e| format!("{e:#}"))
 }
 
+#[tauri::command]
+async fn crew_budget(sh: State<'_, Arc<Shared>>, budget: Option<f64>) -> Result<Value, String> {
+    let id = crew_active_id(&sh).ok_or("no active crew")?;
+    crew::set_budget(&id, budget).map_err(|e| format!("{e:#}"))?;
+    crew::state_json(&id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn crew_review(sh: State<'_, Arc<Shared>>, name: String) -> Result<Value, String> {
+    let id = crew_active_id(&sh).ok_or("no active crew")?;
+    let cur = crew::load(&id)
+        .map_err(|e| format!("{e:#}"))?
+        .members
+        .into_iter()
+        .find(|m| m.name.eq_ignore_ascii_case(&name))
+        .ok_or(format!("no member named \"{name}\""))?
+        .review;
+    crew::set_review(&id, &name, !cur).map_err(|e| format!("{e:#}"))?;
+    crew::state_json(&id).map_err(|e| format!("{e:#}"))
+}
+
 pub fn run() -> Result<()> {
     let (cfg, _) = Config::load_or_default()?;
     lsp::set_enabled(cfg.lsp.enabled);
@@ -2562,7 +2583,9 @@ pub fn run() -> Result<()> {
             crew_auto,
             crew_stop,
             crew_usage,
-            crew_limit
+            crew_limit,
+            crew_budget,
+            crew_review
         ])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow!("{e}"))?;

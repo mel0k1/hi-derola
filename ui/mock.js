@@ -517,6 +517,8 @@
   commands.crew_stop = async () => {};
   commands.crew_usage = async () => ({ rows: [], total: { input: 0, output: 0, cost: 0 } });
   commands.crew_limit = async () => ({ none: true });
+  commands.crew_budget = async () => ({ none: true });
+  commands.crew_review = async () => ({ none: true });
   commands.crew_memo = async () => ({ none: true });
   commands.crew_forget = async () => ({ none: true });
   commands.set_plan = async () => {};
