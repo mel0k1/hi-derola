@@ -15,6 +15,7 @@ use std::sync::Mutex;
 const MAX_SKILL_BODY: usize = 16 * 1024;
 const MAX_WALK_DEPTH: usize = 8;
 const MAX_SKILLS: usize = 500;
+const MAX_LISTED_FILES: usize = 40;
 
 #[derive(Clone, Debug)]
 pub struct Skill {
@@ -180,6 +181,9 @@ fn parse(text: &str) -> Option<(String, String, String)> {
     Some((name, description, body.to_string()))
 }
 
+/// load a skill body; `$SKILL_DIR` / `${SKILL_DIR}` expand to the skill's
+/// folder (so bundled scripts are runnable via bash), and a short file
+/// listing of the folder is appended so the agent can see what's there
 pub fn load(name: &str) -> Result<String> {
     if !is_enabled(name) {
         bail!("skill \"{name}\" is disabled — /skills toggle {name}");
@@ -202,7 +206,64 @@ pub fn load(name: &str) -> Result<String> {
         body.truncate(end);
         body.push_str("\n... (truncated)");
     }
+    let dir = skill
+        .path
+        .parent()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    body = body
+        .replace("${SKILL_DIR}", &dir)
+        .replace("$SKILL_DIR", &dir);
+    if let Some(listing) = list_files(skill.path.parent().unwrap_or(Path::new("."))) {
+        body.push_str("\n\n");
+        body.push_str(&listing);
+    }
     Ok(body)
+}
+
+/// shallow listing of a skill folder (files only, relative paths + sizes)
+fn list_files(dir: &Path) -> Option<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![(dir.to_path_buf(), 0usize)];
+    let mut count = 0usize;
+    let mut overflow = false;
+    while let Some((d, depth)) = stack.pop() {
+        if depth > 3 || overflow {
+            continue;
+        }
+        let Ok(rd) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if !ignored_dir(&e.file_name().to_string_lossy()) {
+                    stack.push((p, depth + 1));
+                }
+                continue;
+            }
+            if count >= MAX_LISTED_FILES {
+                overflow = true;
+                break;
+            }
+            let rel = p.strip_prefix(dir).unwrap_or(&p).display().to_string();
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            out.push(format!("  {rel} ({size} bytes)"));
+            count += 1;
+        }
+    }
+    if out.is_empty() {
+        return None;
+    }
+    if overflow {
+        out.push("  … (more entries truncated)".into());
+    }
+    let dir_disp = dir.display().to_string();
+    Some(format!(
+        "Files bundled with this skill (folder: {dir_disp}; run scripts with bash, \
+         e.g. `bash \"{dir_disp}/scripts/build.sh\"`):\n{}",
+        out.join("\n")
+    ))
 }
 
 /// shallow-clone a skill collection into the global root; a re-install of
@@ -385,6 +446,31 @@ mod tests {
         assert!(load("commit").is_ok());
 
         std::env::set_current_dir(prev).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn skill_dir_expansion_and_scripts() {
+        let dir = tmpdir("hiderola-skill-dir");
+        let root = dir.join(".hi-derola/skills/deploy");
+        std::fs::create_dir_all(root.join("scripts")).unwrap();
+        std::fs::write(
+            root.join("SKILL.md"),
+            "---\nname: deploy\ndescription: \"Deploy the app\"\n---\nRun ${SKILL_DIR}/scripts/build.sh then $SKILL_DIR/scripts/ship.sh\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("scripts/build.sh"), "#!/bin/sh\necho build\n").unwrap();
+        std::fs::write(root.join("scripts/ship.sh"), "#!/bin/sh\necho ship\n").unwrap();
+
+        let prev = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        let body = load("deploy").unwrap();
+        std::env::set_current_dir(prev).unwrap();
+
+        assert!(!body.contains("$SKILL_DIR"), "{body}");
+        assert!(body.contains("scripts/build.sh"), "{body}");
+        assert!(body.contains("Files bundled with this skill"));
+        assert!(body.contains("ship.sh ("));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
