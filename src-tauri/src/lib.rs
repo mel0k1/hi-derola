@@ -384,6 +384,7 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     json!({"t": "usage", "input": input, "output": output, "cached": cached, "cost": total,
                            "ctx_used": ctx_used, "ctx_limit": ctx_limit})
                 }
+                ApiEvent::Bell => json!({"t": "bell"}),
                 ApiEvent::Done { text, messages } => {
                     *sh.inflight.lock().unwrap() = None;
                     autotitle(&app, &sh, &messages);
@@ -2322,6 +2323,11 @@ fn crew_run(sh: &Arc<Shared>, rounds: usize, auto: bool) -> Result<(), String> {
         return Err("crew is already running".into());
     }
     let cfg = sh.cfg.lock().unwrap().clone();
+    // preflight up front: surface bad profiles/keys as a command error
+    // instead of a mid-round system note
+    if let Err(e) = crew::preflight_id(&id, &cfg) {
+        return Err(format!("{e:#}"));
+    }
     let tx = sh.tx.clone();
     let handle = tauri::async_runtime::spawn(async move {
         let res = if auto {
@@ -2335,6 +2341,9 @@ fn crew_run(sh: &Arc<Shared>, rounds: usize, auto: bool) -> Result<(), String> {
         match res {
             Ok(Some(msg)) => {
                 let _ = tx.send(ApiEvent::Note(msg));
+                if crew::load(&id).map(|c| c.status == "done").unwrap_or(false) {
+                    let _ = tx.send(ApiEvent::Bell);
+                }
             }
             Ok(None) => {}
             Err(e) => {
@@ -2414,6 +2423,7 @@ pub fn run() -> Result<()> {
     hi_derola::tools::set_shell(cfg.agent.shell.clone());
     let cfg = Arc::new(cfg);
     tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
         .setup(move |app| {
             let (tx, rx) = mpsc::unbounded_channel::<ApiEvent>();
             let cfg = (*cfg).clone();

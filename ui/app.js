@@ -882,6 +882,9 @@ async function handleEvent(ev) {
       }
       break;
     }
+    case "bell":
+      crewNotifyDone();
+      break;
     case "note": {
       if (ev.s) {
         if (streamRaw !== null) {
@@ -2959,6 +2962,7 @@ function renderCrew() {
     if (m.model) label += ` · ${m.model}`;
     if (m.tools) label += " · tools";
     if (m.review) label += " · review";
+    if (m.bg) label += " · bg";
     if (m.limit) label += ` · ${m.used || 0}/${m.limit} tok`;
     chip.textContent = label;
     chip.title = "click to set a token limit for this member (off clears it)";
@@ -3123,6 +3127,53 @@ function crewFlushLive() {
   }
   CREW.live = null;
   document.querySelectorAll(".crew-live").forEach((n) => n.remove());
+}
+
+/* crew finished: system notification + title flash (bell event) */
+
+let crewTitleTimer = null;
+
+function crewNotifyDone() {
+  note("crew finished — goal marked done");
+  if (!$("crew-view").classList.contains("hidden")) {
+    invoke("crew_state").then((s) => {
+      CREW.state = s.none ? null : s;
+      CREW.lastJson = null;
+      renderCrew();
+    }).catch(() => {});
+  }
+  const prev = document.title;
+  if (crewTitleTimer) clearInterval(crewTitleTimer);
+  let n = 0;
+  crewTitleTimer = setInterval(() => {
+    document.title = n % 2 === 0 ? "\u2714 crew DONE — Hi!Derola" : prev;
+    if (++n >= 6) {
+      clearInterval(crewTitleTimer);
+      crewTitleTimer = null;
+      document.title = prev;
+    }
+  }, 700);
+  (async () => {
+    try {
+      const np = window.__TAURI__ && window.__TAURI__.notification;
+      if (np) {
+        let granted = np.isPermissionGranted ? await np.isPermissionGranted() : false;
+        if (!granted && np.requestPermission) {
+          granted = (await np.requestPermission()) === "granted";
+        }
+        if (granted && np.sendNotification) {
+          await np.sendNotification({
+            title: "Hi!Derola crew",
+            body: "Crew goal marked DONE.",
+          });
+          return;
+        }
+      }
+      if (window.Notification && Notification.permission === "granted") {
+        new Notification("Hi!Derola crew", { body: "Crew goal marked DONE." });
+      }
+    } catch {}
+  })();
 }
 
 /* @mention graph: nodes on a circle, edge weight = stroke width */
