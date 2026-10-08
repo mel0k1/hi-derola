@@ -685,7 +685,11 @@ impl App {
 
     fn flush_stream(&mut self) {
         if let Some(i) = self.streaming.take() {
-            if self.entries.get(i).is_some_and(|e| e.text.trim().is_empty()) {
+            if self
+                .entries
+                .get(i)
+                .is_some_and(|e| e.text.trim().is_empty())
+            {
                 self.entries.remove(i);
                 if let Some(r) = self.reasoning {
                     if r > i {
