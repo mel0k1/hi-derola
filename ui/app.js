@@ -65,6 +65,9 @@ const ICONS = {
   download: '<path d="M12 3v12"/><path d="M7 10l5 5 5-5"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/>',
   warn: '<path d="M12 3L2 21h20z"/><path d="M12 10v5"/><path d="M12 18h.01"/>',
   terminal: '<path d="M4 17l6-5-6-5"/><path d="M12 19h8"/>',
+  server: '<rect x="2" y="3" width="20" height="7" rx="1.5"/><rect x="2" y="14" width="20" height="7" rx="1.5"/><path d="M6 6.5h.01"/><path d="M6 17.5h.01"/>',
+  skill: '<path d="M12 2l2.6 5.3 5.9.9-4.2 4.1 1 5.8L12 15.4 6.7 18.1l1-5.8L3.5 8.2l5.9-.9z"/>',
+  crew: '<circle cx="8" cy="9" r="3.2"/><circle cx="16.5" cy="10.5" r="2.6"/><path d="M2.5 19c.6-3.2 2.8-5 5.5-5s4.9 1.8 5.5 5"/><path d="M14.5 14.6c2.3.3 3.9 1.9 4.4 4.4"/>',
 };
 
 function icon(name) {
@@ -864,6 +867,12 @@ async function handleEvent(ev) {
       const t = ensureThink();
       t.body.textContent += ev.s;
       t.body.scrollTop = t.body.scrollHeight;
+      break;
+    }
+    case "crew": {
+      if (!$("crew-view").classList.contains("hidden")) {
+        renderCrewFeed();
+      }
       break;
     }
     case "note": {
@@ -2035,9 +2044,39 @@ const SBX_IMAGES = [
 /* kinds that no longer appear in the wizard but may exist on disk */
 const SBX_LEGACY_LABELS = { nixos: "NixOS minimal (legacy)" };
 
+function closeOtherViews(except) {
+  ["sandbox-view", "crew-view", "hosts-view", "skills-view"].forEach((v) => {
+    if (v !== except) $(v).classList.add("hidden");
+  });
+  ["btn-sandbox", "btn-crew", "btn-hosts", "btn-skills"].forEach((b) =>
+    $(b).classList.remove("on")
+  );
+  if (except !== "sandbox-view" && sandboxOpen) {
+    sandboxOpen = false;
+    stopSbxPoll();
+  }
+}
+
+function togglePanelView(id, btnId, onOpen) {
+  const sec = $(id);
+  const willOpen = sec.classList.contains("hidden");
+  closeOtherViews(willOpen ? id : null);
+  sec.classList.toggle("hidden", !willOpen);
+  $("chat").classList.toggle("hidden", !willOpen);
+  $("chips").classList.toggle("hidden", !willOpen);
+  $("inputbar").classList.toggle("hidden", !willOpen);
+  if (willOpen) {
+    $(btnId).classList.add("on");
+    if (onOpen) onOpen();
+  } else {
+    $("input").focus();
+  }
+}
+
 function toggleSandboxView(force) {
   const on = force === undefined ? !sandboxOpen : !!force;
   if (on === sandboxOpen && !on) return;
+  closeOtherViews(on ? "sandbox-view" : null);
   sandboxOpen = on;
   $("sandbox-view").classList.toggle("hidden", !on);
   $("chat").classList.toggle("hidden", on);
@@ -2231,6 +2270,37 @@ function sbxCard(s) {
           .catch((e) => showSbxMsg(String(e)));
     }
     actions.appendChild(att);
+    const fetchBtn = el("button", "ghost sbx-btn");
+    fetchBtn.innerHTML = `${icon("download")} fetch file`;
+    fetchBtn.title = "copy a file out of the VM via a save dialog";
+    fetchBtn.onclick = () => sbxFetchPrompt(s);
+    actions.appendChild(fetchBtn);
+  }
+
+  if (s.spec.forwards && s.spec.forwards.length) {
+    const fw = el("div", "sbx-meta sbx-forwards");
+    s.spec.forwards.forEach((f) => {
+      const chip = el("span", "sbx-kind", `127.0.0.1:${f.host_port} → ${f.guest_host}:${f.guest_port}`);
+      chip.title = "extra port forward (applies on VM start) — click to remove";
+      chip.style.cursor = "pointer";
+      chip.onclick = () =>
+        invoke("sandbox_fwd_del", { id: s.spec.id, hostPort: f.host_port })
+          .then(refreshSandbox)
+          .catch((e) => showSbxMsg(String(e)));
+      fw.appendChild(chip);
+    });
+    const add = el("span", "sbx-kind sbx-fwd-add", "+ forward");
+    add.style.cursor = "pointer";
+    add.onclick = () => sbxFwdPrompt(s);
+    fw.appendChild(add);
+    card.appendChild(fw);
+  } else if (s.state === "running") {
+    const fw = el("div", "sbx-meta sbx-forwards");
+    const add = el("span", "sbx-kind sbx-fwd-add", "+ port forward");
+    add.style.cursor = "pointer";
+    add.onclick = () => sbxFwdPrompt(s);
+    fw.appendChild(add);
+    card.appendChild(fw);
   }
 
   const primary = el("button", "ghost sbx-btn");
@@ -2614,6 +2684,439 @@ $("palette-input").addEventListener("keydown", (e) => {
     closePalette();
   }
 });
+
+/* ================= remote hosts / skills / crew panels ================= */
+
+let HOSTS = { list: [], attached: null };
+let SKILLS = { list: [] };
+let CREW = { state: null, usage: null };
+let crewTimer = null;
+
+function showPanelMsg(id, text) {
+  const box = $(id);
+  box.textContent = text || "";
+  box.classList.toggle("hidden", !text);
+}
+
+/* ---------- hosts ---------- */
+
+function toggleHostsView() {
+  togglePanelView("hosts-view", "btn-hosts", refreshHosts);
+}
+
+async function refreshHosts() {
+  try {
+    const d = await invoke("host_list");
+    HOSTS.list = d.hosts || [];
+    HOSTS.attached = d.attached || null;
+    renderHosts();
+  } catch (e) {
+    showPanelMsg("hosts-msg", String(e));
+  }
+}
+
+function renderHosts() {
+  const box = $("hosts-list");
+  box.replaceChildren();
+  if (!HOSTS.list.length) {
+    box.appendChild(el("div", "sbx-empty", "no remote hosts yet — add one and attach it to move the agent's bash and file tools to your server."));
+    return;
+  }
+  for (const h of HOSTS.list) box.appendChild(hostCard(h));
+}
+
+function hostCard(h) {
+  const card = el("div", "sbx-card");
+  const head = el("div", "sbx-card-head");
+  head.appendChild(el("div", "sbx-name", h.name));
+  head.insertAdjacentHTML("beforeend", `<span class="sbx-state ${h.state === "ready" ? "running" : h.state === "failed" ? "failed" : ""}">${esc(h.state)}</span>`);
+  if (HOSTS.attached === h.id) {
+    head.insertAdjacentHTML("beforeend", `<span class="sbx-state running">\u2190 bash here</span>`);
+  }
+  card.appendChild(head);
+  const meta = el("div", "sbx-meta");
+  meta.insertAdjacentHTML("beforeend", `<span class="mono">${esc(h.label)}</span>`);
+  if (h.agent === true) meta.insertAdjacentHTML("beforeend", `<span>agent installed</span>`);
+  card.appendChild(meta);
+  if (h.error) card.appendChild(el("div", "sbx-error", h.error));
+
+  const actions = el("div", "sbx-card-actions");
+  const check = el("button", "ghost sbx-btn");
+  check.innerHTML = `${icon("check")} check`;
+  check.title = "probe ssh connectivity";
+  check.onclick = async () => {
+    check.disabled = true;
+    try {
+      const st = await invoke("host_check", { id: h.id });
+      await refreshHosts();
+      if (st.state !== "ready") showPanelMsg("hosts-msg", `check failed: ${st.error || "unknown"}`);
+      else showPanelMsg("hosts-msg", `host "${st.name}" is reachable`);
+    } catch (e) {
+      showPanelMsg("hosts-msg", String(e));
+    } finally {
+      check.disabled = false;
+    }
+  };
+  actions.appendChild(check);
+
+  const att = el("button", "ghost sbx-btn");
+  if (HOSTS.attached === h.id) {
+    att.innerHTML = `${icon("x")} detach chat`;
+    att.onclick = () =>
+      invoke("host_detach").then(refreshHosts).catch((e) => showPanelMsg("hosts-msg", String(e)));
+  } else {
+    att.innerHTML = `${icon("box")} attach chat`;
+    att.title = "run the chat's bash + file tools on this host over ssh";
+    att.onclick = () =>
+      invoke("host_attach", { id: h.id })
+        .then((msg) => {
+          showPanelMsg("hosts-msg", msg);
+          return refreshHosts();
+        })
+        .catch((e) => showPanelMsg("hosts-msg", String(e)));
+  }
+  actions.appendChild(att);
+
+  const term = el("button", "ghost sbx-btn");
+  term.innerHTML = `${icon("terminal")} terminal`;
+  term.onclick = () => invoke("host_terminal", { id: h.id, agent: false }).catch((e) => showPanelMsg("hosts-msg", String(e)));
+  actions.appendChild(term);
+
+  const pk = el("button", "ghost sbx-btn");
+  pk.innerHTML = `${icon("file")} pubkey`;
+  pk.title = "show the public key to install on the host";
+  pk.onclick = async () => {
+    try {
+      const key = await invoke("host_pubkey", { id: h.id });
+      showPanelMsg("hosts-msg", `add to ${h.label} ~/.ssh/authorized_keys:\n${key}`);
+    } catch (e) {
+      showPanelMsg("hosts-msg", String(e));
+    }
+  };
+  actions.appendChild(pk);
+
+  const del = el("button", "ghost sbx-btn");
+  del.innerHTML = icon("trash");
+  del.onclick = () =>
+    invoke("host_del", { id: h.id }).then(refreshHosts).catch((e) => showPanelMsg("hosts-msg", String(e)));
+  actions.appendChild(del);
+
+  card.appendChild(actions);
+  return card;
+}
+
+/* ---------- skills ---------- */
+
+function toggleSkillsView() {
+  togglePanelView("skills-view", "btn-skills", refreshSkills);
+}
+
+async function refreshSkills() {
+  try {
+    const d = await invoke("skills_list");
+    SKILLS.list = d.skills || [];
+    renderSkills();
+  } catch (e) {
+    showPanelMsg("skills-msg", String(e));
+  }
+}
+
+function renderSkills() {
+  const box = $("skills-list");
+  box.replaceChildren();
+  if (!SKILLS.list.length) {
+    box.appendChild(el("div", "sbx-empty", "no skills found — clone a collection above, or drop a folder with SKILL.md into .hi-derola/skills/"));
+    return;
+  }
+  for (const sk of SKILLS.list) {
+    const row = el("div", "sbx-card skill-row");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = !!sk.enabled;
+    cb.className = "skill-toggle";
+    cb.title = sk.enabled ? "enabled — click to disable" : "disabled — click to enable";
+    cb.onchange = async () => {
+      try {
+        await invoke("skills_toggle", { name: sk.name, enabled: cb.checked });
+      } catch (e) {
+        showPanelMsg("skills-msg", String(e));
+        cb.checked = !cb.checked;
+      }
+    };
+    row.appendChild(cb);
+    const body = el("div", "skill-body");
+    const nm = el("div", "sbx-name", sk.name);
+    body.appendChild(nm);
+    if (sk.description) body.appendChild(el("div", "hint", sk.description));
+    body.appendChild(el("div", "hint mono", sk.path));
+    row.appendChild(body);
+    box.appendChild(row);
+  }
+}
+
+/* ---------- crew ---------- */
+
+function toggleCrewView() {
+  togglePanelView("crew-view", "btn-crew", () => {
+    refreshCrew();
+    startCrewPoll();
+  });
+  if ($("crew-view").classList.contains("hidden")) stopCrewPoll();
+}
+
+function startCrewPoll() {
+  if (crewTimer) return;
+  crewTimer = setInterval(async () => {
+    if ($("crew-view").classList.contains("hidden")) return;
+    try {
+      const d = await invoke("crew_state");
+      const j = JSON.stringify(d);
+      if (j !== CREW.lastJson) {
+        CREW.lastJson = j;
+        CREW.state = d.none ? null : d;
+        renderCrew();
+      }
+    } catch {}
+  }, 1500);
+}
+
+function stopCrewPoll() {
+  if (crewTimer) {
+    clearInterval(crewTimer);
+    crewTimer = null;
+  }
+}
+
+async function refreshCrew() {
+  try {
+    const d = await invoke("crew_state");
+    CREW.state = d.none ? null : d;
+    renderCrew();
+  } catch (e) {
+    showPanelMsg("crew-msg", String(e));
+  }
+}
+
+function crewRoleOf(name) {
+  const st = CREW.state;
+  const m = st && st.members && st.members.find((x) => x.name === name);
+  return m ? m.role : "";
+}
+
+function renderCrew() {
+  const head = $("crew-head");
+  const list = $("crew-list");
+  const st = CREW.state;
+  list.replaceChildren();
+  if (!st) {
+    head.classList.add("hidden");
+    $("crew-controls").classList.add("hidden");
+    $("crew-inputrow").classList.add("hidden");
+    $("crew-addrow").classList.add("hidden");
+    $("crew-usage-box").classList.add("hidden");
+    list.appendChild(el("div", "sbx-empty", "no active crew — create one: a goal and a few members. agents talk in rounds, @Name steers the next speaker, a DONE: line finishes the goal."));
+    return;
+  }
+  head.classList.remove("hidden");
+  $("crew-controls").classList.remove("hidden");
+  $("crew-inputrow").classList.remove("hidden");
+  $("crew-addrow").classList.remove("hidden");
+  head.replaceChildren();
+  const h1 = el("div", "sbx-name", `goal: ${st.goal}`);
+  head.appendChild(h1);
+  head.insertAdjacentHTML(
+    "beforeend",
+    `<span class="sbx-state ${st.status === "done" ? "running" : st.status === "running" ? "waiting" : ""}">${esc(st.status)}${st.running ? " (working)" : ""}</span>`
+  );
+  const chips = el("div", "sbx-meta");
+  (st.members || []).forEach((m) => {
+    chips.insertAdjacentHTML(
+      "beforeend",
+      `<span class="sbx-kind">${esc(m.name)} · ${esc(m.role)}${m.model ? " · " + esc(m.model) : ""}</span>`
+    );
+  });
+  head.appendChild(chips);
+
+  renderCrewFeed();
+}
+
+function renderCrewFeed() {
+  const list = $("crew-list");
+  if (!CREW.state) return;
+  list.replaceChildren();
+  for (const m of CREW.state.messages || []) {
+    const row = el("div", "crew-msg");
+    if (m.kind === "system") {
+      row.classList.add("crew-sys");
+      row.textContent = m.content;
+    } else {
+      const who = el("div", "crew-author", `${m.author}${crewRoleOf(m.author) ? " · " + crewRoleOf(m.author) : ""}`);
+      row.appendChild(who);
+      const body = el("div", "crew-text");
+      body.innerHTML = md(m.content);
+      row.appendChild(body);
+    }
+    list.appendChild(row);
+  }
+  list.scrollTop = list.scrollHeight;
+}
+
+async function showCrewUsage() {
+  try {
+    const u = await invoke("crew_usage");
+    const box = $("crew-usage-box");
+    box.classList.remove("hidden");
+    box.replaceChildren();
+    const t = el("div", "sbx-name", `tokens: ${u.rows.length} member(s) · in ${u.total.input} · out ${u.total.output} · $${(+u.total.cost).toFixed(4)}`);
+    box.appendChild(t);
+    u.rows.forEach((r) => {
+      box.appendChild(
+        el("div", "hint", `${r.name} (${r.role}): ${r.requests} req · in ${r.input} · out ${r.output} · $${(+r.cost).toFixed(4)}`)
+      );
+    });
+  } catch (e) {
+    showPanelMsg("crew-msg", String(e));
+  }
+}
+
+/* ---------- sandbox fetch + forwards prompts ---------- */
+
+function sbxFetchPrompt(s) {
+  const vmPath = prompt(`file path inside the VM ${s.spec.name}:`, "~/README.md");
+  if (!vmPath) return;
+  showSbxMsg("fetching…");
+  invoke("sandbox_fetch_vm", { id: s.spec.id, vmPath })
+    .then((saved) => {
+      showSbxMsg(`saved: ${saved}`);
+    })
+    .catch((e) => showSbxMsg(String(e)));
+}
+
+function sbxFwdPrompt(s) {
+  const spec = prompt("port forward as host:guest [guest-host]", "8080:80");
+  if (!spec) return;
+  const [ports, ghost] = spec.split(/\s+/);
+  const [hp, gp] = (ports || "").split(":").map((x) => parseInt(x, 10));
+  if (!hp || !gp) {
+    showSbxMsg("need host:guest ports, e.g. 8080:80");
+    return;
+  }
+  invoke("sandbox_fwd_add", { id: s.spec.id, hostPort: hp, guestPort: gp, guestHost: ghost || "127.0.0.1" })
+    .then(refreshSandbox)
+    .catch((e) => showSbxMsg(String(e)));
+}
+
+/* ---------- bindings ---------- */
+
+$("btn-hosts").onclick = () => toggleHostsView();
+$("btn-skills").onclick = () => toggleSkillsView();
+$("btn-crew").onclick = () => toggleCrewView();
+
+$("hosts-add").onclick = () => {
+  showPanelMsg("hosts-msg", "");
+  $("hosts-form").classList.toggle("hidden");
+};
+$("h-cancel").onclick = () => $("hosts-form").classList.add("hidden");
+$("h-save").onclick = async () => {
+  try {
+    const st = await invoke("host_add", {
+      name: $("h-name").value.trim(),
+      user: $("h-user").value.trim() || "root",
+      host: $("h-host").value.trim(),
+      port: parseInt($("h-port").value, 10) || 22,
+    });
+    $("hosts-form").classList.add("hidden");
+    await refreshHosts();
+    const key = await invoke("host_pubkey", { id: st.id });
+    showPanelMsg("hosts-msg", `host "${st.name}" saved — install this key on the host, then check:\n${key}`);
+  } catch (e) {
+    showPanelMsg("hosts-msg", String(e));
+  }
+};
+
+$("skills-refresh").onclick = refreshSkills;
+$("skills-install").onclick = async () => {
+  const url = $("skills-url").value.trim();
+  if (!url) return;
+  showPanelMsg("skills-msg", "cloning…");
+  try {
+    const msg = await invoke("skills_install", { url });
+    $("skills-url").value = "";
+    await refreshSkills();
+    showPanelMsg("skills-msg", msg);
+  } catch (e) {
+    showPanelMsg("skills-msg", String(e));
+  }
+};
+
+$("crew-new").onclick = () => {
+  showPanelMsg("crew-msg", "");
+  $("crew-form").classList.toggle("hidden");
+};
+$("c-cancel").onclick = () => $("crew-form").classList.add("hidden");
+$("c-save").onclick = async () => {
+  const members = $("c-members")
+    .value.split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  try {
+    await invoke("crew_new", { goal: $("c-goal").value.trim(), members });
+    $("crew-form").classList.add("hidden");
+    CREW.lastJson = null;
+    await refreshCrew();
+  } catch (e) {
+    showPanelMsg("crew-msg", String(e));
+  }
+};
+$("crew-step").onclick = () =>
+  invoke("crew_step", { rounds: 1 })
+    .then(refreshCrew)
+    .catch((e) => showPanelMsg("crew-msg", String(e)));
+$("crew-auto").onclick = () =>
+  invoke("crew_auto", { maxRounds: 8 })
+    .then(refreshCrew)
+    .catch((e) => showPanelMsg("crew-msg", String(e)));
+$("crew-stop").onclick = () =>
+  invoke("crew_stop")
+    .then(refreshCrew)
+    .catch((e) => showPanelMsg("crew-msg", String(e)));
+$("crew-usage").onclick = showCrewUsage;
+$("crew-drop").onclick = async () => {
+  if (!CREW.state) return;
+  try {
+    await invoke("crew_drop", { id: CREW.state.id });
+    CREW.state = null;
+    CREW.lastJson = null;
+    renderCrew();
+  } catch (e) {
+    showPanelMsg("crew-msg", String(e));
+  }
+};
+$("crew-send").onclick = async () => {
+  const text = $("crew-input").value.trim();
+  if (!text) return;
+  try {
+    await invoke("crew_send", { text });
+    $("crew-input").value = "";
+    await refreshCrew();
+    invoke("crew_step", { rounds: 1 }).then(refreshCrew).catch(() => {});
+  } catch (e) {
+    showPanelMsg("crew-msg", String(e));
+  }
+};
+$("crew-addbtn").onclick = async () => {
+  const spec = $("crew-addspec").value.trim();
+  if (!spec) return;
+  try {
+    await invoke("crew_add", { spec });
+    $("crew-addspec").value = "";
+    await refreshCrew();
+  } catch (e) {
+    showPanelMsg("crew-msg", String(e));
+  }
+};
+
+
 $("files-close").onclick = closeFiles;
 $("files-up").onclick = () => filesParent && browse(filesParent);
 $("files-here").onclick = async () => {

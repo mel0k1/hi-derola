@@ -32,6 +32,9 @@
         <select id="model-select" title="model"></select>
         <button id="btn-review" class="icon-btn hidden" title="review session changes"><span class="ic" data-icon="diff"></span><span id="review-badge" class="badge hidden"></span></button>
         <button id="btn-sandbox" class="icon-btn" title="sandbox - local QEMU VMs for isolated agent work"><span class="ic" data-icon="box"></span></button>
+        <button id="btn-hosts" class="icon-btn" title="remote hosts - run the agent on your servers over ssh"><span class="ic" data-icon="server"></span></button>
+        <button id="btn-skills" class="icon-btn" title="skills - plugin folders with SKILL.md, toggles, git install"><span class="ic" data-icon="skill"></span></button>
+        <button id="btn-crew" class="icon-btn" title="crew - several AI agents in one session"><span class="ic" data-icon="crew"></span></button>
         <button id="btn-palette" class="icon-btn" title="command palette (ctrl+k)"><span class="ic" data-icon="command"></span></button>
         <button id="btn-undo" class="icon-btn" title="undo file changes (ctrl+z)"><span class="ic" data-icon="undo"></span></button>
         <button id="btn-redo" class="icon-btn" title="redo (ctrl+shift+z)"><span class="ic" data-icon="redo"></span></button>
@@ -71,6 +74,91 @@
           <div id="sbxw-body"></div>
         </div>
         <div id="sbx-list"></div>
+      </div>
+    </section>
+
+    <section id="hosts-view" class="hidden">
+      <div id="sandbox-col">
+        <div class="sbx-head">
+          <div>
+            <div class="sbx-title"><span class="ic" data-icon="server"></span>remote hosts</div>
+            <div class="sbx-sub">your servers over ssh &mdash; attach one and the agent works there (bash, files, undo/redo, background tasks)</div>
+          </div>
+          <button id="hosts-add" class="accent"><span class="ic sm" data-icon="plus"></span> add host</button>
+        </div>
+        <div id="hosts-msg" class="hidden"></div>
+        <div id="hosts-form" class="hidden sbx-wizard">
+          <label class="hosts-line">name <input id="h-name" placeholder="web-prod" spellcheck="false" /></label>
+          <label class="hosts-line">user <input id="h-user" placeholder="root" spellcheck="false" /></label>
+          <label class="hosts-line">host <input id="h-host" placeholder="203.0.113.10 or my.server.dev" spellcheck="false" /></label>
+          <label class="hosts-line">port <input id="h-port" type="number" value="22" min="1" max="65535" /></label>
+          <div class="row-inline">
+            <button id="h-save" class="accent">save &amp; generate key</button>
+            <button id="h-cancel" class="ghost">cancel</button>
+          </div>
+          <div class="hint">a key pair is generated per host &mdash; add the shown public key to the host's authorized_keys, then run check</div>
+        </div>
+        <div id="hosts-list"></div>
+      </div>
+    </section>
+
+    <section id="skills-view" class="hidden">
+      <div id="sandbox-col">
+        <div class="sbx-head">
+          <div>
+            <div class="sbx-title"><span class="ic" data-icon="skill"></span>skills</div>
+            <div class="sbx-sub">any folder with SKILL.md (project <span class="mono">.hi-derola/skills/</span> or global <span class="mono">~/.config/hi-derola/skills/</span>) &mdash; recursive, model-agnostic, toggleable</div>
+          </div>
+          <button id="skills-refresh" class="accent"><span class="ic sm" data-icon="check"></span> rescan</button>
+        </div>
+        <div id="skills-msg" class="hidden"></div>
+        <div class="sbx-wizard">
+          <label class="hosts-line">git install <input id="skills-url" placeholder="https://github.com/addyosmani/agent-skills.git" spellcheck="false" /></label>
+          <div class="row-inline">
+            <button id="skills-install" class="accent"><span class="ic sm" data-icon="download"></span> clone &amp; register</button>
+            <span class="hint">a shallow clone into the global skills dir &mdash; every SKILL.md inside is discovered</span>
+          </div>
+        </div>
+        <div id="skills-list"></div>
+      </div>
+    </section>
+
+    <section id="crew-view" class="hidden">
+      <div id="sandbox-col">
+        <div class="sbx-head">
+          <div>
+            <div class="sbx-title"><span class="ic" data-icon="crew"></span>crew</div>
+            <div class="sbx-sub">several AI agents in one session &mdash; they coordinate via @Name, a DONE: line finishes the goal; tokens are counted per member</div>
+          </div>
+          <button id="crew-new" class="accent"><span class="ic sm" data-icon="plus"></span> new crew</button>
+        </div>
+        <div id="crew-msg" class="hidden"></div>
+        <div id="crew-form" class="hidden sbx-wizard">
+          <label class="hosts-line">goal <textarea id="c-goal" rows="2" placeholder="design and review a release plan for the app"></textarea></label>
+          <label class="hosts-line">members (one per line, Name|role optional pipes: profile|model; "|role" = the agent picks a name) <textarea id="c-members" rows="3" placeholder="Rex|planner&#10;Nora|critic&#10;|coder|fast|gpt-5-mini"></textarea></label>
+          <div class="row-inline">
+            <button id="c-save" class="accent">create</button>
+            <button id="c-cancel" class="ghost">cancel</button>
+          </div>
+        </div>
+        <div id="crew-head" class="hidden"></div>
+        <div id="crew-list"></div>
+        <div id="crew-controls" class="hidden row-inline crew-controls">
+          <button id="crew-step" class="ghost">step</button>
+          <button id="crew-auto" class="accent">auto</button>
+          <button id="crew-stop" class="ghost">stop</button>
+          <button id="crew-usage" class="ghost">usage</button>
+          <button id="crew-drop" class="ghost">delete</button>
+        </div>
+        <div id="crew-usage-box" class="hidden"></div>
+        <div id="crew-inputrow" class="hidden row-inline">
+          <input id="crew-input" placeholder="say something to the crew..." spellcheck="false" />
+          <button id="crew-send" class="accent">send</button>
+        </div>
+        <div id="crew-addrow" class="hidden row-inline">
+          <input id="crew-addspec" placeholder="add member: Name|role[|profile|model]" spellcheck="false" />
+          <button id="crew-addbtn" class="ghost">add</button>
+        </div>
       </div>
     </section>
 

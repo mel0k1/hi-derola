@@ -7,7 +7,7 @@ use hi_derola::mcpauth;
 use hi_derola::provider::{self, ApiEvent, ChatRequest, ConfirmReply, Provider};
 use hi_derola::sessions::{self, ChangeRec as SessionChange, SessionMeta, StoredSession};
 use hi_derola::todo::Todo;
-use hi_derola::{fmt, lsp, models, sandbox, snapshot, tools};
+use hi_derola::{crew, fmt, hosts, lsp, models, sandbox, skills, snapshot, tools};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -37,6 +37,7 @@ pub struct Shared {
     queue: Arc<Mutex<Vec<String>>>,
     titled: AtomicBool,
     changes: Mutex<Vec<SessionChange>>,
+    crew: Mutex<Option<String>>,
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
 
@@ -328,6 +329,14 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     json!({"t": "todo", "s": s})
                 }
                 ApiEvent::BgOut { id, chunk } => json!({"t": "bgout", "id": id, "s": chunk}),
+                ApiEvent::Crew {
+                    id,
+                    author,
+                    role,
+                    content,
+                } => {
+                    json!({"t": "crew", "id": id, "author": author, "role": role, "content": content})
+                }
                 ApiEvent::Usage {
                     input,
                     output,
@@ -817,7 +826,7 @@ async fn sandbox_attach(sh: State<'_, Arc<Shared>>, id: String) -> Result<String
             "ssh is not ready yet — wait for the ready badge on the card, then attach".into(),
         );
     }
-    sandbox::set_shell_route(Some(id.clone()));
+    sandbox::set_shell_route(Some(format!("sbx:{id}")));
     refresh_session_prompt(&sh);
     Ok(format!(
         "bash and file tools now run inside \"{}\" — your host files stay out of reach",
@@ -842,7 +851,7 @@ async fn sandbox_list() -> Result<Value, String> {
     Ok(json!({
         "dir": m.dir().display().to_string(),
         "sandboxes": m.list(),
-        "attached": sandbox::shell_route(),
+        "attached": sandbox::shell_route_sbx(),
     }))
 }
 
@@ -1979,6 +1988,364 @@ async fn send(sh: State<'_, Arc<Shared>>, app: AppHandle, text: String) -> Resul
     Ok(json!({"cmd": false}))
 }
 
+// ------------------------------------------------------------ vm port forwards
+
+#[tauri::command]
+async fn sandbox_fwd_add(
+    id: String,
+    host_port: u16,
+    guest_port: u16,
+    guest_host: Option<String>,
+) -> Result<sandbox::SandboxStatus, String> {
+    let m = sandbox::SandboxManager::global().clone();
+    tokio::task::spawn_blocking(move || {
+        m.fwd_add(&id, host_port, guest_port, guest_host.as_deref())
+    })
+    .await
+    .map_err(|e| format!("{e}"))?
+    .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn sandbox_fwd_del(id: String, host_port: u16) -> Result<sandbox::SandboxStatus, String> {
+    let m = sandbox::SandboxManager::global().clone();
+    tokio::task::spawn_blocking(move || m.fwd_del(&id, host_port))
+        .await
+        .map_err(|e| format!("{e}"))?
+        .map_err(|e| format!("{e:#}"))
+}
+
+// ---------------------------------------------------- fetch with save dialog
+
+/// copy a file out of a running sandbox VM and save it wherever the user
+/// picks in a native save dialog; returns the chosen path
+#[tauri::command]
+async fn sandbox_fetch_vm(id: String, vm_path: String) -> Result<String, String> {
+    let name = vm_path
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("file")
+        .to_string();
+    let tmp = std::env::temp_dir().join(format!("hiderola-fetch-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let m = sandbox::SandboxManager::global().clone();
+    let id2 = id.clone();
+    let vm2 = vm_path.clone();
+    let tmp2 = tmp.clone();
+    tokio::task::spawn_blocking(move || {
+        sandbox::fetch_from_vm(&id2, &vm2, &tmp2.to_string_lossy())
+    })
+    .await
+    .map_err(|e| format!("{e}"))?
+    .map_err(|e| format!("{e:#}"))?;
+    let dialog = rfd::AsyncFileDialog::new().set_file_name(&name);
+    let Some(handle) = dialog.save_file().await else {
+        let _ = std::fs::remove_file(&tmp);
+        return Err("cancelled".into());
+    };
+    let bytes = std::fs::read(&tmp).map_err(|e| format!("{e}"))?;
+    let _ = std::fs::remove_file(&tmp);
+    handle
+        .write(&bytes)
+        .await
+        .map_err(|e| format!("save failed: {e}"))?;
+    Ok(handle.file_name())
+}
+
+// ------------------------------------------------------------ remote hosts
+
+fn host_status_json(h: hosts::HostStatus) -> Value {
+    json!({
+        "id": h.host.id,
+        "name": h.host.name,
+        "label": h.host.ssh_label(),
+        "host": h.host.host,
+        "port": h.host.port,
+        "user": h.host.user,
+        "state": h.state,
+        "error": h.error,
+        "checked": h.checked,
+        "agent": h.agent,
+    })
+}
+
+#[tauri::command]
+async fn host_list() -> Result<Value, String> {
+    let m = hosts::HostManager::global();
+    let list: Vec<Value> = m.list().into_iter().map(host_status_json).collect();
+    Ok(json!({
+        "hosts": list,
+        "attached": sandbox::shell_route_host(),
+    }))
+}
+
+#[tauri::command]
+async fn host_add(name: String, user: String, host: String, port: u16) -> Result<Value, String> {
+    let m = hosts::HostManager::global().clone();
+    let st = tokio::task::spawn_blocking(move || m.add(&name, &user, &host, port))
+        .await
+        .map_err(|e| format!("{e}"))?
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(host_status_json(st))
+}
+
+#[tauri::command]
+async fn host_del(id: String) -> Result<(), String> {
+    if sandbox::shell_route_host().as_deref() == Some(id.as_str()) {
+        sandbox::set_shell_route(None);
+    }
+    hosts::HostManager::global()
+        .delete(&id)
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn host_check(id: String) -> Result<Value, String> {
+    let m = hosts::HostManager::global();
+    let st = tokio::task::spawn_blocking(move || m.check(&id))
+        .await
+        .map_err(|e| format!("{e}"))?;
+    Ok(host_status_json(st))
+}
+
+#[tauri::command]
+async fn host_pubkey(id: String) -> Result<String, String> {
+    let m = hosts::HostManager::global().clone();
+    tokio::task::spawn_blocking(move || m.pubkey(&id))
+        .await
+        .map_err(|e| format!("{e}"))?
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn host_attach(sh: State<'_, Arc<Shared>>, id: String) -> Result<String, String> {
+    let m = hosts::HostManager::global();
+    let st = tokio::task::spawn_blocking(move || m.check(&id))
+        .await
+        .map_err(|e| format!("{e}"))?;
+    if st.state != "ready" {
+        return Err(format!(
+            "host \"{}\" is not reachable: {} — install the public key first (host_pubkey)",
+            st.host.name,
+            st.error.unwrap_or_else(|| "unknown".into())
+        ));
+    }
+    sandbox::set_shell_route(Some(format!("host:{}", st.host.id)));
+    refresh_session_prompt(&sh);
+    Ok(format!(
+        "bash and file tools now run on \"{}\" ({}) — undo/redo covers remote edits too",
+        st.host.name,
+        st.host.ssh_label()
+    ))
+}
+
+#[tauri::command]
+async fn host_detach(sh: State<'_, Arc<Shared>>) -> Result<(), String> {
+    if sandbox::shell_route_host().is_none() {
+        return Err("no remote host attached".into());
+    }
+    sandbox::set_shell_route(None);
+    refresh_session_prompt(&sh);
+    Ok(())
+}
+
+#[tauri::command]
+async fn host_terminal(id: String, agent: bool) -> Result<(), String> {
+    let m = hosts::HostManager::global().clone();
+    tokio::task::spawn_blocking(move || m.open_terminal(&id, agent))
+        .await
+        .map_err(|e| format!("{e}"))?
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn host_exec(id: String, command: String) -> Result<Value, String> {
+    let m = hosts::HostManager::global().clone();
+    tokio::task::spawn_blocking(move || m.exec(&id, &command, None))
+        .await
+        .map_err(|e| format!("{e}"))?
+        .map(|o| json!({"code": o.code, "stdout": o.stdout, "stderr": o.stderr}))
+        .map_err(|e| format!("{e:#}"))
+}
+
+// ------------------------------------------------------------ skills
+
+#[tauri::command]
+async fn skills_list() -> Result<Value, String> {
+    let all = tokio::task::spawn_blocking(|| skills::discover_all())
+        .await
+        .map_err(|e| format!("{e}"))?;
+    let list: Vec<Value> = all
+        .iter()
+        .map(|s| {
+            json!({
+                "name": s.name,
+                "description": s.description,
+                "path": s.path.display().to_string(),
+                "enabled": skills::is_enabled(&s.name),
+            })
+        })
+        .collect();
+    Ok(json!({"skills": list}))
+}
+
+#[tauri::command]
+async fn skills_toggle(name: String, enabled: bool) -> Result<(), String> {
+    skills::set_enabled(&name, enabled).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn skills_install(url: String) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || skills::install_from_git(&url))
+        .await
+        .map_err(|e| format!("{e}"))?
+        .map_err(|e| format!("{e:#}"))
+}
+
+// ------------------------------------------------------------ crew
+
+fn crew_active_id(sh: &Shared) -> Option<String> {
+    sh.crew.lock().unwrap().clone().or_else(crew::active)
+}
+
+#[tauri::command]
+async fn crew_state(sh: State<'_, Arc<Shared>>) -> Result<Value, String> {
+    let Some(id) = crew_active_id(&sh) else {
+        return Ok(json!({"none": true, "running": crew::is_running()}));
+    };
+    crew::state_json(&id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn crew_list() -> Result<Value, String> {
+    let list: Vec<Value> = crew::list()
+        .into_iter()
+        .map(|c| {
+            json!({
+                "id": c.id, "goal": c.goal, "status": c.status,
+                "members": c.members, "messages": c.messages, "updated": c.updated,
+            })
+        })
+        .collect();
+    Ok(json!({"crews": list, "running": crew::is_running()}))
+}
+
+#[tauri::command]
+async fn crew_new(
+    sh: State<'_, Arc<Shared>>,
+    app: AppHandle,
+    goal: String,
+    members: Vec<String>,
+) -> Result<Value, String> {
+    let c = crew::create(&goal, &members).map_err(|e| format!("{e:#}"))?;
+    *sh.crew.lock().unwrap() = Some(c.id.clone());
+    crew::state_json(&c.id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn crew_open(sh: State<'_, Arc<Shared>>, id: String) -> Result<Value, String> {
+    crew::load(&id).map_err(|e| format!("{e:#}"))?;
+    *sh.crew.lock().unwrap() = Some(id.clone());
+    crew::state_json(&id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn crew_drop(sh: State<'_, Arc<Shared>>, id: String) -> Result<(), String> {
+    if crew::is_running() {
+        return Err("crew is running — stop it first".into());
+    }
+    crew::delete(&id).map_err(|e| format!("{e:#}"))?;
+    if crew_active_id(&sh).as_deref() == Some(id.as_str()) {
+        *sh.crew.lock().unwrap() = None;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn crew_add(sh: State<'_, Arc<Shared>>, spec: String) -> Result<Value, String> {
+    let id = crew_active_id(&sh).ok_or("no active crew — create one first")?;
+    crew::add_member(&id, &spec).map_err(|e| format!("{e:#}"))?;
+    crew::state_json(&id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn crew_del(sh: State<'_, Arc<Shared>>, name: String) -> Result<Value, String> {
+    let id = crew_active_id(&sh).ok_or("no active crew")?;
+    crew::remove_member(&id, &name).map_err(|e| format!("{e:#}"))?;
+    crew::state_json(&id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn crew_send(sh: State<'_, Arc<Shared>>, text: String) -> Result<Value, String> {
+    let id = crew_active_id(&sh).ok_or("no active crew")?;
+    crew::send(&id, &text).map_err(|e| format!("{e:#}"))?;
+    crew::state_json(&id).map_err(|e| format!("{e:#}"))
+}
+
+/// spawn the crew runner; rounds = 1 for a manual step, higher for auto
+/// (the auto loop stops early on the first DONE line)
+fn crew_run(sh: &Arc<Shared>, rounds: usize, auto: bool) -> Result<(), String> {
+    let Some(id) = crew_active_id(sh) else {
+        return Err("no active crew".into());
+    };
+    if crew::is_running() {
+        return Err("crew is already running".into());
+    }
+    let cfg = sh.cfg.lock().unwrap().clone();
+    let tx = sh.tx.clone();
+    let handle = tauri::async_runtime::spawn(async move {
+        let res = if auto {
+            Ok(Some(crew::run_auto(&id, rounds, &cfg, &tx).await))
+        } else {
+            crew::step(&id, rounds, &cfg, &tx)
+                .await
+                .map(Some)
+                .map_err(|e| format!("{e:#}"))
+        };
+        match res {
+            Ok(Some(msg)) => {
+                let _ = tx.send(ApiEvent::Note(msg));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                let _ = tx.send(ApiEvent::Note(format!("crew error: {e}")));
+            }
+        }
+    });
+    *sh.inflight.lock().unwrap() = Some(handle);
+    Ok(())
+}
+
+#[tauri::command]
+async fn crew_step(sh: State<'_, Arc<Shared>>, rounds: Option<usize>) -> Result<Value, String> {
+    crew_run(&sh, rounds.unwrap_or(1).min(20), false)?;
+    let id = crew_active_id(&sh).ok_or("no active crew")?;
+    crew::state_json(&id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn crew_auto(sh: State<'_, Arc<Shared>>, max_rounds: Option<usize>) -> Result<Value, String> {
+    crew_run(&sh, max_rounds.unwrap_or(8).min(30), true)?;
+    let id = crew_active_id(&sh).ok_or("no active crew")?;
+    crew::state_json(&id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn crew_stop() -> Result<(), String> {
+    if !crew::is_running() {
+        return Err("no crew is running".into());
+    }
+    crew::cancel();
+    Ok(())
+}
+
+#[tauri::command]
+async fn crew_usage(sh: State<'_, Arc<Shared>>) -> Result<Value, String> {
+    let id = crew_active_id(&sh).ok_or("no active crew")?;
+    crew::usage_json(&id).map_err(|e| format!("{e:#}"))
+}
+
 pub fn run() -> Result<()> {
     let (cfg, _) = Config::load_or_default()?;
     lsp::set_enabled(cfg.lsp.enabled);
@@ -2057,6 +2424,7 @@ pub fn run() -> Result<()> {
                         .map(|s| s.changes.clone())
                         .unwrap_or_default(),
                 ),
+                crew: Mutex::new(crew::active()),
                 tx: tx.clone(),
             });
             let tx2 = tx.clone();
@@ -2123,7 +2491,34 @@ pub fn run() -> Result<()> {
             list_project_files,
             set_plan,
             task_kill,
-            list_agents
+            list_agents,
+            sandbox_fwd_add,
+            sandbox_fwd_del,
+            sandbox_fetch_vm,
+            host_list,
+            host_add,
+            host_del,
+            host_check,
+            host_pubkey,
+            host_attach,
+            host_detach,
+            host_terminal,
+            host_exec,
+            skills_list,
+            skills_toggle,
+            skills_install,
+            crew_state,
+            crew_list,
+            crew_new,
+            crew_open,
+            crew_drop,
+            crew_add,
+            crew_del,
+            crew_send,
+            crew_step,
+            crew_auto,
+            crew_stop,
+            crew_usage
         ])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow!("{e}"))?;

@@ -491,6 +491,35 @@
     },
   };
 
+  /* new panels: minimal mock data so the dev preview renders them */
+  commands.host_list = async () => ({ hosts: [], attached: null });
+  commands.host_add = async (a) => ({ id: "h-mock", name: a.name || "host", label: `${a.user || "root"}@${a.host || "host"}:${a.port || 22}`, state: "new", error: null, checked: null, agent: null });
+  commands.host_del = async () => {};
+  commands.host_check = async () => ({ id: "h-mock", name: "host", label: "root@host:22", state: "failed", error: "mock: unreachable", checked: 0, agent: null });
+  commands.host_pubkey = async () => "ssh-ed25519 AAAA... mock";
+  commands.host_attach = async () => "attached (mock)";
+  commands.host_detach = async () => {};
+  commands.host_terminal = async () => {};
+  commands.host_exec = async () => ({ code: 0, stdout: "mock", stderr: "" });
+  commands.skills_list = async () => ({ skills: [{ name: "review", description: "Review code like a senior", path: "/mock/review/SKILL.md", enabled: true }] });
+  commands.skills_toggle = async () => {};
+  commands.skills_install = async () => "installed \"mock\" — 2 skills discovered";
+  commands.crew_state = async () => ({ none: true, running: false });
+  commands.crew_list = async () => ({ crews: [], running: false });
+  commands.crew_new = async () => ({ none: true });
+  commands.crew_open = async () => ({ none: true });
+  commands.crew_drop = async () => {};
+  commands.crew_add = async () => ({ none: true });
+  commands.crew_del = async () => ({ none: true });
+  commands.crew_send = async () => ({ none: true });
+  commands.crew_step = async () => ({ none: true });
+  commands.crew_auto = async () => ({ none: true });
+  commands.crew_stop = async () => {};
+  commands.crew_usage = async () => ({ rows: [], total: { input: 0, output: 0, cost: 0 } });
+  commands.sandbox_fwd_add = async () => { throw new Error("mock: create a sandbox first"); };
+  commands.sandbox_fwd_del = async () => { throw new Error("mock: create a sandbox first"); };
+  commands.sandbox_fetch_vm = async () => { throw new Error("mock: create a sandbox first"); };
+
   window.__TAURI__ = {
     core: {
       invoke: (cmd, args) => {
