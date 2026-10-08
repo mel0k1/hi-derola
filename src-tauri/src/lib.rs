@@ -319,8 +319,21 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     })
                 }
                 ApiEvent::Confirm { name, args, rx } => {
-                    *sh.confirm.lock().unwrap() = Some((rx, name.clone(), args.clone()));
-                    confirm_payload(&name, &args)
+                    if sh.confirm.lock().unwrap().is_some() {
+                        // one prompt at a time — a second concurrent ask (chat
+                        // run vs crew tool-member) gets an explicit soft-deny
+                        // instead of orphaning the first oneshot
+                        let _ = rx.send(hi_derola::provider::ConfirmReply {
+                            approved: false,
+                            feedback: "another permission prompt is already open — try again"
+                                .into(),
+                            always: false,
+                        });
+                        json!({"t": "note", "s": "another permission prompt is already open — tool call skipped"})
+                    } else {
+                        *sh.confirm.lock().unwrap() = Some((rx, name.clone(), args.clone()));
+                        confirm_payload(&name, &args)
+                    }
                 }
                 ApiEvent::Ask { name, args, rx } => {
                     *sh.ask.lock().unwrap() = Some(rx);
@@ -2261,6 +2274,12 @@ async fn crew_new(
 
 #[tauri::command]
 async fn crew_open(sh: State<'_, Arc<Shared>>, id: String) -> Result<Value, String> {
+    if crew::is_running() {
+        return Err(
+            "a crew is running — its live replies would land in the wrong panel, stop it first"
+                .into(),
+        );
+    }
     crew::load(&id).map_err(|e| format!("{e:#}"))?;
     *sh.crew.lock().unwrap() = Some(id.clone());
     crew::state_json(&id).map_err(|e| format!("{e:#}"))

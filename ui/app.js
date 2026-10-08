@@ -870,15 +870,15 @@ async function handleEvent(ev) {
       break;
     }
     case "crew": {
-      if (!$("crew-view").classList.contains("hidden")) {
-        crewFlushLive();
+      if (!$("crew-view").classList.contains("hidden") && crewEventMatches(ev.id)) {
+        crewFlushLiveAuthor(ev.id, ev.author);
         renderCrewFeed();
       }
       break;
     }
     case "crewchunk": {
-      if (!$("crew-view").classList.contains("hidden")) {
-        crewStreamChunk(ev.author, ev.s);
+      if (!$("crew-view").classList.contains("hidden") && crewEventMatches(ev.id)) {
+        crewStreamChunk(ev.id, ev.author, ev.s);
       }
       break;
     }
@@ -2907,6 +2907,10 @@ async function refreshCrew() {
   }
 }
 
+function crewEventMatches(id) {
+  return !CREW.state || !CREW.state.id || !id || id === CREW.state.id;
+}
+
 function crewRoleOf(name) {
   const st = CREW.state;
   const m = st && st.members && st.members.find((x) => x.name === name);
@@ -3092,31 +3096,49 @@ function renderCrewFeed() {
   list.scrollTop = list.scrollHeight;
 }
 
-/* live streaming bubble for an in-flight crew reply */
+/* live streaming bubbles for in-flight crew replies — one per member,
+   bg workers and the inline member can stream in parallel */
 
 let crewLiveTimer = null;
 
-function crewStreamChunk(author, delta) {
+function crewLiveKey(id, author) {
+  return `${id || ""}|${author}`;
+}
+
+function crewStreamChunk(id, author, delta) {
   const list = $("crew-list");
-  if (!CREW.live || CREW.live.author !== author) {
-    crewFlushLive();
+  if (!CREW.live) CREW.live = {};
+  const key = crewLiveKey(id, author);
+  let live = CREW.live[key];
+  if (!live) {
     const row = el("div", "crew-msg crew-live");
     row.appendChild(el("div", "crew-author", `${author} · typing…`));
     const body = el("div", "crew-text");
     row.appendChild(body);
     list.appendChild(row);
-    CREW.live = { author, body, raw: "" };
+    live = CREW.live[key] = { author, row, body, raw: "" };
   }
-  CREW.live.raw += delta;
+  live.raw += delta;
   list.scrollTop = list.scrollHeight;
   if (!crewLiveTimer) {
     crewLiveTimer = setTimeout(() => {
       crewLiveTimer = null;
-      if (CREW.live) {
-        CREW.live.body.innerHTML = md(CREW.live.raw);
-        $("crew-list").scrollTop = $("crew-list").scrollHeight;
+      for (const l of Object.values(CREW.live || {})) {
+        l.body.innerHTML = md(l.raw);
       }
+      const list2 = $("crew-list");
+      if (list2) list2.scrollTop = list2.scrollHeight;
     }, 90);
+  }
+}
+
+function crewFlushLiveAuthor(id, author) {
+  if (!CREW.live) return;
+  const key = crewLiveKey(id, author);
+  const live = CREW.live[key];
+  if (live) {
+    live.row.remove();
+    delete CREW.live[key];
   }
 }
 
