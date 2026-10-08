@@ -87,7 +87,7 @@ pub struct App {
 
 const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config (into the active profile when one is set)\n  /model         show current model\n  /models        list models available for the api key\n  /profile [name] switch provider profile (bare = list, \"none\" = back to the base [provider] section)\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /sessions      list saved sessions\n  /resume [id]   switch to a saved session (latest by default)\n  /mcpauth [name] mcp OAuth status, or authorize a remote server in browser; /mcpauth <name> <code> finishes a flow with a pasted authorization code (resume after a restart)\n  /mcpres [server]  list mcp resources and uri templates\n  /mcpstatus     per-server status: connected/failed/needs auth/crashed\n  /mcpread <server> <uri> read an mcp resource into the chat\n  /mcpprompt [server] <name> [k=v] use an mcp prompt (no args lists prompts)\n  /mcpsub <server> <uri> subscribe to mcp resource updates (land in chat)\n  /mcpunsub <server> <uri> stop the subscription\n  /mcplog [server]  recent mcp log messages; /mcplog set <server|all> <level> sets the minimum level\n  /mcpadd <name> <url|command...> add a server at runtime (saved to config) and connect it\n  /mcpconnect <name> (re)connect a configured server\n  /mcpdisconnect <name> drop the live connection (config untouched)\n  /mcplogout <name> drop the stored oauth tokens; a fresh /mcpauth flow starts on next use\n  /jstools [reload] list user JS tools (.hi-derola/tools/), optional rescan\n  /doctor        environment self-check: config/provider, ssh, qemu+accel, lsp servers, formatters, mcp, sandbox
   /update        check github releases and swap the running binary if a newer one exists
-  /usage         token/cost report for this session (per-model breakdown, prices, context fill)\n  /sandbox       local VM sandboxes: bare = list; /sandbox start|stop|attach|detach <id|name>; /sandbox new <name> [debian|debian-std|ubuntu|ubuntu-std|custom=<path>] [ram=2048] [cpus=2] [disk=20] [login=x] [root=on|off]; /sandbox fetch|push <id|name> <path> [dest]; /sandbox term <id|name> [agent] — attach routes bash into the VM over ssh\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch/mcp_resource + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
+  /usage         token/cost report for this session (per-model breakdown, prices, context fill)\n  /sandbox       local VM sandboxes: bare = list; /sandbox start|stop|attach|detach <id|name>; /sandbox new <name> [debian|debian-std|ubuntu|ubuntu-std|custom=<path>] [ram=2048] [cpus=2] [disk=20] [login=x] [root=on|off]; /sandbox fetch|push <id|name> <path> [dest]; /sandbox term <id|name> [agent]; /sandbox fwd <id|name> add <host-port> <guest-port> [guest-host] | list | del <host-port> — attach routes bash into the VM over ssh\n  /host          remote hosts: bare = list; /host add <name> <user@host:port>; /host check|attach|detach|del <id|name>; /host term <id|name> [agent]; /host pubkey <id|name> — attach routes bash + file tools over ssh; /undo covers remote edits\n  /skills        skills: bare = list; /skills toggle <name>; /skills install <git-url>\n  /crew          multi-agent sessions: bare = status; /crew new <goal>; /crew add <Name|role[|profile|model]>; /crew del <name>; /crew send <text>; /crew step [rounds]; /crew auto [max-rounds]; /crew stop; /crew usage; /crew show; /crew list; /crew open <id>; /crew drop\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch/mcp_resource + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
 
 pub fn help_text() -> &'static str {
     HELP
@@ -237,7 +237,7 @@ impl App {
     /// create and the bash route attach/detach (GUI parity lives in the
     /// sandbox tab of the window)
     fn sandbox_command(&mut self, arg: &str) {
-        const USAGE: &str = "usage: /sandbox [list] · /sandbox start|stop|attach|detach <id|name> · /sandbox fetch|push <id|name> <path> [dest] · /sandbox term <id|name> [agent] · /sandbox new <name> [debian|debian-std|ubuntu|ubuntu-std|custom=<path>] [ram=2048] [cpus=2] [disk=20] [login=x] [root=on|off]";
+        const USAGE: &str = "usage: /sandbox [list] · /sandbox start|stop|attach|detach <id|name> · /sandbox fetch|push <id|name> <path> [dest] · /sandbox term <id|name> [agent] · /sandbox fwd <id|name> add <host-port> <guest-port> [guest-host] | list | del <host-port> · /sandbox new <name> [kind] [key=value...]";
         let m = crate::sandbox::SandboxManager::global();
         let mut parts = arg.split_whitespace();
         let sub = parts.next().unwrap_or("");
@@ -293,8 +293,19 @@ impl App {
                             .collect::<String>();
                         out.push_str(&format!(" · {one}"));
                     }
-                    if route.as_deref() == Some(s.spec.id.as_str()) {
+                    if route.as_deref() == Some(format!("sbx:{}", s.spec.id).as_str())
+                        || route.as_deref() == Some(s.spec.id.as_str())
+                    {
                         out.push_str("  ← bash here");
+                    }
+                    if !s.spec.forwards.is_empty() {
+                        let fwds: Vec<String> = s
+                            .spec
+                            .forwards
+                            .iter()
+                            .map(|f| format!("{}:{}→{}", f.host_port, f.guest_host, f.guest_port))
+                            .collect();
+                        out.push_str(&format!(" \u{b7} ports: {}", fwds.join(", ")));
                     }
                 }
                 out.push_str(&format!("\n{USAGE}"));
@@ -344,7 +355,7 @@ impl App {
                     );
                     return;
                 }
-                crate::sandbox::set_shell_route(Some(s.spec.id.clone()));
+                crate::sandbox::set_shell_route(Some(format!("sbx:{}", s.spec.id)));
                 self.refresh_system_prompt();
                 self.info(format!(
                     "bash now runs inside \"{}\" ({}, {}) — your host files stay out of reach; /sandbox detach returns to the host shell",
@@ -414,6 +425,76 @@ impl App {
                 match crate::sandbox::push_to_vm(&s.spec.id, host_path, &vm_path) {
                     Ok(msg) => self.info(msg),
                     Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            "fwd" => {
+                let Some(key) = parts.next() else {
+                    self.info(format!("/sandbox fwd <id|name> add|list|del ... — {USAGE}"));
+                    return;
+                };
+                let key = key.to_lowercase();
+                let Some(s) = find_sandbox(m, &key) else {
+                    self.info(format!(
+                        "no sandbox matches \"{key}\" — /sandbox lists them"
+                    ));
+                    return;
+                };
+                let op = parts.next().unwrap_or("list").to_lowercase();
+                match op.as_str() {
+                    "list" => {
+                        let cur = &s.spec.forwards;
+                        if cur.is_empty() {
+                            self.info(format!(
+                                "no extra forwards in \"{}\" — /sandbox fwd {} add <host-port> <guest-port> [guest-host] (applies on the next start)",
+                                s.spec.name, s.spec.id
+                            ));
+                        } else {
+                            let mut out2 = format!("forwards in \"{}\":", s.spec.name);
+                            for f in cur {
+                                out2.push_str(&format!(
+                                    "\n  {} -> {}:{}",
+                                    f.host_port, f.guest_host, f.guest_port
+                                ));
+                            }
+                            out2.push_str(
+                                "\napply on the next VM start; del <host-port> removes one",
+                            );
+                            self.info(out2);
+                        }
+                    }
+                    "add" => {
+                        let (Some(hp), Some(gp)) = (
+                            parts.next().and_then(|v| v.parse::<u16>().ok()),
+                            parts.next().and_then(|v| v.parse::<u16>().ok()),
+                        ) else {
+                            self.info("usage: /sandbox fwd <id|name> add <host-port> <guest-port> [guest-host]");
+                            return;
+                        };
+                        let gh = parts.next().map(String::from);
+                        match m.fwd_add(&s.spec.id, hp, gp, gh.as_deref()) {
+                            Ok(st) => {
+                                let f = st.spec.forwards.last().unwrap();
+                                self.info(format!(
+                                    "forward added: 127.0.0.1:{} -> {}:{} (takes effect on the next VM start)",
+                                    f.host_port, f.guest_host, f.guest_port
+                                ))
+                            }
+                            Err(e) => self.info(format!("error: {e:#}")),
+                        }
+                    }
+                    "del" | "remove" | "rm" => {
+                        let Some(hp) = parts.next().and_then(|v| v.parse::<u16>().ok()) else {
+                            self.info("usage: /sandbox fwd <id|name> del <host-port>");
+                            return;
+                        };
+                        match m.fwd_del(&s.spec.id, hp) {
+                            Ok(_) => self.info(format!(
+                                "forward {hp} removed (takes effect on the next VM start)"
+                            )),
+                            Err(e) => self.info(format!("error: {e:#}")),
+                        }
+                    }
+                    other => self.info(format!("unknown fwd op \"{other}\" — add | list | del")),
                 }
             }
             "term" => {
@@ -709,6 +790,19 @@ impl App {
                 self.info(format!("todo list updated:\n{s}"));
             }
             ApiEvent::BgOut { .. } => {}
+            ApiEvent::Crew {
+                author,
+                role,
+                content,
+                ..
+            } => {
+                self.flush_stream();
+                self.entries.push(Entry {
+                    kind: Kind::Info,
+                    text: format!("crew \u{25b8} {author} ({role})\n{content}"),
+                });
+                self.scroll_up = 0;
+            }
             ApiEvent::Usage {
                 input,
                 output,
@@ -1340,6 +1434,507 @@ impl App {
             self.save_session();
             self.start_run(inflight);
         }
+    }
+
+    fn host_command(&mut self, arg: &str) {
+        const USAGE: &str = "usage: /host [list] · /host add <name> <user@host:port> · /host check|attach|del <id|name> · /host term <id|name> [agent] · /host pubkey <id|name>";
+        let m = crate::hosts::HostManager::global();
+        let mut parts = arg.split_whitespace();
+        let sub = parts.next().unwrap_or("");
+        let find = |key: &str| -> Option<crate::hosts::HostStatus> {
+            let key = key.to_lowercase();
+            m.list().into_iter().find(|h| {
+                h.host.id == key
+                    || h.host.name == key
+                    || h.host.id.starts_with(&key)
+                    || h.host.name.to_lowercase().contains(&key)
+            })
+        };
+        match sub {
+            "" | "list" => {
+                let list = m.list();
+                if list.is_empty() {
+                    self.info(format!(
+                        "no remote hosts yet — /host add <name> <user@host:port>\n{USAGE}"
+                    ));
+                    return;
+                }
+                let route = crate::sandbox::shell_route_host();
+                let mut out = String::from("remote hosts:");
+                for h in list {
+                    out.push_str(&format!(
+                        "\n  {} [{}] · {}{}",
+                        h.host.name,
+                        h.host.id,
+                        h.host.ssh_label(),
+                        h.state
+                    ));
+                    if let Some(e) = &h.error {
+                        let one = e
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .chars()
+                            .take(70)
+                            .collect::<String>();
+                        out.push_str(&format!(" · {one}"));
+                    }
+                    if route.as_deref() == Some(h.host.id.as_str()) {
+                        out.push_str("  ← bash here");
+                    }
+                }
+                out.push_str(&format!("\n{USAGE}"));
+                self.info(out);
+            }
+            "add" => {
+                let (Some(name), Some(target)) = (parts.next(), parts.next()) else {
+                    self.info(format!("/host add <name> <user@host:port> — {USAGE}"));
+                    return;
+                };
+                let (user, host_port) = match target.split_once('@') {
+                    Some((u, h)) => (u.to_string(), h.to_string()),
+                    None => ("derola".to_string(), target.to_string()),
+                };
+                let (host, port) = match host_port.rsplit_once(':') {
+                    Some((h, p)) => (h.to_string(), p.parse::<u16>().unwrap_or(22)),
+                    None => (host_port.clone(), 22),
+                };
+                match m.add(name, &user, &host, port) {
+                    Ok(st) => {
+                        let _ = st;
+                        let list = m.list();
+                        let (id, label) = list
+                            .first()
+                            .map(|h| (h.host.id.clone(), h.host.ssh_label()))
+                            .unwrap_or_default();
+                        self.info(format!(
+                            "host saved ({}) — key pair generated; make the host trust it, then /host check {name}",
+                            m.dir().display(),
+                        ));
+                        self.info(format!("target: {label}"));
+                        self.info(format!(
+                            "public key:\n{}",
+                            m.pubkey(&id).unwrap_or_else(|e| format!("error: {e:#}"))
+                        ));
+                    }
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            "check" => {
+                let Some(key) = parts.next() else {
+                    self.info(format!("/host check <id|name> — {USAGE}"));
+                    return;
+                };
+                let Some(h) = find(key) else {
+                    self.info(format!("no host matches \"{key}\""));
+                    return;
+                };
+                self.info(format!("checking {} ...", h.host.ssh_label()));
+                let st = m.check(&h.host.id);
+                match st.state.as_str() {
+                    "ready" => self.info(format!(
+                        "host \"{}\" is reachable — /host attach {} routes the agent there",
+                        st.host.name, st.host.id
+                    )),
+                    _ => self.info(format!(
+                        "host \"{}\" failed: {} — make sure the public key is in the host's authorized_keys (/host pubkey {})",
+                        st.host.name,
+                        st.error.unwrap_or_else(|| "unknown".into()),
+                        st.host.id
+                    )),
+                }
+            }
+            "pubkey" => {
+                let Some(key) = parts.next() else {
+                    self.info(format!("/host pubkey <id|name> — {USAGE}"));
+                    return;
+                };
+                let Some(h) = find(key) else {
+                    self.info(format!("no host matches \"{key}\""));
+                    return;
+                };
+                match m.pubkey(&h.host.id) {
+                    Ok(pk) => self.info(format!(
+                        "append this line to {}'s ~/.ssh/authorized_keys:\n{pk}",
+                        h.host.ssh_label()
+                    )),
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            "attach" | "detach" => {
+                if sub == "detach" {
+                    if crate::sandbox::shell_route_host().is_none() {
+                        self.info("no remote host attached");
+                        return;
+                    }
+                    crate::sandbox::set_shell_route(None);
+                    self.refresh_system_prompt();
+                    self.info("detached — bash is back on the local machine");
+                    return;
+                }
+                if !matches!(self.phase, Phase::Idle) {
+                    self.info("wait for the current run to finish, then attach");
+                    return;
+                }
+                let Some(key) = parts.next() else {
+                    self.info(format!("/host attach <id|name> — {USAGE}"));
+                    return;
+                };
+                let Some(h) = find(key) else {
+                    self.info(format!("no host matches \"{key}\""));
+                    return;
+                };
+                let st = m.check(&h.host.id);
+                if st.state != "ready" {
+                    self.info(format!(
+                        "host \"{}\" is not reachable: {} — /host pubkey {} for setup",
+                        st.host.name,
+                        st.error.unwrap_or_else(|| "unknown".into()),
+                        st.host.id
+                    ));
+                    return;
+                }
+                crate::sandbox::set_shell_route(Some(format!("host:{}", st.host.id)));
+                self.refresh_system_prompt();
+                self.info(format!(
+                    "bash and file tools now run on \"{}\" ({}) — /undo and /redo cover remote edits too; /host detach returns locally",
+                    st.host.name, st.host.ssh_label()
+                ));
+            }
+            "term" => {
+                let Some(key) = parts.next() else {
+                    self.info(format!("/host term <id|name> [agent] — {USAGE}"));
+                    return;
+                };
+                let agent = parts
+                    .next()
+                    .is_some_and(|a| matches!(a, "agent" | "-a" | "--agent"));
+                let Some(h) = find(key) else {
+                    self.info(format!("no host matches \"{key}\""));
+                    return;
+                };
+                match m.open_terminal(&h.host.id, agent) {
+                    Ok(()) => self.info(format!(
+                        "terminal opened — ssh session into \"{}\"",
+                        h.host.name
+                    )),
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            "del" | "rm" | "remove" => {
+                let Some(key) = parts.next() else {
+                    self.info(format!("/host del <id|name> — {USAGE}"));
+                    return;
+                };
+                let Some(h) = find(key) else {
+                    self.info(format!("no host matches \"{key}\""));
+                    return;
+                };
+                if crate::sandbox::shell_route_host().as_deref() == Some(h.host.id.as_str()) {
+                    crate::sandbox::set_shell_route(None);
+                    self.refresh_system_prompt();
+                }
+                match m.delete(&h.host.id) {
+                    Ok(()) => self.info(format!("host \"{}\" deleted", h.host.name)),
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            _ => self.info(USAGE),
+        }
+    }
+
+    fn skills_command(&mut self, arg: &str) {
+        const USAGE: &str =
+            "usage: /skills [list] · /skills toggle <name> · /skills install <git-url>";
+        let mut parts = arg.split_whitespace();
+        let sub = parts.next().unwrap_or("");
+        match sub {
+            "" | "list" => {
+                let all = crate::skills::discover_all();
+                if all.is_empty() {
+                    self.info(format!(
+                        "no skills — drop a folder with SKILL.md into .hi-derola/skills/ or ~/.config/hi-derola/skills/, or:\n{USAGE}"
+                    ));
+                    return;
+                }
+                let mut out = format!("skills ({}):", all.len());
+                for s in &all {
+                    let on = crate::skills::is_enabled(&s.name);
+                    out.push_str(&format!(
+                        "\n  [{}] {} — {}",
+                        if on { "x" } else { " " },
+                        s.name,
+                        (if s.description.is_empty() {
+                            s.path.display().to_string()
+                        } else {
+                            s.description.clone()
+                        })
+                        .as_str()
+                    ));
+                }
+                out.push_str(&format!("\n{USAGE}"));
+                self.info(out);
+            }
+            "toggle" | "on" | "off" => {
+                let Some(name) = parts.next() else {
+                    self.info(format!("/skills toggle <name> — {USAGE}"));
+                    return;
+                };
+                let exists = crate::skills::discover_all().iter().any(|s| s.name == name);
+                if !exists {
+                    self.info(format!("no skill named \"{name}\" — /skills lists them"));
+                    return;
+                }
+                let enable = match sub {
+                    "on" => true,
+                    "off" => false,
+                    _ => !crate::skills::is_enabled(name),
+                };
+                match crate::skills::set_enabled(name, enable) {
+                    Ok(()) => self.info(format!(
+                        "skill \"{name}\" {}",
+                        if enable {
+                            "enabled"
+                        } else {
+                            "disabled — the agent no longer sees it"
+                        }
+                    )),
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            "install" => {
+                let Some(url) = arg.strip_prefix("install").map(str::trim) else {
+                    self.info(USAGE);
+                    return;
+                };
+                if url.is_empty() {
+                    self.info(format!("/skills install <git-url> — {USAGE}"));
+                    return;
+                }
+                self.info(format!("cloning {url} ..."));
+                match crate::skills::install_from_git(url) {
+                    Ok(msg) => self.info(msg),
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            _ => self.info(USAGE),
+        }
+    }
+
+    fn crew_command(&mut self, arg: &str, inflight: &mut Option<tokio::task::JoinHandle<()>>) {
+        const USAGE: &str = "usage: /crew [status] · /crew new <goal> · /crew add <Name|role[|profile|model]> · /crew del <name> · /crew send <text> · /crew step [rounds] · /crew auto [max-rounds] · /crew stop · /crew usage · /crew show · /crew list · /crew open <id> · /crew drop";
+        let mut parts = arg.split_whitespace();
+        let sub = parts.next().unwrap_or("");
+        let rest = arg.split_once(' ').map(|(_, r)| r.trim()).unwrap_or("");
+        let current = crate::crew::active();
+        let need_crew = |s: &mut Self| -> Option<String> {
+            match crate::crew::active() {
+                Some(id) => Some(id),
+                None => {
+                    s.info("no active crew — /crew new <goal> first");
+                    None
+                }
+            }
+        };
+        match sub {
+            "" | "status" => match current.map(|id| crate::crew::load(&id)) {
+                Some(Ok(c)) => {
+                    let mut out =
+                        format!("crew {} · {} · goal: {}\nmembers:", c.id, c.status, c.goal);
+                    for m in &c.members {
+                        out.push_str(&format!(
+                            "\n  {} ({}){}{}",
+                            m.name,
+                            m.role,
+                            m.profile
+                                .as_deref()
+                                .map(|p| format!(" · profile:{p}"))
+                                .unwrap_or_default(),
+                            m.model
+                                .as_deref()
+                                .map(|x| format!(" · {x}"))
+                                .unwrap_or_default(),
+                        ));
+                    }
+                    out.push_str(&format!("\n{} message(s) · {}", c.messages.len(), USAGE));
+                    self.info(out);
+                }
+                Some(Err(e)) => self.info(format!("error: {e:#}")),
+                None => self.info(format!("no active crew — {USAGE}")),
+            },
+            "new" => {
+                if rest.is_empty() {
+                    self.info(format!("/crew new <goal> — {USAGE}"));
+                    return;
+                }
+                match crate::crew::create(rest, &[]) {
+                    Ok(c) => self.info(format!(
+                        "crew {} created — add members with /crew add <Name|role[|profile|model]>, then /crew step",
+                        c.id
+                    )),
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            "add" => {
+                let Some(id) = need_crew(self) else { return };
+                match crate::crew::add_member(&id, rest) {
+                    Ok(c) => {
+                        let last = c.members.last().unwrap();
+                        self.info(format!(
+                            "member \"{}\" ({}) added{} — placeholder names may be replaced by the agent via RENAME",
+                            last.name,
+                            last.role,
+                            if last.name.starts_with("agent-") {
+                                " (placeholder — the agent will pick its own name)"
+                            } else {
+                                ""
+                            }
+                        ))
+                    }
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            "del" | "rm" => {
+                let Some(id) = need_crew(self) else { return };
+                match crate::crew::remove_member(&id, rest) {
+                    Ok(_) => self.info(format!("member \"{rest}\" removed")),
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            "send" => {
+                let Some(id) = need_crew(self) else { return };
+                match crate::crew::send(&id, rest) {
+                    Ok(()) => {
+                        self.info(format!("sent to crew: {rest}"));
+                        self.run_crew_step(&id, 1, inflight, false);
+                    }
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            "step" => {
+                let Some(id) = need_crew(self) else { return };
+                let rounds = parts
+                    .next()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(1);
+                self.run_crew_step(&id, rounds.min(20), inflight, false);
+            }
+            "auto" => {
+                let Some(id) = need_crew(self) else { return };
+                if crate::crew::is_running() {
+                    self.info("a crew is already running — /crew stop first");
+                    return;
+                }
+                let max = parts
+                    .next()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(8)
+                    .min(30);
+                self.info(format!(
+                    "crew auto: up to {max} rounds until DONE (stop with /crew stop)"
+                ));
+                self.run_crew_step(&id, max, inflight, true);
+            }
+            "stop" => {
+                crate::crew::cancel();
+                self.info("crew stop requested — the current member reply finishes first");
+            }
+            "usage" => {
+                let Some(id) = need_crew(self) else { return };
+                match crate::crew::usage_report(&id) {
+                    Ok(s) => self.info(s),
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            "show" => {
+                let Some(id) = need_crew(self) else { return };
+                match crate::crew::load(&id) {
+                    Ok(c) => {
+                        let mut out = String::from("crew transcript:");
+                        for m in &c.messages {
+                            out.push_str(&format!("\n[{}] {}", m.author, m.content));
+                        }
+                        self.info(out);
+                    }
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            "list" => {
+                let crews = crate::crew::list();
+                if crews.is_empty() {
+                    self.info("no saved crews — /crew new <goal>");
+                    return;
+                }
+                let mut out = String::from("saved crews:");
+                for c in crews {
+                    out.push_str(&format!(
+                        "\n  {} · {} · {} member(s), {} msg · {}",
+                        c.id, c.status, c.members, c.messages, c.goal
+                    ));
+                }
+                self.info(out);
+            }
+            "open" => {
+                let Some(id) = parts.next() else {
+                    self.info(format!("/crew open <id> — {USAGE}"));
+                    return;
+                };
+                match crate::crew::load(id) {
+                    Ok(c) => {
+                        crate::crew::set_active(Some(c.id.clone()));
+                        self.info(format!("crew {} is now active (status {})", c.id, c.status));
+                    }
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            "drop" => {
+                let Some(id) = need_crew(self) else { return };
+                match crate::crew::delete(&id) {
+                    Ok(()) => {
+                        crate::crew::set_active(None);
+                        self.info(format!("crew {id} deleted"));
+                    }
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            _ => self.info(USAGE),
+        }
+    }
+
+    fn run_crew_step(
+        &mut self,
+        id: &str,
+        rounds: usize,
+        inflight: &mut Option<tokio::task::JoinHandle<()>>,
+        auto: bool,
+    ) {
+        if crate::crew::is_running() {
+            self.info("a crew is already running — /crew stop first");
+            return;
+        }
+        let cfg = self.cfg.clone();
+        let tx = self.tx.clone();
+        let id = id.to_string();
+        let handle = if auto {
+            tokio::spawn(async move {
+                let msg = crate::crew::run_auto(&id, rounds, &cfg, &tx)
+                    .await
+                    .unwrap_or_else(|e| format!("crew task failed: {e}"));
+                let _ = tx.send(ApiEvent::Note(msg));
+            })
+        } else {
+            tokio::spawn(async move {
+                match crate::crew::step(&id, rounds, &cfg, &tx).await {
+                    Ok(msg) => {
+                        let _ = tx.send(ApiEvent::Note(msg));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(ApiEvent::Note(format!("crew error: {e:#}")));
+                    }
+                }
+            })
+        };
+        *inflight = Some(handle);
     }
 
     fn command(&mut self, line: &str, inflight: &mut Option<tokio::task::JoinHandle<()>>) {
@@ -1998,6 +2593,9 @@ impl App {
                 });
             }
             "/sandbox" => self.sandbox_command(arg),
+            "/host" => self.host_command(arg),
+            "/skills" => self.skills_command(arg),
+            "/crew" => self.crew_command(arg, inflight),
             "/file" => {
                 if arg.is_empty() {
                     self.info("usage: /file <path>");
