@@ -334,7 +334,7 @@ const note = (s) => addMsg("note", s);
 /* markdown */
 
 function esc(s) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 function inline(s) {
@@ -2921,7 +2921,10 @@ function renderCrew() {
     $("crew-controls").classList.add("hidden");
     $("crew-inputrow").classList.add("hidden");
     $("crew-addrow").classList.add("hidden");
+    $("crew-memorow").classList.add("hidden");
     $("crew-usage-box").classList.add("hidden");
+    $("crew-memory").classList.add("hidden");
+    $("crew-memory-btn").classList.remove("active");
     $("crew-graph").classList.add("hidden");
     $("crew-graph-btn").classList.remove("active");
     $("crew-saved").classList.remove("hidden");
@@ -2934,6 +2937,7 @@ function renderCrew() {
   $("crew-controls").classList.remove("hidden");
   $("crew-inputrow").classList.remove("hidden");
   $("crew-addrow").classList.remove("hidden");
+  $("crew-memorow").classList.remove("hidden");
   $("crew-saved").classList.add("hidden");
   $("crew-saved-btn").classList.remove("active");
   head.replaceChildren();
@@ -2983,8 +2987,70 @@ function renderCrew() {
   });
   head.appendChild(chips);
 
+  renderCrewMemory();
   renderCrewFeed();
   renderCrewGraph();
+}
+
+/* long-term memory: list + memo input; entries ride in crew state */
+
+function toggleCrewMemory() {
+  const box = $("crew-memory");
+  if (box.classList.contains("hidden")) {
+    box.classList.remove("hidden");
+    $("crew-memory-btn").classList.add("active");
+    renderCrewMemory();
+  } else {
+    box.classList.add("hidden");
+    $("crew-memory-btn").classList.remove("active");
+  }
+}
+
+function renderCrewMemory() {
+  const box = $("crew-memory");
+  if (box.classList.contains("hidden") || !CREW.state) return;
+  box.replaceChildren();
+  const mem = CREW.state.memory || [];
+  box.appendChild(el("div", "sbx-label", `memory — ${mem.length} memo(s), injected into every member prompt`));
+  if (!mem.length) {
+    box.appendChild(el("div", "sbx-empty", "empty — agents add entries with a MEMO: line, you can type one below"));
+    return;
+  }
+  mem.forEach((m, i) => {
+    const row = el("div", "crew-saved-row");
+    const info = el("div", "crew-saved-info");
+    info.appendChild(el("div", "sbx-name", `[${i + 1}] ${m.author}`));
+    info.appendChild(el("div", "hint", m.content));
+    row.appendChild(info);
+    const del = el("button", "ghost", "forget");
+    del.onclick = async () => {
+      try {
+        const d = await invoke("crew_forget", { n: i + 1 });
+        CREW.state = d.none ? null : d;
+        CREW.lastJson = null;
+        renderCrew();
+      } catch (e) {
+        showPanelMsg("crew-msg", String(e));
+      }
+    };
+    row.appendChild(del);
+    box.appendChild(row);
+  });
+}
+
+async function crewMemoAdd() {
+  const inp = $("crew-memo-input");
+  const text = inp.value.trim();
+  if (!text) return;
+  try {
+    const d = await invoke("crew_memo", { text });
+    inp.value = "";
+    CREW.state = d.none ? null : d;
+    CREW.lastJson = null;
+    renderCrew();
+  } catch (e) {
+    showPanelMsg("crew-msg", String(e));
+  }
 }
 
 function crewParseLimit(t) {
@@ -3223,6 +3289,14 @@ function sbxFwdPrompt(s) {
 $("btn-hosts").onclick = () => toggleHostsView();
 $("btn-skills").onclick = () => toggleSkillsView();
 $("btn-crew").onclick = () => toggleCrewView();
+$("crew-memory-btn").onclick = () => toggleCrewMemory();
+$("crew-memo-add").onclick = () => crewMemoAdd();
+$("crew-memo-input").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    crewMemoAdd();
+  }
+});
 
 $("hosts-add").onclick = () => {
   showPanelMsg("hosts-msg", "");

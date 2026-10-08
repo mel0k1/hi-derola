@@ -858,6 +858,10 @@ pre.diff .ctx { color: var(--dim); }
 .crew-arrow-head { fill: var(--accent); }
 .crew-edge-n { fill: var(--dim); font-size: 9px; }
 #crew-saved { display: flex; flex-direction: column; gap: 8px; margin: 6px 0; }
+#crew-memory {
+  border: 1px solid var(--border); border-radius: 10px; background: var(--panel2);
+  padding: 10px 14px; margin: 6px 0; display: flex; flex-direction: column; gap: 8px;
+}
 .crew-saved-row {
   display: flex; align-items: center; gap: 10px; padding: 9px 12px;
   border: 1px solid var(--border); border-radius: 10px; background: var(--panel2);

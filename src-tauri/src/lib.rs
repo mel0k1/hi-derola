@@ -24,6 +24,9 @@ pub struct Shared {
     confirm: Mutex<Option<(oneshot::Sender<ConfirmReply>, String, String)>>,
     ask: Mutex<Option<oneshot::Sender<String>>>,
     inflight: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
+    /// crew runner task; kept apart from chat inflight so a running crew
+    /// never blocks new chat messages
+    crew_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     tokens: Mutex<(u64, u64)>,
     cost: Mutex<f64>,
     usage: Mutex<Vec<hi_derola::usage::UsageRow>>,
@@ -589,6 +592,9 @@ async fn task_kill(app: AppHandle, id: String) -> Result<(), String> {
 async fn stop(sh: State<'_, Arc<Shared>>, app: AppHandle) -> Result<(), String> {
     if let Some(h) = sh.inflight.lock().unwrap().take() {
         h.abort();
+    }
+    if crew::is_running() {
+        crew::cancel();
     }
     if let Some((c, _, _)) = sh.confirm.lock().unwrap().take() {
         let _ = c.send(ConfirmReply::default());
@@ -2292,6 +2298,20 @@ async fn crew_send(sh: State<'_, Arc<Shared>>, text: String) -> Result<Value, St
     crew::state_json(&id).map_err(|e| format!("{e:#}"))
 }
 
+#[tauri::command]
+async fn crew_memo(sh: State<'_, Arc<Shared>>, text: String) -> Result<Value, String> {
+    let id = crew_active_id(&sh).ok_or("no active crew")?;
+    crew::memo_add(&id, "you", &text).map_err(|e| format!("{e:#}"))?;
+    crew::state_json(&id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn crew_forget(sh: State<'_, Arc<Shared>>, n: usize) -> Result<Value, String> {
+    let id = crew_active_id(&sh).ok_or("no active crew")?;
+    crew::memo_forget(&id, n).map_err(|e| format!("{e:#}"))?;
+    crew::state_json(&id).map_err(|e| format!("{e:#}"))
+}
+
 /// spawn the crew runner; rounds = 1 for a manual step, higher for auto
 /// (the auto loop stops early on the first DONE line)
 fn crew_run(sh: &Arc<Shared>, rounds: usize, auto: bool) -> Result<(), String> {
@@ -2322,7 +2342,7 @@ fn crew_run(sh: &Arc<Shared>, rounds: usize, auto: bool) -> Result<(), String> {
             }
         }
     });
-    *sh.inflight.lock().unwrap() = Some(handle);
+    *sh.crew_task.lock().unwrap() = Some(handle);
     Ok(())
 }
 
@@ -2413,6 +2433,7 @@ pub fn run() -> Result<()> {
                 confirm: Mutex::new(None),
                 ask: Mutex::new(None),
                 inflight: Mutex::new(None),
+                crew_task: Mutex::new(None),
                 tokens: Mutex::new(
                     restore
                         .as_ref()
@@ -2535,6 +2556,8 @@ pub fn run() -> Result<()> {
             crew_add,
             crew_del,
             crew_send,
+            crew_memo,
+            crew_forget,
             crew_step,
             crew_auto,
             crew_stop,
