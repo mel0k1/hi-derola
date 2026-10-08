@@ -16,6 +16,10 @@ use anyhow::{bail, Result};
 const MAX_TURNS: usize = 20;
 const MAX_FILES: usize = 4000;
 const MAX_FILE_BYTES: u64 = 1_000_000;
+
+/// cap for the routed-target undo store: files larger than this are not
+/// captured (undo skips them with a note)
+pub const VM_SNAPSHOT_FILE_CAP: u64 = 2 * 1024 * 1024;
 /// extra excludes for trees without a .gitignore, so a stray node_modules
 /// does not balloon the shadow repo (they union with the project .gitignore)
 const EXTRA_EXCLUDES: &str = "node_modules/\ntarget/\ndist/\nbuild/\nout/\n.git/\n";
@@ -23,21 +27,204 @@ const EXTRA_EXCLUDES: &str = "node_modules/\ntarget/\ndist/\nbuild/\nout/\n.git/
 // ---------- public API over the process working directory ----------
 
 pub fn begin_turn() {
+    vm_begin_turn();
     let root = root();
     begin_turn_in(&root);
 }
 
 pub fn end_turn() {
+    vm_end_turn();
     let root = root();
     end_turn_in(&root);
 }
 
 pub fn undo() -> Option<String> {
+    if crate::sandbox::shell_route().is_some() {
+        return vm_undo();
+    }
     undo_in(&root())
 }
 
 pub fn redo() -> Option<String> {
+    if crate::sandbox::shell_route().is_some() {
+        return vm_redo();
+    }
     redo_in(&root())
+}
+
+// ---------- routed-target (VM / remote host) undo ----------
+
+struct VmEdit {
+    path: String,
+    before: Option<Vec<u8>>,
+    after: Option<Vec<u8>>,
+}
+
+struct VmStore {
+    route: Option<String>,
+    pending: Vec<VmEdit>,
+    undo: Vec<Vec<VmEdit>>,
+    redo: Vec<Vec<VmEdit>>,
+}
+
+const VM_MAX_TURNS: usize = 20;
+const VM_MAX_EDITS: usize = 400;
+
+static VM_STORE: OnceLock<Mutex<VmStore>> = OnceLock::new();
+
+fn vm_store() -> &'static Mutex<VmStore> {
+    VM_STORE.get_or_init(|| {
+        Mutex::new(VmStore {
+            route: None,
+            pending: Vec::new(),
+            undo: Vec::new(),
+            redo: Vec::new(),
+        })
+    })
+}
+
+/// capture the pre-edit state of one routed file; called by every remote
+/// write path before the bytes land (first capture per path wins, so undo
+/// always restores the turn-start state)
+pub fn vm_record(path: &str, before: Option<Vec<u8>>) {
+    let mut s = vm_store().lock().unwrap();
+    if s.pending.len() >= VM_MAX_EDITS {
+        return;
+    }
+    if s.pending.iter().any(|e| e.path == path) {
+        return;
+    }
+    s.pending.push(VmEdit {
+        path: path.to_string(),
+        before,
+        after: None,
+    });
+}
+
+/// a route switch invalidates the store (edits belong to one machine)
+fn vm_sync_route(s: &mut VmStore) {
+    let cur = crate::sandbox::shell_route();
+    if s.route != cur {
+        *s = VmStore {
+            route: cur,
+            pending: Vec::new(),
+            undo: Vec::new(),
+            redo: Vec::new(),
+        };
+    }
+}
+
+fn vm_begin_turn() {
+    let mut s = vm_store().lock().unwrap();
+    vm_sync_route(&mut s);
+    s.pending.clear();
+}
+
+fn vm_end_turn() {
+    let mut f = |p: &str, cap: u64| crate::sandbox::vm_fetch_capped(p, cap);
+    vm_end_turn_with(&mut f);
+}
+
+fn vm_undo() -> Option<String> {
+    let mut f = |p: &str, cap: u64| crate::sandbox::vm_fetch_capped(p, cap);
+    let mut r = |p: &str, data: Option<&[u8]>| crate::sandbox::vm_restore(p, data);
+    vm_undo_with(&mut f, &mut r)
+}
+
+fn vm_redo() -> Option<String> {
+    let mut f = |p: &str, cap: u64| crate::sandbox::vm_fetch_capped(p, cap);
+    let mut r = |p: &str, data: Option<&[u8]>| crate::sandbox::vm_restore(p, data);
+    vm_redo_with(&mut f, &mut r)
+}
+
+fn vm_end_turn_with(fetch: &mut dyn FnMut(&str, u64) -> Option<Vec<u8>>) {
+    let mut s = vm_store().lock().unwrap();
+    vm_sync_route(&mut s);
+    if s.pending.is_empty() {
+        return;
+    }
+    for e in s.pending.iter_mut() {
+        e.after = fetch(&e.path, VM_SNAPSHOT_FILE_CAP);
+    }
+    let mut turn = std::mem::take(&mut s.pending);
+    turn.retain(|e| e.before != e.after);
+    if turn.is_empty() {
+        return;
+    }
+    s.undo.push(turn);
+    if s.undo.len() > VM_MAX_TURNS {
+        s.undo.remove(0);
+    }
+    s.redo.clear();
+}
+
+fn vm_undo_with(
+    fetch: &mut dyn FnMut(&str, u64) -> Option<Vec<u8>>,
+    restore: &mut dyn FnMut(&str, Option<&[u8]>),
+) -> Option<String> {
+    let mut s = vm_store().lock().unwrap();
+    vm_sync_route(&mut s);
+    let mut turn = s.undo.pop()?;
+    let mut redo = Vec::with_capacity(turn.len());
+    let mut skipped = 0usize;
+    for e in turn.iter_mut().rev() {
+        let cur = fetch(&e.path, VM_SNAPSHOT_FILE_CAP);
+        if cur != e.after {
+            skipped += 1;
+        }
+        redo.push(VmEdit {
+            path: e.path.clone(),
+            before: e.before.clone(),
+            after: cur,
+        });
+        restore(&e.path, e.before.as_deref());
+    }
+    turn.reverse();
+    s.redo.push(redo);
+    let n = turn.len();
+    Some(format!(
+        "undo: restored {n} remote file{}{}",
+        if n == 1 { "" } else { "s" },
+        if skipped > 0 {
+            format!(" ({skipped} changed since the turn, still restored)")
+        } else {
+            String::new()
+        }
+    ))
+}
+
+fn vm_redo_with(
+    fetch: &mut dyn FnMut(&str, u64) -> Option<Vec<u8>>,
+    restore: &mut dyn FnMut(&str, Option<&[u8]>),
+) -> Option<String> {
+    let mut s = vm_store().lock().unwrap();
+    vm_sync_route(&mut s);
+    let turn = s.redo.pop()?;
+    let mut undo = Vec::with_capacity(turn.len());
+    for e in &turn {
+        let cur = fetch(&e.path, VM_SNAPSHOT_FILE_CAP);
+        undo.push(VmEdit {
+            path: e.path.clone(),
+            before: cur,
+            after: e.after.clone(),
+        });
+        restore(&e.path, e.after.as_deref());
+    }
+    s.undo.push(undo);
+    let n = turn.len();
+    Some(format!(
+        "redo: reapplied {n} remote file{}",
+        if n == 1 { "" } else { "s" }
+    ))
+}
+
+#[cfg(test)]
+static VM_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+fn set_vm_route_for_tests(route: Option<&str>) {
+    let r = route.map(String::from);
+    crate::sandbox::set_shell_route(r);
 }
 
 fn root() -> PathBuf {
@@ -415,6 +602,52 @@ mod tests {
         std::env::remove_var("HI_DEROLA_SNAPSHOT_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn vm_undo_redo_flow() {
+        use std::collections::HashMap;
+        let _g = VM_TEST_LOCK.lock().unwrap();
+        let remote = std::rc::Rc::new(std::cell::RefCell::new(HashMap::<String, Vec<u8>>::from([
+            ("a.txt".to_string(), b"old".to_vec()),
+            ("b.txt".to_string(), b"keep".to_vec()),
+        ])));
+        let r2 = remote.clone();
+        let mut fetch = move |p: &str, _cap: u64| r2.borrow().get(p).cloned();
+        let r3 = remote.clone();
+        let mut restore = move |p: &str, data: Option<&[u8]>| {
+            let _ = match data {
+                Some(b) => r3.borrow_mut().insert(p.to_string(), b.to_vec()),
+                None => r3.borrow_mut().remove(p),
+            };
+        };
+
+        set_vm_route_for_tests(Some("sbx:vm-1"));
+        vm_begin_turn();
+        // a.txt exists and gets edited; c.txt is created; b.txt is untouched
+        let old_a = remote.borrow().get("a.txt").cloned().unwrap();
+        vm_record("a.txt", Some(old_a));
+        vm_record("c.txt", None);
+        remote.borrow_mut().insert("a.txt".into(), b"new".to_vec());
+        remote
+            .borrow_mut()
+            .insert("c.txt".into(), b"created".to_vec());
+        vm_end_turn_with(&mut fetch);
+
+        let note = vm_undo_with(&mut fetch, &mut restore).unwrap();
+        assert!(note.contains("restored 2"), "{note}");
+        assert_eq!(remote.borrow()["a.txt"], b"old");
+        assert!(!remote.borrow().contains_key("c.txt"));
+
+        let note = vm_redo_with(&mut fetch, &mut restore).unwrap();
+        assert!(note.contains("reapplied 2"), "{note}");
+        assert_eq!(remote.borrow()["a.txt"], b"new");
+        assert_eq!(remote.borrow()["c.txt"], b"created");
+
+        // a route switch wipes the store
+        set_vm_route_for_tests(Some("host:web"));
+        assert!(vm_undo_with(&mut fetch, &mut restore).is_none());
+        set_vm_route_for_tests(None);
     }
 
     #[test]

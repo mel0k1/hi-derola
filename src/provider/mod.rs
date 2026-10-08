@@ -55,6 +55,14 @@ pub enum ApiEvent {
         id: String,
         chunk: String,
     },
+    /// a crew member spoke (multi-agent session); the frontends route it to
+    /// the crew panel / log
+    Crew {
+        id: String,
+        author: String,
+        role: String,
+        content: String,
+    },
     Done {
         text: String,
         messages: Vec<Message>,

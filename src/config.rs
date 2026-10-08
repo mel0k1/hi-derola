@@ -778,6 +778,26 @@ impl Config {
         }
     }
 
+    /// resolve the provider config for a named profile with an optional
+    /// model override — crew members and subagents use this to mix apis:
+    /// profile None means the base [provider], an unknown name falls back
+    /// to it too (the api key of the base is inherited unless the profile
+    /// carries its own)
+    pub fn provider_for(&self, profile: Option<&str>, model: Option<&str>) -> ProviderConfig {
+        let mut p = match profile {
+            Some(name) => self
+                .profiles
+                .get(name)
+                .map(|prof| self.merged(prof))
+                .unwrap_or_else(|| self.provider.clone()),
+            None => self.provider.clone(),
+        };
+        if let Some(m) = model.map(str::trim).filter(|m| !m.is_empty()) {
+            p.model = m.to_string();
+        }
+        p
+    }
+
     /// persist a model switch: into the active profile when one is set
     /// (so /model is not shadowed by the profile on the next load), into
     /// the base section otherwise

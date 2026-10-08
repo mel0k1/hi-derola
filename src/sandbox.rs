@@ -132,6 +132,20 @@ impl ImageKind {
     }
 }
 
+/// extra tcp forwards on the user-mode net (host side binds loopback;
+/// applied on the next VM start)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct PortFwd {
+    pub host_port: u16,
+    pub guest_port: u16,
+    #[serde(default = "default_fwd_host")]
+    pub guest_host: String,
+}
+
+fn default_fwd_host() -> String {
+    "127.0.0.1".to_string()
+}
+
 /// the VM shape the wizard produces; persisted verbatim as sandbox.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxSpec {
@@ -153,6 +167,8 @@ pub struct SandboxSpec {
     pub root: bool,
     /// host port forwarded to guest ssh (22)
     pub ssh_port: u16,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forwards: Vec<PortFwd>,
     pub created_at: u64,
 }
 
@@ -501,8 +517,21 @@ pub fn build_qemu_args(spec: &SandboxSpec, dir: &Path, accel: &str) -> Vec<Strin
     a.extend([
         "-netdev".into(),
         // loopback bind: the guest ssh is reachable from this machine only
-        // (and no firewall prompt on windows)
-        format!("user,id=n0,hostfwd=tcp:127.0.0.1:{}-:22", spec.ssh_port),
+        // (and no firewall prompt on windows); extra forwards from the spec
+        // ride the same user-mode net
+        format!(
+            "user,id=n0,hostfwd=tcp:127.0.0.1:{}-:22{}",
+            spec.ssh_port,
+            spec.forwards
+                .iter()
+                .map(|f| {
+                    format!(
+                        ",hostfwd=tcp:127.0.0.1:{}-{}:{}",
+                        f.host_port, f.guest_host, f.guest_port
+                    )
+                })
+                .collect::<String>()
+        ),
         "-device".into(),
         "virtio-net-pci,netdev=n0".into(),
         "-device".into(),
@@ -747,6 +776,80 @@ impl SandboxManager {
         let _ = std::fs::write(dir.join("state.json"), raw);
     }
 
+    fn persist_spec(&self, id: &str) {
+        let dir = self.sandbox_dir(id);
+        let spec = {
+            let map = self.inner.lock().unwrap();
+            map.get(id).map(|e| e.spec.clone())
+        };
+        if let Some(spec) = spec {
+            if let Ok(raw) = serde_json::to_string_pretty(&spec) {
+                let _ = std::fs::write(dir.join("sandbox.json"), raw);
+            }
+        }
+    }
+
+    /// add an extra tcp forward (host loopback -> guest); takes effect on
+    /// the next VM start
+    pub fn fwd_add(
+        &self,
+        id: &str,
+        host_port: u16,
+        guest_port: u16,
+        guest_host: Option<&str>,
+    ) -> Result<SandboxStatus> {
+        if host_port == 0 {
+            bail!("host port must be > 0");
+        }
+        {
+            let map = self.inner.lock().unwrap();
+            if let Some(e) = map.values().find(|e| {
+                e.spec.ssh_port == host_port
+                    || e.spec.forwards.iter().any(|f| f.host_port == host_port)
+            }) {
+                bail!(
+                    "host port {host_port} is already used by sandbox \"{}\"",
+                    e.spec.name
+                );
+            }
+        }
+        let mut done = false;
+        self.with_entry(id, |e| {
+            if e.spec.forwards.iter().any(|f| f.host_port == host_port) {
+                return;
+            }
+            e.spec.forwards.push(PortFwd {
+                host_port,
+                guest_port: guest_port.clamp(1, 65535),
+                guest_host: guest_host
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(default_fwd_host),
+            });
+            done = true;
+        });
+        if !done {
+            bail!("no sandbox \"{id}\" (or the forward already exists)");
+        }
+        self.persist_spec(id);
+        self.status_of(id)
+    }
+
+    /// remove the forward with the given host-side port
+    pub fn fwd_del(&self, id: &str, host_port: u16) -> Result<SandboxStatus> {
+        let mut done = false;
+        self.with_entry(id, |e| {
+            let before = e.spec.forwards.len();
+            e.spec.forwards.retain(|f| f.host_port != host_port);
+            done = e.spec.forwards.len() != before;
+        });
+        if !done {
+            bail!("no forward on host port {host_port} in sandbox \"{id}\"");
+        }
+        self.persist_spec(id);
+        self.status_of(id)
+    }
+
     fn with_entry(&self, id: &str, f: impl FnOnce(&mut Entry)) {
         let mut map = self.inner.lock().unwrap();
         if let Some(e) = map.get_mut(id) {
@@ -816,6 +919,7 @@ impl SandboxManager {
             cpus,
             root: req.root,
             ssh_port,
+            forwards: Vec::new(),
             created_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -1538,14 +1642,29 @@ impl SandboxManager {
 
 // ------------------------------------------------------------- shell route
 
-/// id of the sandbox the bash tool currently executes in ("shell route",
-/// attached via the TUI /sandbox command); global, so both frontends route
-/// the same way and the flag survives across chat sessions in one process
+/// id of the sandbox or remote host the bash tool currently executes in
+/// ("shell route", attached via the TUI /sandbox or /host commands); global,
+/// so both frontends route the same way and the flag survives across chat
+/// sessions in one process. Values: "sbx:<id>" or "host:<id>" (a bare
+/// sandbox id from older sessions is treated as "sbx:<id>").
 static SHELL_ROUTE: Mutex<Option<String>> = Mutex::new(None);
 
-/// the attached sandbox id, if any
+/// the attached route id, if any ("sbx:<id>" or "host:<id>")
 pub fn shell_route() -> Option<String> {
     SHELL_ROUTE.lock().unwrap().clone()
+}
+
+/// the attached sandbox id, if any
+pub fn shell_route_sbx() -> Option<String> {
+    let r = SHELL_ROUTE.lock().unwrap().clone()?;
+    let id = r.strip_prefix("sbx:").unwrap_or(&r).to_string();
+    (r.starts_with("sbx:") || !r.starts_with("host:")).then_some(id)
+}
+
+/// the attached remote host id, if any
+pub fn shell_route_host() -> Option<String> {
+    let r = SHELL_ROUTE.lock().unwrap().clone()?;
+    r.strip_prefix("host:").map(|s| s.to_string())
 }
 
 /// attach / detach shell routing; callers validate the target first
@@ -1554,19 +1673,45 @@ pub fn set_shell_route(id: Option<String>) {
 }
 
 /// drop the route when it points at a sandbox that just stopped, failed or
-/// was deleted; a no-op when another sandbox is attached
+/// was deleted; a no-op when another target is attached
 fn clear_shell_route_if(id: &str) {
     let mut r = SHELL_ROUTE.lock().unwrap();
-    if r.as_deref() == Some(id) {
+    let hit = match r.as_deref() {
+        Some(v) => v == id || v == format!("sbx:{id}"),
+        None => false,
+    };
+    if hit {
         *r = None;
     }
 }
 
-/// resolve the attached sandbox for any routed tool call: (id, display
-/// name), detaching first when the VM is gone or not running so a stale
-/// route cannot wedge the agent
-fn route_target() -> Result<(String, String)> {
-    let id = shell_route().ok_or_else(|| anyhow!("no sandbox attached"))?;
+enum RouteTarget {
+    Sbx(String, String),
+    Host(String, String),
+}
+
+/// resolve the attached target for any routed tool call: (id, display name),
+/// detaching first when the target is gone/offline so a stale route cannot
+/// wedge the agent
+fn route_resolve() -> Result<RouteTarget> {
+    let raw = shell_route().ok_or_else(|| anyhow!("no sandbox or host attached"))?;
+    if let Some(id) = raw.strip_prefix("host:") {
+        let m = crate::hosts::HostManager::global();
+        let list = m.list();
+        let Some(st) = list.into_iter().find(|h| h.host.id == id) else {
+            set_shell_route(None);
+            bail!("attached host \"{id}\" no longer exists — routing detached");
+        };
+        if st.state == "failed" {
+            bail!(
+                "host \"{}\" is not reachable ({}): /host check for details",
+                st.host.name,
+                st.error.unwrap_or_default()
+            );
+        }
+        return Ok(RouteTarget::Host(id.to_string(), st.host.name));
+    }
+    let id = raw.strip_prefix("sbx:").unwrap_or(&raw).to_string();
     let m = SandboxManager::global();
     let Some(st) = m.list().into_iter().find(|s| s.spec.id == id) else {
         clear_shell_route_if(&id);
@@ -1579,20 +1724,50 @@ fn route_target() -> Result<(String, String)> {
             st.spec.name
         );
     }
-    Ok((id, st.spec.name))
+    Ok(RouteTarget::Sbx(id, st.spec.name))
 }
 
-/// run one bash-tool command inside the attached VM over ssh and format the
+/// display name of the attached target ("box" / "box (debian)" / "web (host)")
+pub fn route_name() -> Option<String> {
+    match route_resolve() {
+        Ok(RouteTarget::Sbx(_, n)) => Some(n),
+        Ok(RouteTarget::Host(_, n)) => Some(format!("{n} (remote host)")),
+        Err(_) => None,
+    }
+}
+
+/// run one command on the attached target (sandbox VM or remote host)
+fn route_ssh_exec(command: &str, timeout_secs: Option<u64>) -> Result<crate::sshx::SshOut> {
+    match route_resolve()? {
+        RouteTarget::Sbx(id, _) => SandboxManager::global().ssh_exec(&id, command, timeout_secs),
+        RouteTarget::Host(id, _) => {
+            crate::hosts::HostManager::global().exec(&id, command, timeout_secs)
+        }
+    }
+}
+
+/// pipe stdin bytes into a command on the attached target
+fn route_ssh_stream(
+    command: &str,
+    stdin: &[u8],
+    timeout_secs: Option<u64>,
+) -> Result<(i32, String)> {
+    match route_resolve()? {
+        RouteTarget::Sbx(id, _) => {
+            SandboxManager::global().ssh_stream(&id, command, stdin, timeout_secs)
+        }
+        RouteTarget::Host(id, _) => {
+            crate::hosts::HostManager::global().stream(&id, command, stdin, timeout_secs)
+        }
+    }
+}
+
+/// run one bash-tool command on the attached target over ssh and format the
 /// result like the local bash tool does (stdout+stderr combined, "(no
 /// output)" for silence, exit code appended on failure). Detaches itself
-/// when the VM is gone so a stale route cannot wedge the agent.
+/// when the target is gone so a stale route cannot wedge the agent.
 pub fn sandbox_bash(cmd: &str, timeout_secs: Option<u64>) -> Result<String> {
-    let (id, _) = route_target()?;
-    let out = SandboxManager::global().ssh_exec(
-        &id,
-        cmd,
-        Some(timeout_secs.unwrap_or(120).clamp(1, 600)),
-    )?;
+    let out = route_ssh_exec(cmd, Some(timeout_secs.unwrap_or(120).clamp(1, 600)))?;
     let mut text = out.stdout;
     if !out.stderr.trim().is_empty() {
         if !text.is_empty() && !text.ends_with('\n') {
@@ -1610,25 +1785,30 @@ pub fn sandbox_bash(cmd: &str, timeout_secs: Option<u64>) -> Result<String> {
 }
 
 /// system-prompt addendum while the shell route is active: the model must
-/// know its commands AND file tools run inside a linux VM, not on the host
+/// know its commands AND file tools run on the attached machine, not on the
+/// host
 pub fn shell_route_addendum() -> Option<String> {
-    let id = shell_route()?;
-    let st = SandboxManager::global()
-        .list()
-        .into_iter()
-        .find(|s| s.spec.id == id)?;
+    let mode = match route_resolve() {
+        Ok(RouteTarget::Sbx(_, name)) => format!(
+            "SANDBOX MODE is active: bash AND the file tools (read_file, write_file, edit, \
+             glob, grep, list_files, apply_patch) execute INSIDE the sandbox VM \"{name}\" (\
+             linux {}) over ssh, not on the host.",
+            std::env::consts::ARCH
+        ),
+        Ok(RouteTarget::Host(_, name)) => format!(
+            "REMOTE HOST MODE is active: bash AND the file tools (read_file, write_file, edit, \
+             glob, grep, list_files, apply_patch) execute ON the remote host \"{name}\" over \
+             ssh, not on the local machine."
+        ),
+        Err(_) => return None,
+    };
     Some(format!(
-        "SANDBOX MODE is active: bash AND the file tools (read_file, write_file, edit, \
-         glob, grep, list_files, apply_patch) execute INSIDE the sandbox VM \"{}\" ({}, \
-         linux {}) over ssh, not on the host. Use unix paths and unix commands; relative \
-         paths resolve against the VM user's home directory. Image files are fetched over \
+        "{mode} Use unix paths and unix commands; relative \
+         paths resolve against the remote user's home directory. Image files are fetched over \
          ssh and attached like local ones; the formatter, LSP and diagnostics do not apply \
-         to VM files. Background bash works too — it becomes a remote nohup task reported \
+         to remote files. Background bash works too — it becomes a remote nohup task reported \
          through task_status and stoppable with task_kill. Everything you create stays \
-         inside the VM; the host working directory is out of reach.",
-        st.spec.name,
-        st.spec.kind.label(),
-        std::env::consts::ARCH
+         on the remote machine; the local working directory is out of reach."
     ))
 }
 
@@ -1660,14 +1840,9 @@ fn guest_rel(line: &str, dir: &str) -> String {
         .unwrap_or_else(|| l.to_string())
 }
 
-/// fetch one file's bytes from the VM (size-capped, base64 over ssh)
-fn guest_fetch(id: &str, path: &str) -> Result<Vec<u8>> {
-    guest_fetch_cap(id, path, crate::tools::MAX_ATTACH_BYTES)
-}
-
-fn guest_fetch_cap(id: &str, path: &str, cap: u64) -> Result<Vec<u8>> {
-    let m = SandboxManager::global();
-    let out = m.ssh_exec(id, &format!("wc -c < {}", sq(path)), Some(30))?;
+/// fetch one file's bytes from the attached target (size-capped, base64 over ssh)
+fn guest_fetch_cap(path: &str, cap: u64) -> Result<Vec<u8>> {
+    let out = route_ssh_exec(&format!("wc -c < {}", sq(path)), Some(30))?;
     if out.code != 0 {
         bail!("{path}: {}", one_line(&out.stderr, out.code));
     }
@@ -1675,7 +1850,7 @@ fn guest_fetch_cap(id: &str, path: &str, cap: u64) -> Result<Vec<u8>> {
     if size > cap {
         bail!("{path}: too large ({size} bytes)");
     }
-    let out = m.ssh_exec(id, &format!("base64 -w0 -- {}", sq(path)), Some(60))?;
+    let out = route_ssh_exec(&format!("base64 -w0 -- {}", sq(path)), Some(60))?;
     if out.code != 0 {
         bail!("{path}: {}", one_line(&out.stderr, out.code));
     }
@@ -1685,28 +1860,32 @@ fn guest_fetch_cap(id: &str, path: &str, cap: u64) -> Result<Vec<u8>> {
         .map_err(|e| anyhow!("{path}: base64 decode failed: {e}"))
 }
 
-/// apply_patch inside the VM: plan_with validates against guest files
-/// (reads via base64, existence via `test -e`), then every write and delete
-/// goes through the guest primitives — all-or-nothing like the host tool
+fn guest_fetch(path: &str) -> Result<Vec<u8>> {
+    guest_fetch_cap(path, crate::tools::MAX_ATTACH_BYTES)
+}
+
+/// apply_patch on the attached target: plan_with validates against remote
+/// files (reads via base64, existence via `test -e`), then every write and
+/// delete goes through the remote primitives — all-or-nothing like the host
+/// tool. Every overwrite is recorded for the VM undo stack first.
 pub fn guest_apply_patch(patch_text: &str) -> Result<String> {
-    let (id, _) = route_target()?;
-    let m = SandboxManager::global();
+    route_resolve()?;
     let read = |p: &str| -> Result<String> {
-        let bytes = guest_fetch_cap(&id, p, 32 * 1024 * 1024)?;
+        let bytes = guest_fetch_cap(p, 32 * 1024 * 1024)?;
         String::from_utf8(bytes).map_err(|_| anyhow!("{p}: not valid utf-8"))
     };
     let exists = |p: &str| -> Result<bool> {
-        Ok(m.ssh_exec(&id, &format!("test -e {}", sq(p)), Some(15))?
-            .code
-            == 0)
+        Ok(route_ssh_exec(&format!("test -e {}", sq(p)), Some(15))?.code == 0)
     };
     let planned = crate::patch::plan_with(crate::patch::parse(patch_text)?, &read, &exists)?;
     let items = planned.items.clone();
     for (path, content) in &planned.write {
-        guest_push(&id, path, content.as_bytes())?;
+        record_vm_overwrite(path);
+        guest_push(path, content.as_bytes())?;
     }
     for path in &planned.delete {
-        let out = m.ssh_exec(&id, &format!("rm -f -- {}", sq(path)), Some(15))?;
+        record_vm_overwrite(path);
+        let out = route_ssh_exec(&format!("rm -f -- {}", sq(path)), Some(15))?;
         if out.code != 0 {
             bail!("apply_patch: {path}: {}", one_line(&out.stderr, out.code));
         }
@@ -1718,12 +1897,11 @@ pub fn guest_apply_patch(patch_text: &str) -> Result<String> {
     Ok(out)
 }
 
-/// fetch an image from the VM for vision attach — same (mime, base64) shape
-/// as files::read_image, so the chat plumbing is identical
+/// fetch an image from the attached target for vision attach — same (mime,
+/// base64) shape as files::read_image, so the chat plumbing is identical
 pub fn guest_read_image(path: &str) -> Result<(String, String)> {
-    let (id, _) = route_target()?;
-    let m = SandboxManager::global();
-    let out = m.ssh_exec(&id, &format!("wc -c < {}", sq(path)), Some(30))?;
+    route_resolve()?;
+    let out = route_ssh_exec(&format!("wc -c < {}", sq(path)), Some(30))?;
     if out.code != 0 {
         bail!("{path}: {}", one_line(&out.stderr, out.code));
     }
@@ -1731,7 +1909,7 @@ pub fn guest_read_image(path: &str) -> Result<(String, String)> {
     if size > crate::files::MAX_IMAGE_BYTES {
         bail!("{path}: too large for an image ({size} bytes)");
     }
-    let out = m.ssh_exec(&id, &format!("base64 -w0 -- {}", sq(path)), Some(60))?;
+    let out = route_ssh_exec(&format!("base64 -w0 -- {}", sq(path)), Some(60))?;
     if out.code != 0 {
         bail!("{path}: {}", one_line(&out.stderr, out.code));
     }
@@ -1774,8 +1952,9 @@ pub fn fetch_from_vm(id: &str, vm_path: &str, host_path: &str) -> Result<String>
     ))
 }
 
-/// push a host file into the VM (parent dirs created); the counterpart of
-/// `fetch_from_vm` for quick one-file delivery without a git roundtrip
+/// push a host file into a specific VM (parent dirs created); the
+/// counterpart of `fetch_from_vm` for quick one-file delivery — unlike the
+/// routed guest tools this targets the given sandbox id directly
 pub fn push_to_vm(id: &str, host_path: &str, vm_path: &str) -> Result<String> {
     // ssh_stream buffers the bytes in memory, so keep a generous but sane cap
     const MAX_PUSH: u64 = 256 * 1024 * 1024;
@@ -1790,7 +1969,22 @@ pub fn push_to_vm(id: &str, host_path: &str, vm_path: &str) -> Result<String> {
         );
     }
     let bytes = std::fs::read(host_path).map_err(|e| anyhow!("{host_path}: {e}"))?;
-    guest_push(id, vm_path, &bytes)?;
+    let dir = match vm_path.rsplit_once('/') {
+        Some((d, _)) if !d.is_empty() => d,
+        _ => ".",
+    };
+    let remote = format!("mkdir -p -- {} && cat > {}", sq(dir), sq(vm_path));
+    let (code, msg) = SandboxManager::global().ssh_stream(id, &remote, &bytes, Some(60))?;
+    if code != 0 {
+        bail!(
+            "{vm_path}: {}",
+            if msg.trim().is_empty() {
+                format!("write failed (exit {code})")
+            } else {
+                msg.trim().to_string()
+            }
+        );
+    }
     Ok(format!(
         "pushed {host_path} -> {vm_path} ({} bytes)",
         bytes.len()
@@ -1839,10 +2033,11 @@ fn vm_bg_lookup(bg_id: &str) -> Option<(String, u32)> {
         .map(|(s, p, _, _)| (s.clone(), *p))
 }
 
-/// spawn a background command inside the attached VM; returns (sandbox id,
-/// guest pid, guest log path, guest code file path)
+/// spawn a background command on the attached target; returns (route id,
+/// remote pid, remote log path, remote code file path)
 pub fn vm_bg_spawn(cmd: &str) -> Result<(String, u32, String, String)> {
-    let (id, name) = route_target()?;
+    let route = shell_route().ok_or_else(|| anyhow!("no sandbox or host attached"))?;
+    let name = route_name().unwrap_or_else(|| route.clone());
     let inner = format!(
         "{}; echo $? > \"$HI_BG_CODE\"",
         cmd.trim_end_matches(['\n', ';', ' '])
@@ -1853,12 +2048,12 @@ pub fn vm_bg_spawn(cmd: &str) -> Result<(String, u32, String, String)> {
          echo \"$p\"; echo \"$l\"",
         sq(&inner)
     );
-    let out = SandboxManager::global().ssh_exec(&id, &remote, Some(15))?;
+    let out = route_ssh_exec(&remote, Some(15))?;
     if out.code != 0 {
         bail!("{}: {}", name, one_line(&out.stderr, out.code));
     }
     let (pid, log) = parse_vm_bg_spawn(&out.stdout)?;
-    Ok((id, pid, log.clone(), format!("{log}.code")))
+    Ok((route, pid, log.clone(), format!("{log}.code")))
 }
 
 /// parse `vm_bg_spawn` stdout: first line = guest pid, second = log path
@@ -1879,10 +2074,25 @@ fn parse_vm_bg_spawn(stdout: &str) -> Result<(u32, String)> {
     Ok((pid, log))
 }
 
-/// kill the remote process group of a VM background task (best effort)
-pub fn vm_bg_kill(sandbox: &str, pid: u32) -> Result<()> {
-    SandboxManager::global().ssh_exec(
-        sandbox,
+/// run one command on a stored route id ("sbx:<id>" / "host:<id>") — the
+/// background-task counterpart of route_ssh_exec that does not touch the
+/// live route
+fn route_exec_by(
+    route: &str,
+    command: &str,
+    timeout_secs: Option<u64>,
+) -> Result<crate::sshx::SshOut> {
+    if let Some(id) = route.strip_prefix("host:") {
+        return crate::hosts::HostManager::global().exec(id, command, timeout_secs);
+    }
+    let id = route.strip_prefix("sbx:").unwrap_or(route);
+    SandboxManager::global().ssh_exec(id, command, timeout_secs)
+}
+
+/// kill the remote process group of a background task (best effort)
+pub fn vm_bg_kill(route: &str, pid: u32) -> Result<()> {
+    route_exec_by(
+        route,
         &format!("kill -- -{pid} 2>/dev/null || kill {pid} 2>/dev/null; true"),
         Some(10),
     )?;
@@ -1910,13 +2120,12 @@ pub struct VmBgPoll {
 }
 
 pub fn vm_bg_poll(
-    sandbox: &str,
+    route: &str,
     pid: u32,
     log: &str,
     code_file: &str,
     offset: u64,
 ) -> Result<VmBgPoll> {
-    let m = SandboxManager::global();
     let remote = format!(
         "s=$(wc -c < {} 2>/dev/null || echo 0); echo \"$s\"; \
          [ \"$s\" -gt {} ] && tail -c +{} {} 2>/dev/null; true",
@@ -1925,7 +2134,7 @@ pub fn vm_bg_poll(
         offset + 1,
         sq(log)
     );
-    let out = m.ssh_exec(sandbox, &remote, Some(15))?;
+    let out = route_exec_by(route, &remote, Some(15))?;
     if out.code != 0 && out.stdout.trim().is_empty() {
         bail!("log read failed: {}", one_line(&out.stderr, out.code));
     }
@@ -1939,7 +2148,7 @@ pub fn vm_bg_poll(
          cat {} 2>/dev/null || echo 0; fi",
         sq(code_file)
     );
-    let out2 = m.ssh_exec(sandbox, &remote2, Some(10))?;
+    let out2 = route_exec_by(route, &remote2, Some(10))?;
     let (alive, code) = parse_vm_bg_alive(&out2.stdout);
     Ok(VmBgPoll {
         size,
@@ -1962,14 +2171,14 @@ fn parse_vm_bg_alive(stdout: &str) -> (bool, Option<i32>) {
     (false, code)
 }
 
-/// push bytes into a VM file (parent dirs created), `cat >` over ssh stdin
-fn guest_push(id: &str, path: &str, bytes: &[u8]) -> Result<()> {
+/// push bytes into a remote file (parent dirs created), `cat >` over ssh stdin
+fn guest_push(path: &str, bytes: &[u8]) -> Result<()> {
     let dir = match path.rsplit_once('/') {
         Some((d, _)) if !d.is_empty() => d,
         _ => ".",
     };
     let remote = format!("mkdir -p -- {} && cat > {}", sq(dir), sq(path));
-    let (code, msg) = SandboxManager::global().ssh_stream(id, &remote, bytes, Some(60))?;
+    let (code, msg) = route_ssh_stream(&remote, bytes, Some(60))?;
     if code != 0 {
         bail!(
             "{path}: {}",
@@ -1983,29 +2192,59 @@ fn guest_push(id: &str, path: &str, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// read_file inside the VM: same numbered format as the host reader
+/// capture the current content of a remote file into the VM undo stack
+/// (best effort: a failed fetch just means "the file does not exist yet")
+fn record_vm_overwrite(path: &str) {
+    let old = guest_fetch_cap(path, crate::snapshot::VM_SNAPSHOT_FILE_CAP).ok();
+    crate::snapshot::vm_record(path, old);
+}
+
+/// transport for the routed-target undo store: current bytes of one remote
+/// file (None when missing/unreadable/oversized)
+pub fn vm_fetch_capped(path: &str, cap: u64) -> Option<Vec<u8>> {
+    if shell_route().is_none() {
+        return None;
+    }
+    guest_fetch_cap(path, cap).ok()
+}
+
+/// transport for the routed-target undo store: put bytes back (or remove
+/// the file when the turn started without it); bypasses undo recording
+pub fn vm_restore(path: &str, data: Option<&[u8]>) {
+    let res = match data {
+        Some(bytes) => guest_push(path, bytes),
+        None => route_ssh_exec(&format!("rm -f -- {}", sq(path)), Some(15)).map(|_| ()),
+    };
+    if let Err(e) = res {
+        eprintln!("hi-derola: undo restore {path}: {e:#}");
+    }
+}
+
+/// read_file on the attached target: same numbered format as the host reader
 pub fn guest_read(path: &str, offset: usize, limit: usize) -> Result<String> {
-    let (id, _) = route_target()?;
-    let bytes = guest_fetch(&id, path)?;
+    route_resolve()?;
+    let bytes = guest_fetch(path)?;
     crate::tools::format_numbered(path, bytes, offset, limit)
 }
 
-/// write_file inside the VM
+/// write_file on the attached target
 pub fn guest_write(path: &str, content: &str) -> Result<String> {
-    let (id, _) = route_target()?;
-    guest_push(&id, path, content.as_bytes())?;
+    route_resolve()?;
+    record_vm_overwrite(path);
+    guest_push(path, content.as_bytes())?;
     Ok(format!("wrote {path} ({} lines)", content.lines().count()))
 }
 
-/// edit inside the VM: fetch, string-replace with the host matching rules
-/// (crlf/bom/unicode/fuzzy tolerance), push back
+/// edit on the attached target: fetch, string-replace with the host matching
+/// rules (crlf/bom/unicode/fuzzy tolerance), push back
 pub fn guest_edit(path: &str, old: &str, new: &str, replace_all: bool) -> Result<String> {
-    let (id, _) = route_target()?;
-    let bytes = guest_fetch(&id, path)?;
+    route_resolve()?;
+    let bytes = guest_fetch(path)?;
     let content = String::from_utf8(bytes).map_err(|_| anyhow!("{path}: not valid utf-8"))?;
     let (updated, count) = crate::tools::apply_edit(&content, old, new, replace_all)
         .map_err(|e| anyhow!("edit: {e:#} in {path}"))?;
-    guest_push(&id, path, updated.as_bytes())?;
+    crate::snapshot::vm_record(path, Some(content.into_bytes()));
+    guest_push(path, updated.as_bytes())?;
     Ok(format!(
         "edited {path} ({} replacement{})",
         count,
@@ -2013,9 +2252,9 @@ pub fn guest_edit(path: &str, old: &str, new: &str, replace_all: bool) -> Result
     ))
 }
 
-/// list_files inside the VM: 3 levels of `find -printf`, dirs marked with /
+/// list_files on the attached target: 3 levels of `find -printf`, dirs marked with /
 pub fn guest_list_files(dir: &str) -> Result<String> {
-    let (id, _) = route_target()?;
+    route_resolve()?;
     let max = crate::tools::MAX_LIST;
     let remote = format!(
         "find {} -maxdepth 3 -mindepth 1 \\( -type d -printf '%p/\\n' -o -type f -printf '%p\\n' \\) 2>/dev/null \
@@ -2023,7 +2262,7 @@ pub fn guest_list_files(dir: &str) -> Result<String> {
         sq(dir),
         max + 1
     );
-    let out = SandboxManager::global().ssh_exec(&id, &remote, Some(30))?;
+    let out = route_ssh_exec(&remote, Some(30))?;
     if out.code != 0 {
         bail!("{dir}: {}", one_line(&out.stderr, out.code));
     }
@@ -2044,17 +2283,17 @@ pub fn guest_list_files(dir: &str) -> Result<String> {
     Ok(entries.join("\n"))
 }
 
-/// glob inside the VM: the guest lists files with find, host-side glob
-/// matching picks the winners (same pattern dialect as the local tool)
+/// glob on the attached target: the remote lists files with find, host-side
+/// glob matching picks the winners (same pattern dialect as the local tool)
 pub fn guest_glob(dir: &str, pattern: &str) -> Result<String> {
     use crate::search::{glob_match, MAX_RESULTS};
-    let (id, _) = route_target()?;
+    route_resolve()?;
     let pats = crate::search::expand_braces(pattern);
     let remote = format!(
         "find {} -type f -not -path '*/.git/*' 2>/dev/null | head -n 20001",
         sq(dir)
     );
-    let out = SandboxManager::global().ssh_exec(&id, &remote, Some(60))?;
+    let out = route_ssh_exec(&remote, Some(60))?;
     if out.code != 0 {
         bail!("{dir}: {}", one_line(&out.stderr, out.code));
     }
@@ -2088,7 +2327,7 @@ pub fn guest_grep(dir: &str, pattern: &str, include: Option<&str>) -> Result<Str
     if let Err(e) = regex::Regex::new(pattern) {
         bail!("grep: {e}");
     }
-    let (id, _) = route_target()?;
+    route_resolve()?;
     let ere = pattern.replace(r"\d", "[0-9]").replace(r"\D", "[^0-9]");
     let mut remote = String::from("set -o pipefail; grep -rInE");
     if let Some(inc) = include {
@@ -2101,7 +2340,7 @@ pub fn guest_grep(dir: &str, pattern: &str, include: Option<&str>) -> Result<Str
         sq(&ere),
         sq(dir)
     ));
-    let out = SandboxManager::global().ssh_exec(&id, &remote, Some(60))?;
+    let out = route_ssh_exec(&remote, Some(60))?;
     if out.code > 1 {
         bail!("grep: {}", one_line(&out.stderr, out.code));
     }
@@ -2404,6 +2643,7 @@ mod tests {
             cpus: 2,
             root: false,
             ssh_port: 2222,
+            forwards: Vec::new(),
             created_at: 0,
         }
     }
@@ -2503,18 +2743,33 @@ mod tests {
         assert!(shell_route().is_none());
 
         // attach + pointwise clear of a different id keeps the route
-        set_shell_route(Some("vm-a".into()));
+        set_shell_route(Some("sbx:vm-a".into()));
         clear_shell_route_if("vm-b");
-        assert_eq!(shell_route().as_deref(), Some("vm-a"));
+        assert_eq!(shell_route().as_deref(), Some("sbx:vm-a"));
+        assert_eq!(shell_route_sbx().as_deref(), Some("vm-a"));
+        assert!(shell_route_host().is_none());
         clear_shell_route_if("vm-a");
         assert!(shell_route().is_none());
 
+        // a bare legacy id still counts as a sandbox route
+        set_shell_route(Some("vm-a".into()));
+        assert_eq!(shell_route_sbx().as_deref(), Some("vm-a"));
+        set_shell_route(None);
+
+        // a host route only clears through its own path
+        set_shell_route(Some("host:web-1".into()));
+        assert_eq!(shell_route_host().as_deref(), Some("web-1"));
+        assert!(shell_route_sbx().is_none());
+        clear_shell_route_if("web-1");
+        assert_eq!(shell_route_host().as_deref(), Some("web-1"));
+        set_shell_route(None);
+
         // sandbox_bash without a route is a clean error
         let err = sandbox_bash("true", None).unwrap_err().to_string();
-        assert!(err.contains("no sandbox attached"), "{err}");
+        assert!(err.contains("no sandbox or host attached"), "{err}");
 
         // a route pointing at a nonexistent sandbox self-detaches
-        set_shell_route(Some("ghost-vm".into()));
+        set_shell_route(Some("sbx:ghost-vm".into()));
         let err = sandbox_bash("true", None).unwrap_err().to_string();
         assert!(err.contains("no longer exists"), "{err}");
         assert!(shell_route().is_none());

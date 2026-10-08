@@ -91,13 +91,15 @@ pub fn find_ssh() -> Option<PathBuf> {
     None
 }
 
-/// everything the ssh argv needs to reach one sandbox
+/// everything the ssh argv needs to reach one sandbox or remote host
 #[derive(Debug, Clone)]
 pub struct SshTarget {
     pub key: PathBuf,
     pub known_hosts: PathBuf,
     pub port: u16,
     pub user: String,
+    /// hostname or ip; sandboxes default to the qemu loopback
+    pub host: String,
 }
 
 impl SshTarget {
@@ -107,6 +109,15 @@ impl SshTarget {
             known_hosts: dir.join("known_hosts"),
             port,
             user: user.to_string(),
+            host: "127.0.0.1".to_string(),
+        }
+    }
+
+    /// a target for an arbitrary remote host (own key file pair in `dir`)
+    pub fn remote(dir: &Path, host: &str, port: u16, user: &str) -> Self {
+        Self {
+            host: host.to_string(),
+            ..Self::new(dir, port, user)
         }
     }
 }
@@ -136,7 +147,7 @@ pub fn ssh_argv(t: &SshTarget, force_pty: bool, remote: &[&str]) -> Vec<String> 
     if force_pty {
         a.push("-t".into());
     }
-    a.push(format!("{}@127.0.0.1", t.user));
+    a.push(format!("{}@{}", t.user, t.host));
     if !remote.is_empty() {
         a.push("--".into());
         a.extend(remote.iter().map(|s| s.to_string()));
