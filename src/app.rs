@@ -64,8 +64,9 @@ pub struct App {
     pub confirm_feedback: bool,
     pub attachments: Vec<(String, String)>,
     pub streaming: Option<usize>,
-    /// live streaming crew reply: entry index + author name
-    pub crew_stream: Option<(usize, String)>,
+    /// live streaming crew replies: entry index + author name, one per
+    /// in-flight member (bg workers and the inline member can parallel-stream)
+    pub crew_stream: Vec<(usize, String)>,
     /// crew runner task; separate from chat inflight so chat stays usable
     pub crew_task: Option<tokio::task::JoinHandle<()>>,
     pub reasoning: Option<usize>,
@@ -167,7 +168,7 @@ impl App {
             confirm_feedback: false,
             attachments: Vec::new(),
             streaming: None,
-            crew_stream: None,
+            crew_stream: Vec::new(),
             crew_task: None,
             reasoning: None,
             tokens_in: 0,
@@ -696,30 +697,37 @@ impl App {
                         self.reasoning = Some(r - 1);
                     }
                 }
-                if let Some((c, a)) = self.crew_stream.clone() {
-                    if c > i {
-                        self.crew_stream = Some((c - 1, a));
+                for (c, _) in self.crew_stream.iter_mut() {
+                    if *c > i {
+                        *c -= 1;
                     }
                 }
             }
         }
     }
 
-    /// end the live crew streaming entry; remove=false leaves the partial
-    /// text in the log, remove=true drops the entry (the final reply replaces it)
-    fn flush_crew_stream(&mut self, remove: bool) {
-        if let Some((i, _)) = self.crew_stream.take() {
-            if remove && i < self.entries.len() {
-                self.entries.remove(i);
-                if let Some(r) = self.reasoning {
-                    if r > i {
-                        self.reasoning = Some(r - 1);
-                    }
+    /// drop one live crew streaming entry (the final reply replaces it);
+    /// the other tracked entries get their indexes fixed up
+    fn flush_crew_stream_author(&mut self, author: &str) {
+        let Some(pos) = self.crew_stream.iter().position(|(_, a)| a == author) else {
+            return;
+        };
+        let (i, _) = self.crew_stream.remove(pos);
+        if i < self.entries.len() {
+            self.entries.remove(i);
+            if let Some(r) = self.reasoning {
+                if r > i {
+                    self.reasoning = Some(r - 1);
                 }
-                if let Some(s) = self.streaming {
-                    if s > i {
-                        self.streaming = Some(s - 1);
-                    }
+            }
+            if let Some(s) = self.streaming {
+                if s > i {
+                    self.streaming = Some(s - 1);
+                }
+            }
+            for (c, _) in self.crew_stream.iter_mut() {
+                if *c > i {
+                    *c -= 1;
                 }
             }
         }
@@ -729,7 +737,11 @@ impl App {
         match ev {
             ApiEvent::Chunk(s) => {
                 match self.streaming {
-                    Some(i) => self.entries[i].text.push_str(&s),
+                    Some(i) => {
+                        if let Some(e) = self.entries.get_mut(i) {
+                            e.text.push_str(&s);
+                        }
+                    }
                     None => {
                         self.entries.push(Entry {
                             kind: Kind::Bot,
@@ -742,7 +754,11 @@ impl App {
             }
             ApiEvent::Reasoning(s) => {
                 match self.reasoning {
-                    Some(i) => self.entries[i].text.push_str(&s),
+                    Some(i) => {
+                        if let Some(e) = self.entries.get_mut(i) {
+                            e.text.push_str(&s);
+                        }
+                    }
                     None => {
                         self.entries.push(Entry {
                             kind: Kind::Info,
@@ -773,9 +789,20 @@ impl App {
             }
             ApiEvent::Confirm { name, args, rx } => {
                 self.flush_stream();
-                self.confirm = Some(ConfirmCtx { name, args, rx });
-                self.phase = Phase::Confirm;
-                self.scroll_up = 0;
+                if self.confirm.is_some() {
+                    // one prompt at a time: the chat run and a crew tool-member
+                    // can both ask — the newcomer gets an explicit soft-deny
+                    // instead of orphaning the first oneshot
+                    let _ = rx.send(crate::provider::ConfirmReply {
+                        approved: false,
+                        feedback: "another permission prompt is already open — try again".into(),
+                        always: false,
+                    });
+                } else {
+                    self.confirm = Some(ConfirmCtx { name, args, rx });
+                    self.phase = Phase::Confirm;
+                    self.scroll_up = 0;
+                }
             }
             ApiEvent::Ask { args, rx, .. } => {
                 self.flush_stream();
@@ -826,19 +853,19 @@ impl App {
             }
             ApiEvent::BgOut { .. } => {}
             ApiEvent::CrewChunk { author, delta, .. } => {
-                match &self.crew_stream {
-                    Some((i, a)) if *a == author => {
-                        if let Some(e) = self.entries.get_mut(*i) {
+                match self.crew_stream.iter().position(|(_, a)| *a == author) {
+                    Some(i) => {
+                        let idx = self.crew_stream[i].0;
+                        if let Some(e) = self.entries.get_mut(idx) {
                             e.text.push_str(&delta);
                         }
                     }
-                    _ => {
-                        self.flush_crew_stream(true);
+                    None => {
                         self.entries.push(Entry {
                             kind: Kind::Info,
                             text: format!("crew \u{25b8} {author}: {delta}"),
                         });
-                        self.crew_stream = Some((self.entries.len() - 1, author));
+                        self.crew_stream.push((self.entries.len() - 1, author));
                     }
                 }
                 self.scroll_up = 0;
@@ -849,9 +876,7 @@ impl App {
                 content,
                 ..
             } => {
-                if matches!(&self.crew_stream, Some((_, a)) if *a == author) {
-                    self.flush_crew_stream(true);
-                }
+                self.flush_crew_stream_author(&author);
                 self.flush_stream();
                 self.entries.push(Entry {
                     kind: Kind::Info,
@@ -888,7 +913,9 @@ impl App {
             }
             ApiEvent::Done { text, messages } => {
                 if let Some(i) = self.streaming {
-                    self.entries[i].text = text.clone();
+                    if let Some(e) = self.entries.get_mut(i) {
+                        e.text = text.clone();
+                    }
                 } else if !text.is_empty() {
                     self.entries.push(Entry {
                         kind: Kind::Bot,
@@ -952,7 +979,7 @@ impl App {
         self.entries.clear();
         self.streaming = None;
         self.reasoning = None;
-        self.crew_stream = None;
+        self.crew_stream.clear();
         self.attachments.clear();
         self.sid = st.id.clone();
         if let Ok(mut g) = self.mcp_session.write() {
@@ -1002,7 +1029,7 @@ impl App {
         self.confirm_feedback = false;
         self.streaming = None;
         self.reasoning = None;
-        self.crew_stream = None;
+        self.crew_stream.clear();
         self.info("cancelled");
         self.status = self.status_line();
         crate::snapshot::end_turn();
@@ -2015,6 +2042,10 @@ impl App {
                 self.info(out);
             }
             "open" | "resume" => {
+                if crate::crew::is_running() {
+                    self.info("a crew is running — its live replies would land in the wrong panel, /crew stop first");
+                    return;
+                }
                 let Some(id) = parts.next() else {
                     self.info(format!("/crew open|resume <id> — {USAGE}"));
                     return;
@@ -2220,7 +2251,9 @@ impl App {
             "/clear" | "/new" => {
                 self.session.clear();
                 self.entries.clear();
-                self.crew_stream = None;
+                self.crew_stream.clear();
+                self.streaming = None;
+                self.reasoning = None;
                 self.attachments.clear();
                 self.allow_all.store(false, Ordering::Relaxed);
                 self.queue.lock().unwrap().clear();
