@@ -69,6 +69,8 @@ pub enum ApiEvent {
         author: String,
         delta: String,
     },
+    /// crew finished (status done) — the frontends ring a bell / notify
+    Bell,
     Done {
         text: String,
         messages: Vec<Message>,

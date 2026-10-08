@@ -12,6 +12,17 @@
 //! usage rows are recorded per member — the `/crew usage` report splits
 //! tokens and cost by participants.
 //!
+//! background workers: members flagged "bg" run their turn in parallel
+//! with the rest of the round instead of blocking it — they are spawned as
+//! soon as their turn comes, stream live, and their report is merged into
+//! the transcript as soon as it lands. bg workers cannot raise interactive
+//! permission prompts; tools that would ask are denied (allow them in the
+//! perm config instead).
+//!
+//! preflight: before any paid call the runner checks every member's
+//! profile/model/api-key and fails up front with the full list of problems
+//! instead of dying mid-round.
+//!
 //! money: a crew-wide dollar budget ("budget=5") auto-stops everything once
 //! the summed cost of all members crosses it — token limits are per member,
 //! the budget is what actually burns cash.
@@ -62,6 +73,9 @@ pub struct Member {
     /// reviewer: DONE claims need this member's "APPROVE:" to end the crew
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub review: bool,
+    /// background worker: runs its turn in parallel, not blocking the round
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bg: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -256,12 +270,15 @@ pub fn parse_member(spec: &str, taken: &[Member]) -> Result<Member> {
     let mut limit = None;
     let mut tools = false;
     let mut review = false;
+    let mut bg = false;
     for part in rest.iter().skip(1) {
         let lower = part.to_lowercase();
         if lower == "tools" {
             tools = true;
         } else if lower == "review" {
             review = true;
+        } else if lower == "bg" {
+            bg = true;
         } else if let Some(v) = lower.strip_prefix("limit=") {
             limit = parse_limit(v)?;
         } else if let Some(v) = lower.strip_prefix("budget=") {
@@ -300,6 +317,7 @@ pub fn parse_member(spec: &str, taken: &[Member]) -> Result<Member> {
         limit,
         tools,
         review,
+        bg,
     })
 }
 
@@ -393,6 +411,50 @@ pub fn set_budget(crew_id: &str, budget: Option<f64>) -> Result<Crew> {
     crew.updated = now();
     save(&crew)?;
     Ok(crew)
+}
+
+/// preflight: every member must resolve to a usable provider config before
+/// the crew starts paying — missing keys, empty models or unknown provider
+/// kinds are reported all at once instead of failing mid-round
+pub fn preflight(crew: &Crew, cfg: &crate::config::Config) -> Result<()> {
+    let mut errs: Vec<String> = Vec::new();
+    for m in &crew.members {
+        let pc = cfg.provider_for(m.profile.as_deref(), m.model.as_deref());
+        if pc.model.trim().is_empty() {
+            errs.push(format!(
+                "{}: no model configured (profile {:?})",
+                m.name, m.profile
+            ));
+            continue;
+        }
+        let key = pc
+            .api_key
+            .clone()
+            .or_else(|| cfg.api_key())
+            .filter(|k| !k.trim().is_empty());
+        match key {
+            None => errs.push(format!(
+                "{}: no api key (profile {:?}) — settings > provider",
+                m.name, m.profile
+            )),
+            Some(k) => {
+                if let Err(e) = crate::provider::build(&pc.kind, pc.base_url.clone(), k) {
+                    errs.push(format!("{}: {e:#}", m.name));
+                }
+            }
+        }
+    }
+    if errs.is_empty() {
+        Ok(())
+    } else {
+        bail!("preflight failed:\n  {}", errs.join("\n  "))
+    }
+}
+
+/// preflight by crew id (the gui calls this before spawning the runner)
+pub fn preflight_id(crew_id: &str, cfg: &crate::config::Config) -> Result<()> {
+    let crew = load(crew_id)?;
+    preflight(&crew, cfg)
 }
 
 /// total cost burned by the whole crew so far (all members + auto-summary)
@@ -539,6 +601,13 @@ fn crew_system_prompt(crew: &Crew, member: &Member) -> String {
     } else {
         s.push_str("- The crew chat has no file or shell tools for you.\n");
     }
+    if member.bg {
+        s.push_str(
+            "- You are a background worker: your turn runs in parallel while the rest of the \
+             crew keeps talking. Take your time, use your tools, and make your single reply \
+             a complete report of the work — the crew reads it as soon as it lands.\n",
+        );
+    }
     if placeholder {
         s.push_str(
             "- Your name is a placeholder. If you want your own callsign, start this first \
@@ -572,9 +641,16 @@ fn crew_system_prompt(crew: &Crew, member: &Member) -> String {
     );
     let skills = crate::skills::spec_description();
     if !skills.is_empty() {
-        s.push_str(&format!(
-            "\nSkills the crew members can load in their own sessions (context only):\n{skills}\n"
-        ));
+        if member.tools {
+            s.push_str(&format!(
+                "\nSkills you can load right here with the skill tool (scripts they bundle \
+                 run via bash from their folder):\n{skills}\n"
+            ));
+        } else {
+            s.push_str(&format!(
+                "\nSkills the crew members can load in their own sessions (context only):\n{skills}\n"
+            ));
+        }
     }
     s
 }
@@ -834,6 +910,8 @@ async fn step_inner(
             ));
         }
     }
+    // preflight: fail up front, never mid-round after money was spent
+    preflight(&crew, cfg)?;
     crew.status = "running".into();
     crew.updated = now();
     save(&crew)?;
@@ -841,6 +919,9 @@ async fn step_inner(
 
     let mut note = String::new();
     let mut done = false;
+    // background workers: spawned tasks + a registry their results land in
+    let results: std::sync::Arc<Mutex<Vec<WorkerOut>>> = Default::default();
+    let mut workers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     'rounds: for _ in 0..rounds.max(1) {
         let order: Vec<String> = crew.members.iter().map(|m| m.name.clone()).collect();
         let mut queue = order.clone();
@@ -883,6 +964,50 @@ async fn step_inner(
                     let _ = tx.send(ApiEvent::Note(msg));
                     continue;
                 }
+            }
+            // background worker: spawn the turn and keep the round moving
+            if member.bg {
+                skipped_all = false;
+                match member_request(&crew, &member, cfg, summary.as_deref()) {
+                    Ok((provider, req, pc)) => {
+                        let results = results.clone();
+                        let wtx = tx.clone();
+                        let wcfg = cfg.clone();
+                        let wmember = member.clone();
+                        let cid = crew.id.clone();
+                        workers.push(tokio::spawn(async move {
+                            let (res, rows) = run_member_turn(
+                                provider, req, &cid, &pc, &wmember, &wcfg, &wtx, false,
+                            )
+                            .await;
+                            let out = res.map(|text| (text, rows));
+                            // publish as soon as it is ready, not when the round ends
+                            if let Ok((text, _)) = &out {
+                                let _ = wtx.send(ApiEvent::Crew {
+                                    id: cid,
+                                    author: wmember.name.clone(),
+                                    role: wmember.role.clone(),
+                                    content: text.clone(),
+                                });
+                            }
+                            results.lock().unwrap().push(WorkerOut {
+                                member: wmember,
+                                res: out,
+                            });
+                        }));
+                    }
+                    Err(e) => {
+                        let msg = format!("{name}: error — {e:#}");
+                        crew.messages.push(CrewMsg {
+                            author: "crew".into(),
+                            kind: "system".into(),
+                            content: msg.clone(),
+                            ts: now(),
+                        });
+                        let _ = tx.send(ApiEvent::Note(msg));
+                    }
+                }
+                continue;
             }
             skipped_all = false;
             let mut spent_rows: Vec<UsageRow> = Vec::new();
@@ -968,169 +1093,10 @@ async fn step_inner(
                 content: reply.clone(),
             });
             if let Some(done_line) = extract_line(&reply, "DONE:") {
-                // peer review gate: reviewers must APPROVE before the crew ends
-                let reviewers: Vec<Member> = crew
-                    .members
-                    .iter()
-                    .filter(|m| m.review && !m.name.eq_ignore_ascii_case(&author))
-                    .cloned()
-                    .collect();
-                let finish = |crew: &mut Crew| -> Result<()> {
-                    crew.memory.push(Memo {
-                        author: "crew".into(),
-                        content: format!(
-                            "goal done: {}",
-                            done_line.chars().take(300).collect::<String>()
-                        ),
-                        ts: now(),
-                    });
-                    if crew.memory.len() > MEMORY_CAP {
-                        let drop = crew.memory.len() - MEMORY_CAP;
-                        crew.memory.drain(0..drop);
-                    }
-                    crew.status = "done".into();
-                    save(crew)
-                };
-                if reviewers.is_empty() {
-                    finish(&mut crew)?;
+                if review_done(&mut crew, &author, &done_line, cfg, tx, summary.as_deref()).await? {
                     done = true;
                     break 'rounds;
                 }
-                crew.messages.push(CrewMsg {
-                    author: "crew".into(),
-                    kind: "system".into(),
-                    content: format!(
-                        "peer review requested — {author} says the goal is done: {done_line}"
-                    ),
-                    ts: now(),
-                });
-                let names: Vec<String> = reviewers.iter().map(|m| m.name.clone()).collect();
-                let _ = tx.send(ApiEvent::Note(format!(
-                    "crew: peer review requested — {}",
-                    names.join(", ")
-                )));
-                let mut approved = 0usize;
-                let mut asked = 0usize;
-                let mut rejected: Vec<String> = Vec::new();
-                for r in &reviewers {
-                    if CANCEL.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    // reviewers burn money too: the budget gates them as well
-                    if let Some(b) = crew.budget.filter(|b| *b > 0.0) {
-                        if crew_spent(&crew) >= b {
-                            rejected.push(format!(
-                                "{}: skipped, crew budget spent (${:.2} of ${b:.2})",
-                                r.name,
-                                crew_spent(&crew)
-                            ));
-                            continue;
-                        }
-                    }
-                    let used = member_used(&crew, &r.name);
-                    if let Some(limit) = r.limit {
-                        if limit > 0 && used >= limit {
-                            continue;
-                        }
-                    }
-                    asked += 1;
-                    let mut spent_rows: Vec<UsageRow> = Vec::new();
-                    match ask_member(&crew, r, cfg, tx, summary.as_deref(), &mut spent_rows).await {
-                        Ok(text) => {
-                            if !spent_rows.is_empty() {
-                                crew.usage
-                                    .entry(r.name.clone())
-                                    .or_default()
-                                    .extend(std::mem::take(&mut spent_rows));
-                            }
-                            // a placeholder reviewer may pick its callsign here too
-                            let r_author = extract_line(&text, "RENAME:")
-                                .and_then(|raw| try_rename(&mut crew, &r.name, &raw, tx))
-                                .unwrap_or_else(|| r.name.clone());
-                            for memo in extract_lines(&text, "MEMO:") {
-                                crew.memory.push(Memo {
-                                    author: r_author.clone(),
-                                    content: memo.chars().take(500).collect(),
-                                    ts: now(),
-                                });
-                            }
-                            if crew.memory.len() > MEMORY_CAP {
-                                let drop = crew.memory.len() - MEMORY_CAP;
-                                crew.memory.drain(0..drop);
-                            }
-                            crew.messages.push(CrewMsg {
-                                author: r_author.clone(),
-                                kind: "agent".into(),
-                                content: text.clone(),
-                                ts: now(),
-                            });
-                            crew.updated = now();
-                            let _ = tx.send(ApiEvent::Crew {
-                                id: crew.id.clone(),
-                                author: r_author.clone(),
-                                role: r.role.clone(),
-                                content: text.clone(),
-                            });
-                            if extract_line(&text, "APPROVE:").is_some() {
-                                approved += 1;
-                            } else if let Some(ch) = extract_line(&text, "CHANGES:") {
-                                rejected.push(format!("{}: {}", r_author, trunc(&ch, 120)));
-                            } else {
-                                rejected.push(format!("{}: no APPROVE", r_author));
-                            }
-                        }
-                        Err(e) => {
-                            if !spent_rows.is_empty() {
-                                crew.usage
-                                    .entry(r.name.clone())
-                                    .or_default()
-                                    .extend(spent_rows);
-                            }
-                            rejected.push(format!("{}: error — {e:#}", r.name));
-                        }
-                    }
-                }
-                // cancelled mid-review: persist and bail out of the whole step
-                if CANCEL.load(Ordering::Relaxed) {
-                    save(&crew)?;
-                    break 'rounds;
-                }
-                save(&crew)?;
-                if asked == 0 {
-                    // nobody could review (limits spent) — accept the claim
-                    let msg = "peer review unavailable — DONE accepted".to_string();
-                    crew.messages.push(CrewMsg {
-                        author: "crew".into(),
-                        kind: "system".into(),
-                        content: msg.clone(),
-                        ts: now(),
-                    });
-                    let _ = tx.send(ApiEvent::Note(msg));
-                    finish(&mut crew)?;
-                    done = true;
-                    break 'rounds;
-                }
-                if approved == asked {
-                    let _ = tx.send(ApiEvent::Note(format!(
-                        "crew: peer review approved ({})",
-                        names.join(", ")
-                    )));
-                    finish(&mut crew)?;
-                    done = true;
-                    break 'rounds;
-                }
-                let msg = format!(
-                    "peer review: not approved — crew continues ({})",
-                    rejected.join("; ")
-                );
-                crew.messages.push(CrewMsg {
-                    author: "crew".into(),
-                    kind: "system".into(),
-                    content: msg.clone(),
-                    ts: now(),
-                });
-                let _ = tx.send(ApiEvent::Note(msg));
-                save(&crew)?;
                 continue;
             }
             // @mention steering: the named member speaks next
@@ -1140,12 +1106,65 @@ async fn step_inner(
                     queue.insert(0, picked);
                 }
             }
+            // merge whatever background workers finished while we waited
+            if drain_workers(
+                &mut crew,
+                &results,
+                cfg,
+                tx,
+                summary.as_deref(),
+                &mut queue,
+                true,
+            )
+            .await?
+            {
+                done = true;
+                break 'rounds;
+            }
+        }
+        // background workers get to finish their round before a new one starts
+        for h in workers.drain(..) {
+            let _ = h.await;
+        }
+        if drain_workers(
+            &mut crew,
+            &results,
+            cfg,
+            tx,
+            summary.as_deref(),
+            &mut queue,
+            true,
+        )
+        .await?
+        {
+            done = true;
+            break 'rounds;
         }
         // every member is over its budget — stop the crew instead of spinning
         if skipped_all {
             note.push_str(" (all members hit their token limits)");
             break;
         }
+    }
+    // never lose paid work: whatever bg workers were still running when the
+    // step ended is awaited and recorded here (a DONE claim from them only
+    // counts if the crew has not finished yet)
+    for h in workers.drain(..) {
+        let _ = h.await;
+    }
+    let mut empty_queue: Vec<String> = Vec::new();
+    if drain_workers(
+        &mut crew,
+        &results,
+        cfg,
+        tx,
+        summary.as_deref(),
+        &mut empty_queue,
+        !done,
+    )
+    .await?
+    {
+        done = true;
     }
     if !done {
         crew.status = "idle".into();
@@ -1161,14 +1180,295 @@ async fn step_inner(
     ))
 }
 
-/// the tool subset a tool-enabled crew member may call
+/// a finished background worker's turn: the member it ran for and the
+/// outcome (reply text + usage rows, or the error)
+struct WorkerOut {
+    member: Member,
+    res: Result<(String, Vec<UsageRow>)>,
+}
+
+/// peer review gate: a DONE claim only ends the crew after every askable
+/// reviewer answers with "APPROVE:"; returns true when the crew finished
+async fn review_done(
+    crew: &mut Crew,
+    author: &str,
+    done_line: &str,
+    cfg: &crate::config::Config,
+    tx: &UnboundedSender<ApiEvent>,
+    summary: Option<&str>,
+) -> Result<bool> {
+    let reviewers: Vec<Member> = crew
+        .members
+        .iter()
+        .filter(|m| m.review && !m.name.eq_ignore_ascii_case(author))
+        .cloned()
+        .collect();
+    let finish = |crew: &mut Crew| -> Result<()> {
+        crew.memory.push(Memo {
+            author: "crew".into(),
+            content: format!(
+                "goal done: {}",
+                done_line.chars().take(300).collect::<String>()
+            ),
+            ts: now(),
+        });
+        if crew.memory.len() > MEMORY_CAP {
+            let drop = crew.memory.len() - MEMORY_CAP;
+            crew.memory.drain(0..drop);
+        }
+        crew.status = "done".into();
+        save(crew)
+    };
+    if reviewers.is_empty() {
+        finish(crew)?;
+        return Ok(true);
+    }
+    crew.messages.push(CrewMsg {
+        author: "crew".into(),
+        kind: "system".into(),
+        content: format!("peer review requested — {author} says the goal is done: {done_line}"),
+        ts: now(),
+    });
+    let names: Vec<String> = reviewers.iter().map(|m| m.name.clone()).collect();
+    let _ = tx.send(ApiEvent::Note(format!(
+        "crew: peer review requested — {}",
+        names.join(", ")
+    )));
+    let mut approved = 0usize;
+    let mut asked = 0usize;
+    let mut rejected: Vec<String> = Vec::new();
+    for r in &reviewers {
+        if CANCEL.load(Ordering::Relaxed) {
+            break;
+        }
+        // reviewers burn money too: the budget gates them as well
+        if let Some(b) = crew.budget.filter(|b| *b > 0.0) {
+            if crew_spent(crew) >= b {
+                rejected.push(format!(
+                    "{}: skipped, crew budget spent (${:.2} of ${b:.2})",
+                    r.name,
+                    crew_spent(crew)
+                ));
+                continue;
+            }
+        }
+        let used = member_used(crew, &r.name);
+        if let Some(limit) = r.limit {
+            if limit > 0 && used >= limit {
+                continue;
+            }
+        }
+        asked += 1;
+        let mut spent_rows: Vec<UsageRow> = Vec::new();
+        match ask_member(crew, r, cfg, tx, summary, &mut spent_rows).await {
+            Ok(text) => {
+                if !spent_rows.is_empty() {
+                    crew.usage
+                        .entry(r.name.clone())
+                        .or_default()
+                        .extend(std::mem::take(&mut spent_rows));
+                }
+                // a placeholder reviewer may pick its callsign here too
+                let r_author = extract_line(&text, "RENAME:")
+                    .and_then(|raw| try_rename(crew, &r.name, &raw, tx))
+                    .unwrap_or_else(|| r.name.clone());
+                for memo in extract_lines(&text, "MEMO:") {
+                    crew.memory.push(Memo {
+                        author: r_author.clone(),
+                        content: memo.chars().take(500).collect(),
+                        ts: now(),
+                    });
+                }
+                if crew.memory.len() > MEMORY_CAP {
+                    let drop = crew.memory.len() - MEMORY_CAP;
+                    crew.memory.drain(0..drop);
+                }
+                crew.messages.push(CrewMsg {
+                    author: r_author.clone(),
+                    kind: "agent".into(),
+                    content: text.clone(),
+                    ts: now(),
+                });
+                crew.updated = now();
+                let _ = tx.send(ApiEvent::Crew {
+                    id: crew.id.clone(),
+                    author: r_author.clone(),
+                    role: r.role.clone(),
+                    content: text.clone(),
+                });
+                if extract_line(&text, "APPROVE:").is_some() {
+                    approved += 1;
+                } else if let Some(ch) = extract_line(&text, "CHANGES:") {
+                    rejected.push(format!("{}: {}", r_author, trunc(&ch, 120)));
+                } else {
+                    rejected.push(format!("{}: no APPROVE", r_author));
+                }
+            }
+            Err(e) => {
+                if !spent_rows.is_empty() {
+                    crew.usage
+                        .entry(r.name.clone())
+                        .or_default()
+                        .extend(spent_rows);
+                }
+                rejected.push(format!("{}: error — {e:#}", r.name));
+            }
+        }
+    }
+    // cancelled mid-review: persist and let the caller unwind
+    if CANCEL.load(Ordering::Relaxed) {
+        save(crew)?;
+        return Ok(false);
+    }
+    save(crew)?;
+    if asked == 0 {
+        // nobody could review (limits spent) — accept the claim
+        let msg = "peer review unavailable — DONE accepted".to_string();
+        crew.messages.push(CrewMsg {
+            author: "crew".into(),
+            kind: "system".into(),
+            content: msg.clone(),
+            ts: now(),
+        });
+        let _ = tx.send(ApiEvent::Note(msg));
+        finish(crew)?;
+        return Ok(true);
+    }
+    if approved == asked {
+        let _ = tx.send(ApiEvent::Note(format!(
+            "crew: peer review approved ({})",
+            names.join(", ")
+        )));
+        finish(crew)?;
+        return Ok(true);
+    }
+    let msg = format!(
+        "peer review: not approved — crew continues ({})",
+        rejected.join("; ")
+    );
+    crew.messages.push(CrewMsg {
+        author: "crew".into(),
+        kind: "system".into(),
+        content: msg.clone(),
+        ts: now(),
+    });
+    let _ = tx.send(ApiEvent::Note(msg));
+    save(crew)?;
+    Ok(false)
+}
+
+/// merge finished background workers into the transcript; returns true when
+/// one of them claimed DONE and the review gate accepted it. the worker's
+/// own Crew event already went out live, so nothing is re-broadcast here;
+/// allow_done=false records the reply but ignores its DONE claim (the crew
+/// already finished)
+async fn drain_workers(
+    crew: &mut Crew,
+    results: &std::sync::Arc<Mutex<Vec<WorkerOut>>>,
+    cfg: &crate::config::Config,
+    tx: &UnboundedSender<ApiEvent>,
+    summary: Option<&str>,
+    queue: &mut Vec<String>,
+    allow_done: bool,
+) -> Result<bool> {
+    let outs: Vec<WorkerOut> = results.lock().unwrap().drain(..).collect();
+    for out in outs {
+        let member = out.member;
+        let text = match out.res {
+            Ok((text, rows)) => {
+                if !rows.is_empty() {
+                    crew.usage
+                        .entry(member.name.clone())
+                        .or_default()
+                        .extend(rows);
+                    if let Some(limit) = member.limit {
+                        if limit > 0 && member_used(crew, &member.name) >= limit {
+                            let msg = format!(
+                                "{}: token limit reached ({limit}) — auto-stopped",
+                                member.name
+                            );
+                            crew.messages.push(CrewMsg {
+                                author: "crew".into(),
+                                kind: "system".into(),
+                                content: msg.clone(),
+                                ts: now(),
+                            });
+                            let _ = tx.send(ApiEvent::Note(msg));
+                        }
+                    }
+                }
+                text
+            }
+            Err(e) => {
+                let msg = format!("{}: error — {e:#}", member.name);
+                crew.messages.push(CrewMsg {
+                    author: "crew".into(),
+                    kind: "system".into(),
+                    content: msg.clone(),
+                    ts: now(),
+                });
+                let _ = tx.send(ApiEvent::Note(msg));
+                save(crew)?;
+                continue;
+            }
+        };
+        let renamed =
+            extract_line(&text, "RENAME:").and_then(|raw| try_rename(crew, &member.name, &raw, tx));
+        let author = renamed.unwrap_or_else(|| member.name.clone());
+        for memo in extract_lines(&text, "MEMO:") {
+            crew.memory.push(Memo {
+                author: author.clone(),
+                content: memo.chars().take(500).collect(),
+                ts: now(),
+            });
+        }
+        if crew.memory.len() > MEMORY_CAP {
+            let drop = crew.memory.len() - MEMORY_CAP;
+            crew.memory.drain(0..drop);
+        }
+        crew.messages.push(CrewMsg {
+            author: author.clone(),
+            kind: "agent".into(),
+            content: text.clone(),
+            ts: now(),
+        });
+        crew.updated = now();
+        save(crew)?;
+        // a worker's handoff steers the rest of the round
+        if let Some(target) = first_mention(&text) {
+            if let Some(pos) = queue.iter().position(|n| n.eq_ignore_ascii_case(&target)) {
+                let picked = queue.remove(pos);
+                queue.insert(0, picked);
+            }
+        }
+        if allow_done {
+            if let Some(done_line) = extract_line(&text, "DONE:") {
+                if review_done(crew, &author, &done_line, cfg, tx, summary).await? {
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// the tool subset a tool-enabled crew member may call; the skill tool
+/// rides along whenever any skill is discovered, so a tools member can load
+/// skill instructions (and run bundled scripts via bash) mid-round
 pub fn crew_tool_specs() -> Vec<crate::provider::ToolSpec> {
     crate::tools::specs()
         .into_iter()
         .filter(|s| {
             matches!(
                 s.name.as_str(),
-                "bash" | "read_file" | "write_file" | "edit" | "list_files" | "glob" | "grep"
+                "bash"
+                    | "read_file"
+                    | "write_file"
+                    | "edit"
+                    | "list_files"
+                    | "glob"
+                    | "grep"
+                    | "skill"
             )
         })
         .collect()
@@ -1270,42 +1570,45 @@ async fn member_call(
 
 /// one member's turn: tool-less members stream a single call, tool-enabled
 /// ones run a short agentic loop where every call goes through the
-/// permission config (Confirm events ride the same channel)
-async fn ask_member(
-    crew: &Crew,
+/// permission config (Confirm events ride the same channel); background
+/// workers run with interactive=false — tools that would ask the user are
+/// denied with an explanation instead of raising a prompt nobody may see
+#[allow(clippy::too_many_arguments)]
+async fn run_member_turn(
+    provider: std::sync::Arc<dyn crate::provider::Provider>,
+    mut req: ChatRequest,
+    crew_id: &str,
+    pc: &crate::config::ProviderConfig,
     member: &Member,
     cfg: &crate::config::Config,
     tx: &UnboundedSender<ApiEvent>,
-    summary: Option<&str>,
-    spent: &mut Vec<UsageRow>,
-) -> Result<String> {
-    let (provider, mut req, pc) = member_request(crew, member, cfg, summary)?;
+    interactive: bool,
+) -> (Result<String>, Vec<UsageRow>) {
     if !member.tools {
         let (res, rows) = member_call(
             provider.as_ref(),
             &req,
-            &crew.id,
+            crew_id,
             &member.name,
             &pc.model,
             &pc.kind,
             tx,
         )
         .await;
-        spent.extend(rows);
-        let (text, _calls) = res?;
-        return Ok(text);
+        return (res.map(|(text, _)| text), rows);
     }
 
     const MAX_TOOL_ROUNDS: usize = 8;
     let mut perm = cfg.permissions.clone();
     let mut msgs = req.messages.clone();
+    let mut spent: Vec<UsageRow> = Vec::new();
     let mut text = String::new();
     for round in 0..=MAX_TOOL_ROUNDS {
         req.messages = msgs.clone();
         let (res, rows) = member_call(
             provider.as_ref(),
             &req,
-            &crew.id,
+            crew_id,
             &member.name,
             &pc.model,
             &pc.kind,
@@ -1313,15 +1616,19 @@ async fn ask_member(
         )
         .await;
         spent.extend(rows);
-        let (t, calls) = res?;
+        let (t, calls) = match res {
+            Ok(x) => x,
+            Err(e) => return (Err(e), spent),
+        };
         if calls.is_empty() || round == MAX_TOOL_ROUNDS {
             text = t;
             break;
         }
         msgs.push(Message::new(crate::chat::Role::Assistant, t).with_calls(calls.clone()));
         for call in calls {
+            let tag = if member.bg { " · bg" } else { "" };
             let _ = tx.send(ApiEvent::Tool {
-                name: format!("{} (crew {})", call.name, member.name),
+                name: format!("{} (crew {}{})", call.name, member.name, tag),
                 detail: crate::tools::detail(&call.name, &call.args),
                 diff: crate::tools::preview(&call.name, &call.args),
                 paths: crate::tools::paths(&call.name, &call.args),
@@ -1338,6 +1645,15 @@ async fn ask_member(
                     msgs.push(tool_msg("denied by permissions config".into()));
                 }
                 crate::perm::Perm::Ask => {
+                    if !interactive {
+                        msgs.push(tool_msg(
+                            "this tool needs the user's permission and background workers \
+                             cannot ask — allow it in the permission config or run this \
+                             member without the bg flag"
+                                .into(),
+                        ));
+                        continue;
+                    }
                     let (otx, orx) = tokio::sync::oneshot::channel();
                     let _ = tx.send(ApiEvent::Confirm {
                         name: call.name.clone(),
@@ -1375,7 +1691,22 @@ async fn ask_member(
             }
         }
     }
-    Ok(text)
+    (Ok(text), spent)
+}
+
+/// one inline member's turn (blocking, may raise confirm prompts)
+async fn ask_member(
+    crew: &Crew,
+    member: &Member,
+    cfg: &crate::config::Config,
+    tx: &UnboundedSender<ApiEvent>,
+    summary: Option<&str>,
+    spent: &mut Vec<UsageRow>,
+) -> Result<String> {
+    let (provider, req, pc) = member_request(crew, member, cfg, summary)?;
+    let (res, rows) = run_member_turn(provider, req, &crew.id, &pc, member, cfg, tx, true).await;
+    spent.extend(rows);
+    res
 }
 
 fn extract_line(text: &str, prefix: &str) -> Option<String> {
@@ -1685,6 +2016,7 @@ pub fn state_json(crew_id: &str) -> Result<serde_json::Value> {
                 "limit": m.limit,
                 "tools": m.tools,
                 "review": m.review,
+                "bg": m.bg,
                 "used": member_used(&crew, &m.name),
             })
         })
@@ -1755,6 +2087,7 @@ mod tests {
             limit: None,
             tools: false,
             review: false,
+            bg: false,
         }
     }
 
@@ -2048,6 +2381,10 @@ mod tests {
         assert_eq!(m.limit, Some(1_000));
         let m = parse_member("Nora|critic", &taken).unwrap();
         assert!(!m.review);
+        let m = parse_member("Bolt|builder|bg|tools", &taken).unwrap();
+        assert!(m.bg && m.tools);
+        let m = parse_member("Bolt|builder", &taken).unwrap();
+        assert!(!m.bg);
     }
 
     #[test]
@@ -2226,5 +2563,45 @@ mod tests {
         delete(&crew.id).unwrap();
         std::env::remove_var("HI_DEROLA_CREW_DIR");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn preflight_reports_all_bad_members_at_once() {
+        let crew = Crew {
+            id: "s-1-preflight".into(),
+            goal: "g".into(),
+            status: "idle".into(),
+            members: vec![member("rex", "planner"), member("nora", "critic")],
+            messages: vec![],
+            usage: BTreeMap::new(),
+            memory: Vec::new(),
+            budget: None,
+            summary: None,
+            summary_upto: 0,
+            created: 0,
+            updated: 0,
+        };
+        // no key anywhere: both members are reported in one message
+        let cfg: crate::config::Config =
+            toml::from_str("[provider]\ntype = \"openai\"\nmodel = \"m\"\n").unwrap();
+        let err = preflight(&crew, &cfg).unwrap_err().to_string();
+        assert!(err.contains("rex"), "{err}");
+        assert!(err.contains("nora"), "{err}");
+        assert!(err.contains("preflight failed"), "{err}");
+        // a key on the base provider fixes both
+        let cfg: crate::config::Config =
+            toml::from_str("[provider]\ntype = \"openai\"\nmodel = \"m\"\napi_key = \"sk-test\"\n")
+                .unwrap();
+        preflight(&crew, &cfg).unwrap();
+        // an unknown provider kind is surfaced as a preflight failure too
+        let cfg: crate::config::Config =
+            toml::from_str("[provider]\ntype = \"nope\"\nmodel = \"m\"\napi_key = \"sk-test\"\n")
+                .unwrap();
+        assert!(preflight(&crew, &cfg).is_err());
+        // an empty model is a failure even with a key
+        let cfg: crate::config::Config =
+            toml::from_str("[provider]\ntype = \"openai\"\nmodel = \"\"\napi_key = \"sk-test\"\n")
+                .unwrap();
+        assert!(preflight(&crew, &cfg).is_err());
     }
 }
