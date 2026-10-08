@@ -64,6 +64,8 @@ pub struct App {
     pub confirm_feedback: bool,
     pub attachments: Vec<(String, String)>,
     pub streaming: Option<usize>,
+    /// live streaming crew reply: entry index + author name
+    pub crew_stream: Option<(usize, String)>,
     pub reasoning: Option<usize>,
     pub tokens_in: u64,
     pub tokens_out: u64,
@@ -87,7 +89,7 @@ pub struct App {
 
 const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config (into the active profile when one is set)\n  /model         show current model\n  /models        list models available for the api key\n  /profile [name] switch provider profile (bare = list, \"none\" = back to the base [provider] section)\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /sessions      list saved sessions\n  /resume [id]   switch to a saved session (latest by default)\n  /mcpauth [name] mcp OAuth status, or authorize a remote server in browser; /mcpauth <name> <code> finishes a flow with a pasted authorization code (resume after a restart)\n  /mcpres [server]  list mcp resources and uri templates\n  /mcpstatus     per-server status: connected/failed/needs auth/crashed\n  /mcpread <server> <uri> read an mcp resource into the chat\n  /mcpprompt [server] <name> [k=v] use an mcp prompt (no args lists prompts)\n  /mcpsub <server> <uri> subscribe to mcp resource updates (land in chat)\n  /mcpunsub <server> <uri> stop the subscription\n  /mcplog [server]  recent mcp log messages; /mcplog set <server|all> <level> sets the minimum level\n  /mcpadd <name> <url|command...> add a server at runtime (saved to config) and connect it\n  /mcpconnect <name> (re)connect a configured server\n  /mcpdisconnect <name> drop the live connection (config untouched)\n  /mcplogout <name> drop the stored oauth tokens; a fresh /mcpauth flow starts on next use\n  /jstools [reload] list user JS tools (.hi-derola/tools/), optional rescan\n  /doctor        environment self-check: config/provider, ssh, qemu+accel, lsp servers, formatters, mcp, sandbox
   /update        check github releases and swap the running binary if a newer one exists
-  /usage         token/cost report for this session (per-model breakdown, prices, context fill)\n  /sandbox       local VM sandboxes: bare = list; /sandbox start|stop|attach|detach <id|name>; /sandbox new <name> [debian|debian-std|ubuntu|ubuntu-std|custom=<path>] [ram=2048] [cpus=2] [disk=20] [login=x] [root=on|off]; /sandbox fetch|push <id|name> <path> [dest]; /sandbox term <id|name> [agent]; /sandbox fwd <id|name> add <host-port> <guest-port> [guest-host] | list | del <host-port> — attach routes bash into the VM over ssh\n  /host          remote hosts: bare = list; /host add <name> <user@host:port>; /host check|attach|detach|del <id|name>; /host term <id|name> [agent]; /host pubkey <id|name> — attach routes bash + file tools over ssh; /undo covers remote edits\n  /skills        skills: bare = list; /skills toggle <name>; /skills install <git-url>\n  /crew          multi-agent sessions: bare = status; /crew new <goal>; /crew add <Name|role[|profile|model]>; /crew del <name>; /crew send <text>; /crew step [rounds]; /crew auto [max-rounds]; /crew stop; /crew usage; /crew show; /crew list; /crew open <id>; /crew drop\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch/mcp_resource + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
+  /usage         token/cost report for this session (per-model breakdown, prices, context fill)\n  /sandbox       local VM sandboxes: bare = list; /sandbox start|stop|attach|detach <id|name>; /sandbox new <name> [debian|debian-std|ubuntu|ubuntu-std|custom=<path>] [ram=2048] [cpus=2] [disk=20] [login=x] [root=on|off]; /sandbox fetch|push <id|name> <path> [dest]; /sandbox term <id|name> [agent]; /sandbox fwd <id|name> add <host-port> <guest-port> [guest-host] | list | del <host-port> — attach routes bash into the VM over ssh\n  /host          remote hosts: bare = list; /host add <name> <user@host:port>; /host check|attach|detach|del <id|name>; /host term <id|name> [agent]; /host pubkey <id|name> — attach routes bash + file tools over ssh; /undo covers remote edits\n  /skills        skills: bare = list; /skills toggle <name>; /skills install <git-url>\n  /crew          multi-agent sessions: bare = status; /crew new <goal>; /crew add <Name|role[|profile|model[|tools|limit=N]]>; /crew del <name>; /crew send <text>; /crew step [rounds]; /crew auto [max-rounds]; /crew stop; /crew limit <name> <n|off>; /crew usage; /crew show; /crew list; /crew open|resume <id>; /crew drop\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch/mcp_resource + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
 
 pub fn help_text() -> &'static str {
     HELP
@@ -163,6 +165,7 @@ impl App {
             confirm_feedback: false,
             attachments: Vec::new(),
             streaming: None,
+            crew_stream: None,
             reasoning: None,
             tokens_in: 0,
             tokens_out: 0,
@@ -690,6 +693,26 @@ impl App {
         }
     }
 
+    /// end the live crew streaming entry; remove=false leaves the partial
+    /// text in the log, remove=true drops the entry (the final reply replaces it)
+    fn flush_crew_stream(&mut self, remove: bool) {
+        if let Some((i, _)) = self.crew_stream.take() {
+            if remove {
+                self.entries.remove(i);
+                if let Some(r) = self.reasoning {
+                    if r > i {
+                        self.reasoning = Some(r - 1);
+                    }
+                }
+                if let Some(s) = self.streaming {
+                    if s > i {
+                        self.streaming = Some(s - 1);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn on_api(&mut self, ev: ApiEvent) {
         match ev {
             ApiEvent::Chunk(s) => {
@@ -790,12 +813,31 @@ impl App {
                 self.info(format!("todo list updated:\n{s}"));
             }
             ApiEvent::BgOut { .. } => {}
+            ApiEvent::CrewChunk { author, delta, .. } => {
+                match &self.crew_stream {
+                    Some((i, a)) if *a == author => {
+                        self.entries[*i].text.push_str(&delta);
+                    }
+                    _ => {
+                        self.flush_crew_stream(true);
+                        self.entries.push(Entry {
+                            kind: Kind::Info,
+                            text: format!("crew \u{25b8} {author}: {delta}"),
+                        });
+                        self.crew_stream = Some((self.entries.len() - 1, author));
+                    }
+                }
+                self.scroll_up = 0;
+            }
             ApiEvent::Crew {
                 author,
                 role,
                 content,
                 ..
             } => {
+                if matches!(&self.crew_stream, Some((_, a)) if *a == author) {
+                    self.flush_crew_stream(true);
+                }
                 self.flush_stream();
                 self.entries.push(Entry {
                     kind: Kind::Info,
@@ -1722,7 +1764,7 @@ impl App {
     }
 
     fn crew_command(&mut self, arg: &str, inflight: &mut Option<tokio::task::JoinHandle<()>>) {
-        const USAGE: &str = "usage: /crew [status] · /crew new <goal> · /crew add <Name|role[|profile|model]> · /crew del <name> · /crew send <text> · /crew step [rounds] · /crew auto [max-rounds] · /crew stop · /crew usage · /crew show · /crew list · /crew open <id> · /crew drop";
+        const USAGE: &str = "usage: /crew [status] · /crew new <goal> · /crew add <Name|role[|profile|model[|tools|limit=N]]> · /crew del <name> · /crew send <text> · /crew step [rounds] · /crew auto [max-rounds] · /crew stop · /crew limit <name> <n|off> · /crew usage · /crew show · /crew list · /crew open|resume <id> · /crew drop";
         let mut parts = arg.split_whitespace();
         let sub = parts.next().unwrap_or("");
         let rest = arg.split_once(' ').map(|(_, r)| r.trim()).unwrap_or("");
@@ -1742,8 +1784,19 @@ impl App {
                     let mut out =
                         format!("crew {} · {} · goal: {}\nmembers:", c.id, c.status, c.goal);
                     for m in &c.members {
+                        let mut extra = String::new();
+                        if m.tools {
+                            extra.push_str(" · tools");
+                        }
+                        if let Some(l) = m.limit {
+                            extra.push_str(&format!(
+                                " · limit:{} used:{}",
+                                l,
+                                crate::crew::member_used(&c, &m.name)
+                            ));
+                        }
                         out.push_str(&format!(
-                            "\n  {} ({}){}{}",
+                            "\n  {} ({}){}{}{}",
                             m.name,
                             m.role,
                             m.profile
@@ -1754,6 +1807,7 @@ impl App {
                                 .as_deref()
                                 .map(|x| format!(" · {x}"))
                                 .unwrap_or_default(),
+                            extra,
                         ));
                     }
                     out.push_str(&format!("\n{} message(s) · {}", c.messages.len(), USAGE));
@@ -1874,15 +1928,68 @@ impl App {
                 }
                 self.info(out);
             }
-            "open" => {
+            "open" | "resume" => {
                 let Some(id) = parts.next() else {
-                    self.info(format!("/crew open <id> — {USAGE}"));
+                    self.info(format!("/crew open|resume <id> — {USAGE}"));
                     return;
                 };
-                match crate::crew::load(id) {
+                // exact id, else unique prefix match over saved crews
+                let resolved = if crate::crew::load(id).is_ok() {
+                    Some(id.to_string())
+                } else {
+                    let matches: Vec<String> = crate::crew::list()
+                        .into_iter()
+                        .filter(|c| c.id.starts_with(id))
+                        .map(|c| c.id)
+                        .collect();
+                    if matches.len() == 1 {
+                        Some(matches[0].clone())
+                    } else {
+                        None
+                    }
+                };
+                match resolved
+                    .ok_or_else(|| anyhow::anyhow!("no crew id matching \"{id}\""))
+                    .and_then(|id| crate::crew::load(&id).map(|c| (id, c)))
+                {
+                    Ok((id, c)) => {
+                        crate::crew::set_active(Some(id.clone()));
+                        self.info(format!(
+                            "crew {id} resumed — goal: {} · {} member(s) · {} message(s) · status {}",
+                            c.goal,
+                            c.members.len(),
+                            c.messages.len(),
+                            c.status
+                        ));
+                    }
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            "limit" => {
+                let Some(id) = need_crew(self) else { return };
+                let Some(name) = parts.next() else {
+                    self.info("/crew limit <name> <tokens|off> — e.g. /crew limit Rex 200k");
+                    return;
+                };
+                let val = parts.next().unwrap_or("");
+                let limit = if val.is_empty() || val.eq_ignore_ascii_case("off") || val == "0" {
+                    None
+                } else {
+                    match crate::crew::parse_limit_opt(val) {
+                        Some(v) => Some(v),
+                        None => {
+                            self.info(format!("bad limit \"{val}\" — use 200000, 200k or off"));
+                            return;
+                        }
+                    }
+                };
+                match crate::crew::set_limit(&id, name, limit) {
                     Ok(c) => {
-                        crate::crew::set_active(Some(c.id.clone()));
-                        self.info(format!("crew {} is now active (status {})", c.id, c.status));
+                        let m = c.members.iter().find(|m| m.name.eq_ignore_ascii_case(name));
+                        self.info(match (m.and_then(|m| m.limit), limit) {
+                            (Some(l), _) => format!("member \"{name}\" limit set to {l} tokens"),
+                            _ => format!("member \"{name}\" limit cleared"),
+                        });
                     }
                     Err(e) => self.info(format!("error: {e:#}")),
                 }
