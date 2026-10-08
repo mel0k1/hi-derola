@@ -329,6 +329,9 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     json!({"t": "todo", "s": s})
                 }
                 ApiEvent::BgOut { id, chunk } => json!({"t": "bgout", "id": id, "s": chunk}),
+                ApiEvent::CrewChunk { id, author, delta } => {
+                    json!({"t": "crewchunk", "id": id, "author": author, "s": delta})
+                }
                 ApiEvent::Crew {
                     id,
                     author,
@@ -2222,9 +2225,15 @@ async fn crew_list() -> Result<Value, String> {
     let list: Vec<Value> = crew::list()
         .into_iter()
         .map(|c| {
+            let mentions: Vec<Value> = c
+                .mentions
+                .into_iter()
+                .map(|(from, to, n)| json!({"from": from, "to": to, "n": n}))
+                .collect();
             json!({
                 "id": c.id, "goal": c.goal, "status": c.status,
                 "members": c.members, "messages": c.messages, "updated": c.updated,
+                "mentions": mentions,
             })
         })
         .collect();
@@ -2344,6 +2353,17 @@ async fn crew_stop() -> Result<(), String> {
 async fn crew_usage(sh: State<'_, Arc<Shared>>) -> Result<Value, String> {
     let id = crew_active_id(&sh).ok_or("no active crew")?;
     crew::usage_json(&id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn crew_limit(
+    sh: State<'_, Arc<Shared>>,
+    name: String,
+    limit: Option<u64>,
+) -> Result<Value, String> {
+    let id = crew_active_id(&sh).ok_or("no active crew")?;
+    crew::set_limit(&id, &name, limit.filter(|v| *v > 0)).map_err(|e| format!("{e:#}"))?;
+    crew::state_json(&id).map_err(|e| format!("{e:#}"))
 }
 
 pub fn run() -> Result<()> {
@@ -2518,7 +2538,8 @@ pub fn run() -> Result<()> {
             crew_step,
             crew_auto,
             crew_stop,
-            crew_usage
+            crew_usage,
+            crew_limit
         ])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow!("{e}"))?;

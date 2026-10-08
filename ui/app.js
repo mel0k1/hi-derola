@@ -871,7 +871,14 @@ async function handleEvent(ev) {
     }
     case "crew": {
       if (!$("crew-view").classList.contains("hidden")) {
+        crewFlushLive();
         renderCrewFeed();
+      }
+      break;
+    }
+    case "crewchunk": {
+      if (!$("crew-view").classList.contains("hidden")) {
+        crewStreamChunk(ev.author, ev.s);
       }
       break;
     }
@@ -2689,7 +2696,7 @@ $("palette-input").addEventListener("keydown", (e) => {
 
 let HOSTS = { list: [], attached: null };
 let SKILLS = { list: [] };
-let CREW = { state: null, usage: null };
+let CREW = { state: null, usage: null, live: null };
 let crewTimer = null;
 
 function showPanelMsg(id, text) {
@@ -2907,6 +2914,7 @@ function renderCrew() {
   const head = $("crew-head");
   const list = $("crew-list");
   const st = CREW.state;
+  crewFlushLive();
   list.replaceChildren();
   if (!st) {
     head.classList.add("hidden");
@@ -2914,6 +2922,11 @@ function renderCrew() {
     $("crew-inputrow").classList.add("hidden");
     $("crew-addrow").classList.add("hidden");
     $("crew-usage-box").classList.add("hidden");
+    $("crew-graph").classList.add("hidden");
+    $("crew-graph-btn").classList.remove("active");
+    $("crew-saved").classList.remove("hidden");
+    $("crew-saved-btn").classList.add("active");
+    refreshCrewSaved();
     list.appendChild(el("div", "sbx-empty", "no active crew — create one: a goal and a few members. agents talk in rounds, @Name steers the next speaker, a DONE: line finishes the goal."));
     return;
   }
@@ -2921,6 +2934,8 @@ function renderCrew() {
   $("crew-controls").classList.remove("hidden");
   $("crew-inputrow").classList.remove("hidden");
   $("crew-addrow").classList.remove("hidden");
+  $("crew-saved").classList.add("hidden");
+  $("crew-saved-btn").classList.remove("active");
   head.replaceChildren();
   const h1 = el("div", "sbx-name", `goal: ${st.goal}`);
   head.appendChild(h1);
@@ -2930,19 +2945,59 @@ function renderCrew() {
   );
   const chips = el("div", "sbx-meta");
   (st.members || []).forEach((m) => {
-    chips.insertAdjacentHTML(
-      "beforeend",
-      `<span class="sbx-kind">${esc(m.name)} · ${esc(m.role)}${m.model ? " · " + esc(m.model) : ""}</span>`
-    );
+    const chip = el("span", "sbx-kind");
+    let label = `${m.name} · ${m.role}`;
+    if (m.model) label += ` · ${m.model}`;
+    if (m.tools) label += " · tools";
+    if (m.limit) label += ` · ${m.used || 0}/${m.limit} tok`;
+    chip.textContent = label;
+    chip.title = "click to set a token limit for this member (off clears it)";
+    chip.style.cursor = "pointer";
+    chip.onclick = async () => {
+      const v = prompt(
+        `token limit for ${m.name} (e.g. 200000, 200k; off to clear)\nused so far: ${m.used || 0}`,
+        m.limit || ""
+      );
+      if (v === null) return;
+      const t = v.trim().toLowerCase();
+      let limit;
+      if (!t || t === "off" || t === "0") {
+        limit = null;
+      } else {
+        limit = crewParseLimit(t);
+        if (limit === undefined) {
+          showPanelMsg("crew-msg", `bad limit "${t}" — use 200000, 200k or off`);
+          return;
+        }
+      }
+      try {
+        const d = await invoke("crew_limit", { name: m.name, limit });
+        CREW.state = d.none ? null : d;
+        CREW.lastJson = null;
+        renderCrew();
+      } catch (e) {
+        showPanelMsg("crew-msg", String(e));
+      }
+    };
+    chips.appendChild(chip);
   });
   head.appendChild(chips);
 
   renderCrewFeed();
+  renderCrewGraph();
+}
+
+function crewParseLimit(t) {
+  const m = t.match(/^(\d+(?:\.\d+)?)([km])?$/);
+  if (!m) return undefined;
+  const mult = m[2] === "k" ? 1e3 : m[2] === "m" ? 1e6 : 1;
+  return Math.round(parseFloat(m[1]) * mult);
 }
 
 function renderCrewFeed() {
   const list = $("crew-list");
   if (!CREW.state) return;
+  crewFlushLive();
   list.replaceChildren();
   for (const m of CREW.state.messages || []) {
     const row = el("div", "crew-msg");
@@ -2959,6 +3014,163 @@ function renderCrewFeed() {
     list.appendChild(row);
   }
   list.scrollTop = list.scrollHeight;
+}
+
+/* live streaming bubble for an in-flight crew reply */
+
+let crewLiveTimer = null;
+
+function crewStreamChunk(author, delta) {
+  const list = $("crew-list");
+  if (!CREW.live || CREW.live.author !== author) {
+    crewFlushLive();
+    const row = el("div", "crew-msg crew-live");
+    row.appendChild(el("div", "crew-author", `${author} · typing…`));
+    const body = el("div", "crew-text");
+    row.appendChild(body);
+    list.appendChild(row);
+    CREW.live = { author, body, raw: "" };
+  }
+  CREW.live.raw += delta;
+  list.scrollTop = list.scrollHeight;
+  if (!crewLiveTimer) {
+    crewLiveTimer = setTimeout(() => {
+      crewLiveTimer = null;
+      if (CREW.live) {
+        CREW.live.body.innerHTML = md(CREW.live.raw);
+        $("crew-list").scrollTop = $("crew-list").scrollHeight;
+      }
+    }, 90);
+  }
+}
+
+function crewFlushLive() {
+  if (crewLiveTimer) {
+    clearTimeout(crewLiveTimer);
+    crewLiveTimer = null;
+  }
+  CREW.live = null;
+  document.querySelectorAll(".crew-live").forEach((n) => n.remove());
+}
+
+/* @mention graph: nodes on a circle, edge weight = stroke width */
+
+function crewGraphSvg(graph) {
+  const nodes = ["you", ...(CREW.state ? CREW.state.members.map((m) => m.name) : [])];
+  if (!nodes.length) return null;
+  const W = 460, H = 260, R = 88, CX = W / 2, CY = H / 2;
+  const pos = new Map();
+  nodes.forEach((n, i) => {
+    const a = (i / nodes.length) * Math.PI * 2 - Math.PI / 2;
+    pos.set(n, [CX + R * Math.cos(a), CY + R * Math.sin(a)]);
+  });
+  let svg = `<svg viewBox="0 0 ${W} ${H}" class="crew-graph-svg">`;
+  svg += `<defs><marker id="crew-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="crew-arrow-head"/></marker></defs>`;
+  const maxN = Math.max(1, ...(graph || []).map((g) => g.n));
+  for (const g of graph || []) {
+    const a = pos.get(g.from), b = pos.get(g.to);
+    if (!a || !b) continue;
+    const w = 1 + (g.n / maxN) * 4;
+    svg += `<line x1="${a[0]}" y1="${a[1]}" x2="${b[0]}" y2="${b[1]}" stroke-width="${w.toFixed(1)}" marker-end="url(#crew-arrow)" class="crew-edge"/>`;
+    const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+    svg += `<text x="${mx}" y="${my - 4}" text-anchor="middle" class="crew-edge-n">${g.n}</text>`;
+  }
+  for (const n of nodes) {
+    const [x, y] = pos.get(n);
+    svg += `<circle cx="${x}" cy="${y}" r="17" class="crew-node${n === "you" ? " crew-node-you" : ""}"/>`;
+    svg += `<text x="${x}" y="${y + 4}" text-anchor="middle" class="crew-node-label">${esc(n.slice(0, 8))}</text>`;
+  }
+  svg += `</svg>`;
+  return svg;
+}
+
+function toggleCrewGraph() {
+  const box = $("crew-graph");
+  if (box.classList.contains("hidden")) {
+    box.classList.remove("hidden");
+    $("crew-graph-btn").classList.add("active");
+    renderCrewGraph();
+  } else {
+    box.classList.add("hidden");
+    $("crew-graph-btn").classList.remove("active");
+  }
+}
+
+function renderCrewGraph() {
+  const box = $("crew-graph");
+  if (box.classList.contains("hidden") || !CREW.state) return;
+  const svg = crewGraphSvg(CREW.state.graph || []);
+  box.replaceChildren();
+  if (!svg) return;
+  box.insertAdjacentHTML("beforeend", svg);
+}
+
+/* saved crews (resume list) */
+
+async function refreshCrewSaved(force) {
+  const box = $("crew-saved");
+  if (!force && box.classList.contains("hidden")) return;
+  try {
+    const d = await invoke("crew_list");
+    box.replaceChildren();
+    box.appendChild(el("div", "sbx-label", "saved crews — click to resume"));
+    if (!d.crews.length) {
+      box.appendChild(el("div", "sbx-empty", "no saved crews yet"));
+      return;
+    }
+    for (const c of d.crews) {
+      const row = el("div", "crew-saved-row");
+      const info = el("div", "crew-saved-info");
+      info.appendChild(el("div", "sbx-name", c.goal));
+      const mentions = (c.mentions || [])
+        .slice(0, 4)
+        .map((m) => `${m.from}→${m.to}×${m.n}`)
+        .join(", ");
+      info.appendChild(
+        el("div", "hint", `${c.status} · ${c.members} member(s) · ${c.messages} msg · ${new Date(c.updated * 1000).toLocaleString()}${mentions ? " · @" + mentions : ""}`)
+      );
+      row.appendChild(info);
+      const open = el("button", "ghost", "resume");
+      open.onclick = async () => {
+        try {
+          const st = await invoke("crew_open", { id: c.id });
+          CREW.state = st.none ? null : st;
+          CREW.lastJson = null;
+          $("crew-saved").classList.add("hidden");
+          $("crew-saved-btn").classList.remove("active");
+          renderCrew();
+        } catch (e) {
+          showPanelMsg("crew-msg", String(e));
+        }
+      };
+      row.appendChild(open);
+      const del = el("button", "ghost", "del");
+      del.onclick = async () => {
+        try {
+          await invoke("crew_drop", { id: c.id });
+          await refreshCrewSaved(true);
+          if (CREW.state && CREW.state.id === c.id) {
+            CREW.state = null;
+            renderCrew();
+          }
+        } catch (e) {
+          showPanelMsg("crew-msg", String(e));
+        }
+      };
+      row.appendChild(del);
+      box.appendChild(row);
+    }
+  } catch (e) {
+    showPanelMsg("crew-msg", String(e));
+  }
+}
+
+function toggleCrewSaved() {
+  const box = $("crew-saved");
+  const active = box.classList.contains("hidden");
+  box.classList.toggle("hidden", !active);
+  $("crew-saved-btn").classList.toggle("active", active);
+  if (active) refreshCrewSaved(true);
 }
 
 async function showCrewUsage() {
@@ -3081,6 +3293,8 @@ $("crew-stop").onclick = () =>
     .then(refreshCrew)
     .catch((e) => showPanelMsg("crew-msg", String(e)));
 $("crew-usage").onclick = showCrewUsage;
+$("crew-graph-btn").onclick = toggleCrewGraph;
+$("crew-saved-btn").onclick = toggleCrewSaved;
 $("crew-drop").onclick = async () => {
   if (!CREW.state) return;
   try {
@@ -3088,6 +3302,7 @@ $("crew-drop").onclick = async () => {
     CREW.state = null;
     CREW.lastJson = null;
     renderCrew();
+    refreshCrewSaved(true);
   } catch (e) {
     showPanelMsg("crew-msg", String(e));
   }

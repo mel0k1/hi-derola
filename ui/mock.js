@@ -516,6 +516,7 @@
   commands.crew_auto = async () => ({ none: true });
   commands.crew_stop = async () => {};
   commands.crew_usage = async () => ({ rows: [], total: { input: 0, output: 0, cost: 0 } });
+  commands.crew_limit = async () => ({ none: true });
   commands.sandbox_fwd_add = async () => { throw new Error("mock: create a sandbox first"); };
   commands.sandbox_fwd_del = async () => { throw new Error("mock: create a sandbox first"); };
   commands.sandbox_fetch_vm = async () => { throw new Error("mock: create a sandbox first"); };

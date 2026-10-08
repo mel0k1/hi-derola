@@ -839,3 +839,31 @@ pre.diff .ctx { color: var(--dim); }
   border: 1px solid var(--border); border-radius: 10px; background: var(--panel2);
   padding: 10px 14px; margin: 6px 0; display: flex; flex-direction: column; gap: 4px;
 }
+
+/* crew live streaming + graph + saved list */
+.crew-msg.crew-live { border-color: var(--accent-dim); }
+.crew-msg.crew-live .crew-author::after {
+  content: "▍"; margin-left: 4px; animation: crew-blink 1s steps(2) infinite;
+}
+@keyframes crew-blink { 50% { opacity: 0; } }
+#crew-graph {
+  border: 1px solid var(--border); border-radius: 10px; background: var(--panel2);
+  padding: 8px; margin: 6px 0;
+}
+.crew-graph-svg { width: 100%; height: auto; display: block; }
+.crew-node { fill: var(--panel); stroke: var(--accent-dim); stroke-width: 1.5; }
+.crew-node-you { stroke-dasharray: 3 2; }
+.crew-node-label { fill: var(--fg); font-size: 10px; font-weight: 600; }
+.crew-edge { stroke: var(--accent); stroke-opacity: 0.55; fill: none; }
+.crew-arrow-head { fill: var(--accent); }
+.crew-edge-n { fill: var(--dim); font-size: 9px; }
+#crew-saved { display: flex; flex-direction: column; gap: 8px; margin: 6px 0; }
+.crew-saved-row {
+  display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--panel2);
+}
+.crew-saved-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.crew-saved-info .sbx-name {
+  font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+button.active { border-color: var(--accent-dim); color: var(--accent); }

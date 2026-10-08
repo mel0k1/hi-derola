@@ -128,14 +128,14 @@
         <div class="sbx-head">
           <div>
             <div class="sbx-title"><span class="ic" data-icon="crew"></span>crew</div>
-            <div class="sbx-sub">several AI agents in one session &mdash; they coordinate via @Name, a DONE: line finishes the goal; tokens are counted per member</div>
+            <div class="sbx-sub">several AI agents in one session &mdash; they coordinate via @Name, a DONE: line finishes the goal; tokens counted per member, optional tools and token limits</div>
           </div>
           <button id="crew-new" class="accent"><span class="ic sm" data-icon="plus"></span> new crew</button>
         </div>
         <div id="crew-msg" class="hidden"></div>
         <div id="crew-form" class="hidden sbx-wizard">
           <label class="hosts-line">goal <textarea id="c-goal" rows="2" placeholder="design and review a release plan for the app"></textarea></label>
-          <label class="hosts-line">members (one per line, Name|role optional pipes: profile|model; "|role" = the agent picks a name) <textarea id="c-members" rows="3" placeholder="Rex|planner&#10;Nora|critic&#10;|coder|fast|gpt-5-mini"></textarea></label>
+          <label class="hosts-line">members (one per line, Name|role, optional: profile|model|tools|limit=100k; "|role" = the agent picks a name) <textarea id="c-members" rows="3" placeholder="Rex|planner|limit=100k&#10;Nora|critic&#10;|coder|fast|gpt-5-mini|tools"></textarea></label>
           <div class="row-inline">
             <button id="c-save" class="accent">create</button>
             <button id="c-cancel" class="ghost">cancel</button>
@@ -143,20 +143,24 @@
         </div>
         <div id="crew-head" class="hidden"></div>
         <div id="crew-list"></div>
+        <div id="crew-graph" class="hidden"></div>
         <div id="crew-controls" class="hidden row-inline crew-controls">
           <button id="crew-step" class="ghost">step</button>
           <button id="crew-auto" class="accent">auto</button>
           <button id="crew-stop" class="ghost">stop</button>
           <button id="crew-usage" class="ghost">usage</button>
+          <button id="crew-graph-btn" class="ghost" title="@mention graph - who steers whom">graph</button>
+          <button id="crew-saved-btn" class="ghost" title="saved crews - resume or delete">saved</button>
           <button id="crew-drop" class="ghost">delete</button>
         </div>
         <div id="crew-usage-box" class="hidden"></div>
+        <div id="crew-saved" class="hidden"></div>
         <div id="crew-inputrow" class="hidden row-inline">
           <input id="crew-input" placeholder="say something to the crew..." spellcheck="false" />
           <button id="crew-send" class="accent">send</button>
         </div>
         <div id="crew-addrow" class="hidden row-inline">
-          <input id="crew-addspec" placeholder="add member: Name|role[|profile|model]" spellcheck="false" />
+          <input id="crew-addspec" placeholder="add member: Name|role[|profile|model|tools|limit=100k]" spellcheck="false" />
           <button id="crew-addbtn" class="ghost">add</button>
         </div>
       </div>
