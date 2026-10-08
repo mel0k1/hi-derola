@@ -10,7 +10,12 @@
 //! inside their rounds under the permission config, and per-member token
 //! limits ("limit=N") auto-stop members (and the crew once all are spent).
 //! usage rows are recorded per member — the `/crew usage` report splits
-//! tokens and cost by participant.
+//! tokens and cost by participants.
+//!
+//! long-term memory: a crew keeps a small memo list that survives sessions.
+//! members record facts with a "MEMO:" line, the user with /crew memo; every
+//! entry is injected back into the system prompt on the next run, so a resumed
+//! (or later re-opened) crew picks up where it left off.
 
 use crate::chat::Message;
 use crate::provider::{ApiEvent, ChatRequest};
@@ -41,6 +46,14 @@ pub struct Member {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Memo {
+    /// member name, "you", or "crew" for automatic entries
+    pub author: String,
+    pub content: String,
+    pub ts: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrewMsg {
     /// member name, "you" for the user, "crew" for system notes
     pub author: String,
@@ -60,6 +73,9 @@ pub struct Crew {
     pub messages: Vec<CrewMsg>,
     #[serde(default)]
     pub usage: BTreeMap<String, Vec<UsageRow>>,
+    /// long-term memory that survives sessions; oldest first
+    #[serde(default)]
+    pub memory: Vec<Memo>,
     pub created: u64,
     pub updated: u64,
 }
@@ -285,6 +301,59 @@ pub fn set_limit(crew_id: &str, name: &str, limit: Option<u64>) -> Result<Crew> 
     Ok(crew)
 }
 
+const MEMORY_CAP: usize = 100;
+const MEMORY_PROMPT_ENTRIES: usize = 30;
+const MEMORY_PROMPT_CHARS: usize = 4000;
+
+/// add a memory entry; the oldest ones fall off past the cap
+pub fn memo_add(crew_id: &str, author: &str, text: &str) -> Result<Crew> {
+    let text = text.trim();
+    if text.is_empty() {
+        bail!("empty memo");
+    }
+    let mut crew = load(crew_id)?;
+    crew.memory.push(Memo {
+        author: author.to_string(),
+        content: text.chars().take(500).collect(),
+        ts: now(),
+    });
+    if crew.memory.len() > MEMORY_CAP {
+        let drop = crew.memory.len() - MEMORY_CAP;
+        crew.memory.drain(0..drop);
+    }
+    crew.updated = now();
+    save(&crew)?;
+    Ok(crew)
+}
+
+/// forget entry n (1-based, oldest first); n=0 clears everything
+pub fn memo_forget(crew_id: &str, n: usize) -> Result<Crew> {
+    let mut crew = load(crew_id)?;
+    if n == 0 {
+        crew.memory.clear();
+    } else {
+        if n > crew.memory.len() {
+            bail!(format!(
+                "memo {n} does not exist (1..={})",
+                crew.memory.len()
+            ));
+        }
+        crew.memory.remove(n - 1);
+    }
+    crew.updated = now();
+    save(&crew)?;
+    Ok(crew)
+}
+
+/// every "MEMO:" line in one reply
+fn extract_lines(text: &str, prefix: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|l| l.trim().strip_prefix(prefix))
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 /// total tokens a member has burned so far (input + output, cached included)
 pub fn member_used(crew: &Crew, name: &str) -> u64 {
     crew.usage
@@ -318,6 +387,7 @@ pub fn create(goal: &str, specs: &[String]) -> Result<Crew> {
             ts: now(),
         }],
         usage: BTreeMap::new(),
+        memory: Vec::new(),
         created: now(),
         updated: now(),
     };
@@ -368,6 +438,23 @@ fn crew_system_prompt(crew: &Crew, member: &Member) -> String {
              afterwards.\n",
         );
     }
+    if !crew.memory.is_empty() {
+        s.push_str("\nLong-term memory (kept from previous sessions):\n");
+        let skip = crew.memory.len().saturating_sub(MEMORY_PROMPT_ENTRIES);
+        let mut used = 0usize;
+        for (i, m) in crew.memory[skip..].iter().enumerate() {
+            let line = format!("[{}] {}: {}\n", skip + i + 1, m.author, m.content);
+            if used + line.len() > MEMORY_PROMPT_CHARS {
+                break;
+            }
+            used += line.len();
+            s.push_str(&line);
+        }
+    }
+    s.push_str(
+        "- To keep a fact, decision or result for future sessions, add a line \
+         \"MEMO: <short fact>\" anywhere in the reply.\n",
+    );
     let skills = crate::skills::spec_description();
     if !skills.is_empty() {
         s.push_str(&format!(
@@ -494,6 +581,7 @@ async fn step_inner(
                     continue;
                 }
             };
+            let mut renamed: Option<String> = None;
             // self-naming for placeholder members
             if let Some(new_name) = extract_line(&reply, "RENAME:") {
                 let new_name = sanitize_name(&new_name);
@@ -518,16 +606,22 @@ async fn step_inner(
                         "crew: {} renamed to {new_name}",
                         member.name
                     )));
+                    renamed = Some(new_name);
                 }
             }
-            let author = crew
-                .members
-                .iter()
-                .find(|m| {
-                    m.role == member.role && m.model == member.model && m.profile == member.profile
-                })
-                .map(|m| m.name.clone())
-                .unwrap_or_else(|| member.name.clone());
+            let author = renamed.unwrap_or_else(|| member.name.clone());
+            for memo in extract_lines(&reply, "MEMO:") {
+                let m = Memo {
+                    author: author.clone(),
+                    content: memo.chars().take(500).collect(),
+                    ts: now(),
+                };
+                crew.memory.push(m);
+            }
+            if crew.memory.len() > MEMORY_CAP {
+                let drop = crew.memory.len() - MEMORY_CAP;
+                crew.memory.drain(0..drop);
+            }
             crew.messages.push(CrewMsg {
                 author: author.clone(),
                 kind: "agent".into(),
@@ -541,7 +635,19 @@ async fn step_inner(
                 role: member.role.clone(),
                 content: reply.clone(),
             });
-            if extract_line(&reply, "DONE:").is_some() {
+            if let Some(done_line) = extract_line(&reply, "DONE:") {
+                crew.memory.push(Memo {
+                    author: "crew".into(),
+                    content: format!(
+                        "goal done: {}",
+                        done_line.chars().take(300).collect::<String>()
+                    ),
+                    ts: now(),
+                });
+                if crew.memory.len() > MEMORY_CAP {
+                    let drop = crew.memory.len() - MEMORY_CAP;
+                    crew.memory.drain(0..drop);
+                }
                 crew.status = "done".into();
                 done = true;
                 save(&crew)?;
@@ -1020,6 +1126,7 @@ pub fn state_json(crew_id: &str) -> Result<serde_json::Value> {
         "members": members,
         "messages": crew.messages,
         "graph": graph,
+        "memory": crew.memory,
         "running": is_running(),
     }))
 }
@@ -1078,6 +1185,69 @@ mod tests {
     }
 
     #[test]
+    fn memory_roundtrip_and_caps() {
+        let _g = TEST_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("hiderola-crew-mem-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("HI_DEROLA_CREW_DIR", &dir);
+        let crew = create("remember things", &["rex|planner".into()]).unwrap();
+        let id = crew.id.clone();
+        assert!(crew.memory.is_empty(), "fresh crew has no memory");
+        memo_add(&id, "you", "db is postgres 16").unwrap();
+        memo_add(&id, "rex", "api base url agreed").unwrap();
+        assert!(memo_add(&id, "you", "   ").is_err());
+        let c = load(&id).unwrap();
+        assert_eq!(c.memory.len(), 2);
+        assert_eq!(c.memory[0].author, "you");
+        assert_eq!(c.memory[1].content, "api base url agreed");
+        let c = memo_forget(&id, 1).unwrap();
+        assert_eq!(c.memory.len(), 1);
+        assert!(memo_forget(&id, 9).is_err());
+        let c = memo_forget(&id, 0).unwrap();
+        assert!(c.memory.is_empty());
+        // cap: oldest entries fall off
+        for i in 0..MEMORY_CAP + 10 {
+            memo_add(&id, "rex", &format!("fact {i}")).unwrap();
+        }
+        let c = load(&id).unwrap();
+        assert_eq!(c.memory.len(), MEMORY_CAP);
+        assert_eq!(c.memory[0].content, "fact 10");
+        // extract_lines for MEMO protocol
+        let lines = extract_lines("a\nMEMO: one\nMEMO: two\nMEMO:\nplain", "MEMO:");
+        assert_eq!(lines, vec!["one".to_string(), "two".to_string()]);
+        delete(&id).unwrap();
+        std::env::remove_var("HI_DEROLA_CREW_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn memory_in_prompt() {
+        let mut crew = Crew {
+            id: "s-1-mem".into(),
+            goal: "g".into(),
+            status: "idle".into(),
+            members: vec![member("rex", "planner")],
+            messages: vec![],
+            usage: BTreeMap::new(),
+            memory: vec![Memo {
+                author: "you".into(),
+                content: "db is postgres 16".into(),
+                ts: 0,
+            }],
+            created: 0,
+            updated: 0,
+        };
+        let p = crew_system_prompt(&crew, &crew.members[0]);
+        assert!(p.contains("Long-term memory"));
+        assert!(p.contains("[1] you: db is postgres 16"));
+        assert!(p.contains("MEMO:"));
+        crew.memory.clear();
+        let p = crew_system_prompt(&crew, &crew.members[0]);
+        assert!(!p.contains("Long-term memory"));
+        assert!(p.contains("MEMO:"), "protocol line is always present");
+    }
+
+    #[test]
     fn parse_member_specs() {
         let taken: Vec<Member> = vec![member("rex", "planner")];
         let m = parse_member("Nora|critic", &taken).unwrap();
@@ -1114,6 +1284,7 @@ mod tests {
             members: vec![member("rex", "planner"), member("nora", "critic")],
             messages: vec![],
             usage: BTreeMap::new(),
+            memory: Vec::new(),
             created: 0,
             updated: 0,
         };
@@ -1191,6 +1362,7 @@ mod tests {
                 },
             ],
             usage: BTreeMap::new(),
+            memory: Vec::new(),
             created: 0,
             updated: 0,
         };
@@ -1250,6 +1422,7 @@ mod tests {
                     }],
                 ),
             ]),
+            memory: Vec::new(),
             created: 0,
             updated: 0,
         };
