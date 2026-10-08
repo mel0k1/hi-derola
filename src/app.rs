@@ -66,6 +66,8 @@ pub struct App {
     pub streaming: Option<usize>,
     /// live streaming crew reply: entry index + author name
     pub crew_stream: Option<(usize, String)>,
+    /// crew runner task; separate from chat inflight so chat stays usable
+    pub crew_task: Option<tokio::task::JoinHandle<()>>,
     pub reasoning: Option<usize>,
     pub tokens_in: u64,
     pub tokens_out: u64,
@@ -89,7 +91,7 @@ pub struct App {
 
 const HELP: &str = "commands:\n  /file <path>   attach file to next message\n  /model <name>  switch model, saved to config (into the active profile when one is set)\n  /model         show current model\n  /models        list models available for the api key\n  /profile [name] switch provider profile (bare = list, \"none\" = back to the base [provider] section)\n  /plan          toggle plan mode (read-only research)\n  /undo          revert file changes of the last turn\n  /redo          reapply undone changes\n  /init          create or improve AGENTS.md for this project\n  /compact       summarize and shrink the conversation context\n  /export [path] save the session as markdown\n  /sessions      list saved sessions\n  /resume [id]   switch to a saved session (latest by default)\n  /mcpauth [name] mcp OAuth status, or authorize a remote server in browser; /mcpauth <name> <code> finishes a flow with a pasted authorization code (resume after a restart)\n  /mcpres [server]  list mcp resources and uri templates\n  /mcpstatus     per-server status: connected/failed/needs auth/crashed\n  /mcpread <server> <uri> read an mcp resource into the chat\n  /mcpprompt [server] <name> [k=v] use an mcp prompt (no args lists prompts)\n  /mcpsub <server> <uri> subscribe to mcp resource updates (land in chat)\n  /mcpunsub <server> <uri> stop the subscription\n  /mcplog [server]  recent mcp log messages; /mcplog set <server|all> <level> sets the minimum level\n  /mcpadd <name> <url|command...> add a server at runtime (saved to config) and connect it\n  /mcpconnect <name> (re)connect a configured server\n  /mcpdisconnect <name> drop the live connection (config untouched)\n  /mcplogout <name> drop the stored oauth tokens; a fresh /mcpauth flow starts on next use\n  /jstools [reload] list user JS tools (.hi-derola/tools/), optional rescan\n  /doctor        environment self-check: config/provider, ssh, qemu+accel, lsp servers, formatters, mcp, sandbox
   /update        check github releases and swap the running binary if a newer one exists
-  /usage         token/cost report for this session (per-model breakdown, prices, context fill)\n  /sandbox       local VM sandboxes: bare = list; /sandbox start|stop|attach|detach <id|name>; /sandbox new <name> [debian|debian-std|ubuntu|ubuntu-std|custom=<path>] [ram=2048] [cpus=2] [disk=20] [login=x] [root=on|off]; /sandbox fetch|push <id|name> <path> [dest]; /sandbox term <id|name> [agent]; /sandbox fwd <id|name> add <host-port> <guest-port> [guest-host] | list | del <host-port> — attach routes bash into the VM over ssh\n  /host          remote hosts: bare = list; /host add <name> <user@host:port>; /host check|attach|detach|del <id|name>; /host term <id|name> [agent]; /host pubkey <id|name> — attach routes bash + file tools over ssh; /undo covers remote edits\n  /skills        skills: bare = list; /skills toggle <name>; /skills install <git-url>\n  /crew          multi-agent sessions: bare = status; /crew new <goal>; /crew add <Name|role[|profile|model[|tools|limit=N]]>; /crew del <name>; /crew send <text>; /crew step [rounds]; /crew auto [max-rounds]; /crew stop; /crew limit <name> <n|off>; /crew usage; /crew show; /crew list; /crew open|resume <id>; /crew drop\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch/mcp_resource + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
+  /usage         token/cost report for this session (per-model breakdown, prices, context fill)\n  /sandbox       local VM sandboxes: bare = list; /sandbox start|stop|attach|detach <id|name>; /sandbox new <name> [debian|debian-std|ubuntu|ubuntu-std|custom=<path>] [ram=2048] [cpus=2] [disk=20] [login=x] [root=on|off]; /sandbox fetch|push <id|name> <path> [dest]; /sandbox term <id|name> [agent]; /sandbox fwd <id|name> add <host-port> <guest-port> [guest-host] | list | del <host-port> — attach routes bash into the VM over ssh\n  /host          remote hosts: bare = list; /host add <name> <user@host:port>; /host check|attach|detach|del <id|name>; /host term <id|name> [agent]; /host pubkey <id|name> — attach routes bash + file tools over ssh; /undo covers remote edits\n  /skills        skills: bare = list; /skills toggle <name>; /skills install <git-url>\n  /crew          multi-agent sessions: bare = status; /crew new <goal>; /crew add <Name|role[|profile|model[|tools|limit=N]]>; /crew del <name>; /crew send <text>; /crew step [rounds]; /crew auto [m[rounds]; /crew stop; /crew limit <name> <n|off>; /crew memo <text>; /crew memory; /crew forget <n|all>; /crew usage; /crew show; /crew list; /crew open|resume <id>; /crew drop\n  /clear         start new session\n  /quit          exit\n  custom: .hi-derola/commands/<name>.md or ~/.config/hi-derola/commands/<name>.md ($ARGUMENTS, $1..$9)\nkeys:\n  enter send  esc cancel/quit  up/down history  pgup/pgdn scroll  ctrl+c quit\ntools:\n  read/write/edit/apply_patch/list/glob/grep/bash (background: true)/webfetch/codesearch/mcp_resource + question, plan_write/plan_exit (plan mode), subagent (background, session_id), task_status, task_kill, todowrite/todoread, skill, lsp (hover/definition/references/symbols), code (JS sandbox over MCP tools), custom JS tools from .hi-derola/tools/, mcp servers\nconfirm:\n  y run  n skip  a allow all  w always allow (saved to config)  f reject with feedback\nqueue:\n  messages sent while busy are queued, they steer the current run";
 
 pub fn help_text() -> &'static str {
     HELP
@@ -166,6 +168,7 @@ impl App {
             attachments: Vec::new(),
             streaming: None,
             crew_stream: None,
+            crew_task: None,
             reasoning: None,
             tokens_in: 0,
             tokens_out: 0,
@@ -689,6 +692,11 @@ impl App {
                         self.reasoning = Some(r - 1);
                     }
                 }
+                if let Some((c, a)) = self.crew_stream.clone() {
+                    if c > i {
+                        self.crew_stream = Some((c - 1, a));
+                    }
+                }
             }
         }
     }
@@ -816,7 +824,9 @@ impl App {
             ApiEvent::CrewChunk { author, delta, .. } => {
                 match &self.crew_stream {
                     Some((i, a)) if *a == author => {
-                        self.entries[*i].text.push_str(&delta);
+                        if let Some(e) = self.entries.get_mut(*i) {
+                            e.text.push_str(&delta);
+                        }
                     }
                     _ => {
                         self.flush_crew_stream(true);
@@ -906,10 +916,13 @@ impl App {
         if self.session.messages.is_empty() {
             return;
         }
+        // keep gui-written fields (subagent parent, change review) and the
+        // original creation date when the same session is saved again
+        let prev = crate::sessions::load(&self.sid).ok();
         let st = crate::sessions::StoredSession {
             id: self.sid.clone(),
             title: self.title.clone().unwrap_or_else(|| "new chat".into()),
-            created: 0,
+            created: prev.as_ref().map(|p| p.created).unwrap_or(0),
             updated: 0,
             system: self.session.system.clone(),
             messages: self.session.messages.clone(),
@@ -918,8 +931,8 @@ impl App {
             cost: self.cost,
             usage: self.usage.clone(),
             todos: crate::todo::get(),
-            parent: None,
-            changes: Vec::new(),
+            parent: prev.as_ref().and_then(|p| p.parent.clone()),
+            changes: prev.map(|p| p.changes).unwrap_or_default(),
             queue: self.queue.lock().unwrap().clone(),
         };
         if let Err(e) = crate::sessions::save(&st) {
@@ -931,6 +944,7 @@ impl App {
         self.entries.clear();
         self.streaming = None;
         self.reasoning = None;
+        self.crew_stream = None;
         self.attachments.clear();
         self.sid = st.id.clone();
         if let Ok(mut g) = self.mcp_session.write() {
@@ -980,6 +994,7 @@ impl App {
         self.confirm_feedback = false;
         self.streaming = None;
         self.reasoning = None;
+        self.crew_stream = None;
         self.info("cancelled");
         self.status = self.status_line();
         crate::snapshot::end_turn();
@@ -1543,12 +1558,7 @@ impl App {
                 };
                 match m.add(name, &user, &host, port) {
                     Ok(st) => {
-                        let _ = st;
-                        let list = m.list();
-                        let (id, label) = list
-                            .first()
-                            .map(|h| (h.host.id.clone(), h.host.ssh_label()))
-                            .unwrap_or_default();
+                        let (id, label) = (st.host.id.clone(), st.host.ssh_label());
                         self.info(format!(
                             "host saved ({}) — key pair generated; make the host trust it, then /host check {name}",
                             m.dir().display(),
@@ -1763,8 +1773,8 @@ impl App {
         }
     }
 
-    fn crew_command(&mut self, arg: &str, inflight: &mut Option<tokio::task::JoinHandle<()>>) {
-        const USAGE: &str = "usage: /crew [status] · /crew new <goal> · /crew add <Name|role[|profile|model[|tools|limit=N]]> · /crew del <name> · /crew send <text> · /crew step [rounds] · /crew auto [max-rounds] · /crew stop · /crew limit <name> <n|off> · /crew usage · /crew show · /crew list · /crew open|resume <id> · /crew drop";
+    fn crew_command(&mut self, arg: &str) {
+        const USAGE: &str = "usage: /crew [status] · /crew new <goal> · /crew add <Name|role[|profile|model[|tools|limit=N]]> · /crew del <name> · /crew send <text> · /crew step [rounds] · /crew auto [m[rounds] · /crew stop · /crew limit <name> <n|off> · /crew memo <text> · /crew memory · /crew forget <n|all> · /crew usage · /crew show · /crew list · /crew open|resume <id> · /crew drop";
         let mut parts = arg.split_whitespace();
         let sub = parts.next().unwrap_or("");
         let rest = arg.split_once(' ').map(|(_, r)| r.trim()).unwrap_or("");
@@ -1810,12 +1820,67 @@ impl App {
                             extra,
                         ));
                     }
-                    out.push_str(&format!("\n{} message(s) · {}", c.messages.len(), USAGE));
+                    out.push_str(&format!(
+                        "\n{} message(s) · {} memo(s) · {}",
+                        c.messages.len(),
+                        c.memory.len(),
+                        USAGE
+                    ));
                     self.info(out);
                 }
                 Some(Err(e)) => self.info(format!("error: {e:#}")),
                 None => self.info(format!("no active crew — {USAGE}")),
             },
+            "memo" => {
+                let Some(id) = need_crew(self) else { return };
+                if rest.is_empty() {
+                    self.info("/crew memo <text> — remember a fact for future sessions");
+                    return;
+                }
+                match crate::crew::memo_add(&id, "you", rest) {
+                    Ok(c) => self.info(format!("memo saved — {} in memory", c.memory.len())),
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            "memory" => {
+                let Some(id) = need_crew(self) else { return };
+                match crate::crew::load(&id) {
+                    Ok(c) if c.memory.is_empty() => {
+                        self.info("crew memory is empty — /crew memo <text> to add");
+                    }
+                    Ok(c) => {
+                        let mut out = format!("crew memory ({}):", c.memory.len());
+                        for (i, m) in c.memory.iter().enumerate() {
+                            out.push_str(&format!("\n  [{}] {}: {}", i + 1, m.author, m.content));
+                        }
+                        out.push_str("\nforget with /crew forget <n|all>");
+                        self.info(out);
+                    }
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
+            "forget" => {
+                let Some(id) = need_crew(self) else { return };
+                if rest.is_empty() {
+                    self.info("/crew forget <n> — drop memo n; /crew forget all — clear memory");
+                    return;
+                }
+                let res = if rest.eq_ignore_ascii_case("all") {
+                    crate::crew::memo_forget(&id, 0)
+                } else {
+                    match rest.parse::<usize>() {
+                        Ok(n) => crate::crew::memo_forget(&id, n),
+                        Err(_) => {
+                            self.info(format!("bad memo number \"{rest}\""));
+                            return;
+                        }
+                    }
+                };
+                match res {
+                    Ok(c) => self.info(format!("done — {} memo(s) left", c.memory.len())),
+                    Err(e) => self.info(format!("error: {e:#}")),
+                }
+            }
             "new" => {
                 if rest.is_empty() {
                     self.info(format!("/crew new <goal> — {USAGE}"));
@@ -1860,7 +1925,7 @@ impl App {
                 match crate::crew::send(&id, rest) {
                     Ok(()) => {
                         self.info(format!("sent to crew: {rest}"));
-                        self.run_crew_step(&id, 1, inflight, false);
+                        self.run_crew_step(&id, 1, false);
                     }
                     Err(e) => self.info(format!("error: {e:#}")),
                 }
@@ -1871,7 +1936,7 @@ impl App {
                     .next()
                     .and_then(|v| v.parse::<usize>().ok())
                     .unwrap_or(1);
-                self.run_crew_step(&id, rounds.min(20), inflight, false);
+                self.run_crew_step(&id, rounds.min(20), false);
             }
             "auto" => {
                 let Some(id) = need_crew(self) else { return };
@@ -1887,7 +1952,7 @@ impl App {
                 self.info(format!(
                     "crew auto: up to {max} rounds until DONE (stop with /crew stop)"
                 ));
-                self.run_crew_step(&id, max, inflight, true);
+                self.run_crew_step(&id, max, true);
             }
             "stop" => {
                 crate::crew::cancel();
@@ -1955,10 +2020,11 @@ impl App {
                     Ok((id, c)) => {
                         crate::crew::set_active(Some(id.clone()));
                         self.info(format!(
-                            "crew {id} resumed — goal: {} · {} member(s) · {} message(s) · status {}",
+                            "crew {id} resumed — goal: {} · {} member(s) · {} message(s) · {} memo(s) · status {}",
                             c.goal,
                             c.members.len(),
                             c.messages.len(),
+                            c.memory.len(),
                             c.status
                         ));
                     }
@@ -2008,13 +2074,7 @@ impl App {
         }
     }
 
-    fn run_crew_step(
-        &mut self,
-        id: &str,
-        rounds: usize,
-        inflight: &mut Option<tokio::task::JoinHandle<()>>,
-        auto: bool,
-    ) {
+    fn run_crew_step(&mut self, id: &str, rounds: usize, auto: bool) {
         if crate::crew::is_running() {
             self.info("a crew is already running — /crew stop first");
             return;
@@ -2041,7 +2101,7 @@ impl App {
                 }
             })
         };
-        *inflight = Some(handle);
+        self.crew_task = Some(handle);
     }
 
     fn command(&mut self, line: &str, inflight: &mut Option<tokio::task::JoinHandle<()>>) {
@@ -2702,7 +2762,7 @@ impl App {
             "/sandbox" => self.sandbox_command(arg),
             "/host" => self.host_command(arg),
             "/skills" => self.skills_command(arg),
-            "/crew" => self.crew_command(arg, inflight),
+            "/crew" => self.crew_command(arg),
             "/file" => {
                 if arg.is_empty() {
                     self.info("usage: /file <path>");
