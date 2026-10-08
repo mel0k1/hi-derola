@@ -201,6 +201,9 @@ pub fn delete(id: &str) -> Result<()> {
     if !safe_id(id) {
         bail!("bad crew id");
     }
+    if is_running() && active().as_deref() == Some(id) {
+        bail!("crew is running — stop it first");
+    }
     match std::fs::remove_file(file_of(id)) {
         Ok(_) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -348,7 +351,10 @@ fn parse_limit(v: &str) -> Result<Option<u64>> {
 
 /// change a member's token budget; None clears it
 pub fn set_limit(crew_id: &str, name: &str, limit: Option<u64>) -> Result<Crew> {
-    let mut crew = load(crew_id)?;
+    let mut crew = load(crew_id)?; // a running step holds the whole crew in memory and would clobber this
+    if is_running() {
+        bail!("crew is running — stop it first");
+    }
     let m = crew
         .members
         .iter_mut()
@@ -476,7 +482,10 @@ pub fn memo_add(crew_id: &str, author: &str, text: &str) -> Result<Crew> {
     if text.is_empty() {
         bail!("empty memo");
     }
-    let mut crew = load(crew_id)?;
+    let mut crew = load(crew_id)?; // a running step holds the whole crew in memory and would clobber this
+    if is_running() {
+        bail!("crew is running — stop it first");
+    }
     crew.memory.push(Memo {
         author: author.to_string(),
         content: text.chars().take(500).collect(),
@@ -493,7 +502,10 @@ pub fn memo_add(crew_id: &str, author: &str, text: &str) -> Result<Crew> {
 
 /// forget entry n (1-based, oldest first); n=0 clears everything
 pub fn memo_forget(crew_id: &str, n: usize) -> Result<Crew> {
-    let mut crew = load(crew_id)?;
+    let mut crew = load(crew_id)?; // a running step holds the whole crew in memory and would clobber this
+    if is_running() {
+        bail!("crew is running — stop it first");
+    }
     if n == 0 {
         crew.memory.clear();
     } else {
@@ -871,10 +883,24 @@ pub async fn step(
     cfg: &crate::config::Config,
     tx: &UnboundedSender<ApiEvent>,
 ) -> Result<String> {
+    step_locked(crew_id, rounds, cfg, tx, true).await
+}
+
+/// the runner core; reset_cancel=false keeps a stop pressed between auto
+/// rounds alive instead of wiping it at the next step boundary
+async fn step_locked(
+    crew_id: &str,
+    rounds: usize,
+    cfg: &crate::config::Config,
+    tx: &UnboundedSender<ApiEvent>,
+    reset_cancel: bool,
+) -> Result<String> {
     if RUNNING.swap(true, Ordering::Relaxed) {
         bail!("a crew is already running — /crew stop first");
     }
-    CANCEL.store(false, Ordering::Relaxed);
+    if reset_cancel {
+        CANCEL.store(false, Ordering::Relaxed);
+    }
     let out = step_inner(crew_id, rounds, cfg, tx).await;
     RUNNING.store(false, Ordering::Relaxed);
     out
@@ -901,6 +927,7 @@ async fn step_inner(
                 content: msg.clone(),
                 ts: now(),
             });
+            crew.status = "stopped".into();
             crew.updated = now();
             save(&crew)?;
             let _ = tx.send(ApiEvent::Note(msg));
@@ -919,6 +946,7 @@ async fn step_inner(
 
     let mut note = String::new();
     let mut done = false;
+    let mut stopped = false;
     // background workers: spawned tasks + a registry their results land in
     let results: std::sync::Arc<Mutex<Vec<WorkerOut>>> = Default::default();
     let mut workers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
@@ -941,6 +969,8 @@ async fn step_inner(
                         content: msg.clone(),
                         ts: now(),
                     });
+                    crew.status = "stopped".into();
+                    stopped = true;
                     let _ = tx.send(ApiEvent::Note(msg));
                     note.push_str(&format!(" (budget: ${spent:.2} of ${b:.2})"));
                     break 'rounds;
@@ -1143,6 +1173,8 @@ async fn step_inner(
         // every member is over its budget — stop the crew instead of spinning
         if skipped_all {
             note.push_str(" (all members hit their token limits)");
+            crew.status = "stopped".into();
+            stopped = true;
             break;
         }
     }
@@ -1166,7 +1198,7 @@ async fn step_inner(
     {
         done = true;
     }
-    if !done {
+    if !done && !stopped {
         crew.status = "idle".into();
     }
     crew.updated = now();
@@ -1374,6 +1406,7 @@ async fn drain_workers(
     allow_done: bool,
 ) -> Result<bool> {
     let outs: Vec<WorkerOut> = results.lock().unwrap().drain(..).collect();
+    let mut ended = false;
     for out in outs {
         let member = out.member;
         let text = match out.res {
@@ -1453,12 +1486,13 @@ async fn drain_workers(
         if allow_done {
             if let Some(done_line) = extract_line(&text, "DONE:") {
                 if review_done(crew, &author, &done_line, cfg, tx, summary).await? {
-                    return Ok(true);
+                    ended = true;
+                    break;
                 }
             }
         }
     }
-    Ok(false)
+    Ok(ended)
 }
 
 /// the tool subset a tool-enabled crew member may call; the skill tool
@@ -1886,7 +1920,10 @@ pub fn send(crew_id: &str, text: &str) -> Result<()> {
 }
 
 pub fn add_member(crew_id: &str, spec: &str) -> Result<Crew> {
-    let mut crew = load(crew_id)?;
+    let mut crew = load(crew_id)?; // a running step holds the whole crew in memory and would clobber this
+    if is_running() {
+        bail!("crew is running — stop it first");
+    }
     let m = parse_member(spec, &crew.members)?;
     crew.members.push(m);
     crew.updated = now();
@@ -1895,7 +1932,10 @@ pub fn add_member(crew_id: &str, spec: &str) -> Result<Crew> {
 }
 
 pub fn remove_member(crew_id: &str, name: &str) -> Result<Crew> {
-    let mut crew = load(crew_id)?;
+    let mut crew = load(crew_id)?; // a running step holds the whole crew in memory and would clobber this
+    if is_running() {
+        bail!("crew is running — stop it first");
+    }
     let before = crew.members.len();
     crew.members.retain(|m| m.name != name);
     if crew.members.len() == before {
@@ -2072,8 +2112,11 @@ pub fn run_auto(
                     break;
                 }
             }
-            let done = load(&crew_id).map(|c| c.status == "done").unwrap_or(true);
-            if done {
+            let st = load(&crew_id)
+                .map(|c| c.status)
+                .unwrap_or_else(|_| "done".into());
+            // done = goal reached; stopped = budget/limits exhausted — both end auto
+            if st != "idle" {
                 break;
             }
         }
