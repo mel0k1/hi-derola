@@ -671,7 +671,10 @@ impl Config {
 
     pub fn save(&self) -> Result<()> {
         let raw = toml::to_string_pretty(self).context("serialize config")?;
-        std::fs::write(config_path(), raw)?;
+        // atomic: a crash mid-write must not corrupt the live config
+        let tmp = config_path().with_extension("toml.tmp");
+        std::fs::write(&tmp, raw)?;
+        std::fs::rename(&tmp, config_path())?;
         Ok(())
     }
 

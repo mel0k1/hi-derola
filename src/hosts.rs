@@ -125,7 +125,9 @@ impl HostManager {
         let tmp = self.host_file(&id).with_extension("tmp");
         std::fs::write(&tmp, raw)?;
         std::fs::rename(&tmp, self.host_file(&id))?;
-        Ok(self.status_of(&id))
+        // no agent probe here: the host has no key installed yet, the ssh
+        // probe would just block for its full timeout
+        Ok(self.status_of_impl(&id, false))
     }
 
     pub fn delete(&self, id: &str) -> Result<()> {
@@ -202,7 +204,7 @@ impl HostManager {
     pub fn check(&self, id: &str) -> HostStatus {
         let st = self.do_check(id);
         self.save_state(id, &st);
-        self.status_of(id)
+        self.status_of_impl(id, st.state == "ready")
     }
 
     fn do_check(&self, id: &str) -> HostStateRec {
@@ -247,7 +249,8 @@ impl HostManager {
         }
     }
 
-    fn status_of(&self, id: &str) -> HostStatus {
+    /// probe=false skips the (blocking) ssh agent check
+    fn status_of_impl(&self, id: &str, probe: bool) -> HostStatus {
         let h = self.read_one(id).unwrap_or(RemoteHost {
             id: id.to_string(),
             name: id.to_string(),
@@ -257,7 +260,11 @@ impl HostManager {
             created: 0,
         });
         let st = read_state(&self.dir, id);
-        let agent = self.agent_present(&h).ok();
+        let agent = if probe {
+            self.agent_present(&h).ok()
+        } else {
+            None
+        };
         HostStatus {
             host: h,
             state: st.state,

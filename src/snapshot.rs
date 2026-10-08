@@ -427,6 +427,8 @@ fn redo_in(root: &Path) -> Option<String> {
 struct Snap {
     files: Vec<(String, Option<Vec<u8>>)>,
     hash: u64,
+    /// the walk hit MAX_FILES: the list is incomplete, restore must not delete
+    truncated: bool,
 }
 
 struct Turn {
@@ -463,6 +465,7 @@ fn capture_in(root: &Path) -> Snap {
     let root_str = root.display().to_string();
     let mut all = Vec::new();
     crate::files::walk_files(&root_str, &mut all);
+    let truncated = all.len() > MAX_FILES;
     let mut files: Vec<(String, Option<Vec<u8>>)> = Vec::new();
     let mut hasher = DefaultHasher::new();
     for p in all {
@@ -487,6 +490,7 @@ fn capture_in(root: &Path) -> Snap {
     Snap {
         files,
         hash: hasher.finish(),
+        truncated,
     }
 }
 
@@ -500,6 +504,11 @@ fn restore_in(root: &Path, snap: &Snap) {
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::write(&p, content);
+    }
+    // a truncated capture only knows part of the tree — restore files but
+    // never delete what was not listed
+    if snap.truncated {
+        return;
     }
     let mut now = Vec::new();
     crate::files::walk_files(&root.display().to_string(), &mut now);
