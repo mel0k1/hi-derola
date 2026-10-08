@@ -289,6 +289,9 @@ pub fn parse_member(spec: &str, taken: &[Member]) -> Result<Member> {
     if name.len() > 32 {
         bail!("member name is too long (max 32 chars)");
     }
+    if name_reserved(&name) {
+        bail!("\"{name}\" is a reserved name \u{2014} pick another");
+    }
     Ok(Member {
         name,
         role,
@@ -341,7 +344,11 @@ pub fn set_limit(crew_id: &str, name: &str, limit: Option<u64>) -> Result<Crew> 
 
 /// toggle a member's reviewer flag; reviewers gate DONE with "APPROVE:"
 pub fn set_review(crew_id: &str, name: &str, review: bool) -> Result<Crew> {
-    let mut crew = load(crew_id)?;
+    let mut crew = load(crew_id)?; // a running step holds the whole crew in memory and would clobber this
+    if is_running() {
+        bail!("crew is running — stop it first");
+    }
+
     let m = crew
         .members
         .iter_mut()
@@ -377,7 +384,11 @@ fn parse_budget(v: &str) -> Result<Option<f64>> {
 
 /// set the crew-wide dollar budget; None clears it
 pub fn set_budget(crew_id: &str, budget: Option<f64>) -> Result<Crew> {
-    let mut crew = load(crew_id)?;
+    let mut crew = load(crew_id)?; // a running step holds the whole crew in memory and would clobber this
+    if is_running() {
+        bail!("crew is running — stop it first");
+    }
+
     crew.budget = budget.filter(|v| v.is_finite() && *v > 0.0);
     crew.updated = now();
     save(&crew)?;
@@ -586,15 +597,28 @@ const TRANSCRIPT_WINDOW: usize = 40;
 const SUMMARIZE_MIN_DROPPED: usize = 6;
 const SUMMARY_MAX_CHARS: usize = 1500;
 
-/// cached summary covering exactly the first `drop` messages, if fresh
-fn cached_summary(crew: &Crew, drop: usize) -> Option<String> {
-    if crew.summary_upto != drop {
-        return None;
+const SUMMARY_REFRESH_SLACK: usize = 10;
+
+/// what to inject for this step and whether a fresh summary must be generated.
+/// a stale summary is served until it lags the dropped prefix by SLACK
+/// messages, so long sessions pay for compression once per ~10 messages
+/// instead of every step; an empty cached summary is a "tried and failed"
+/// marker that quiets retries until the lag grows past MIN_DROPPED again.
+fn summary_plan(crew: &Crew, drop: usize) -> (Option<String>, bool) {
+    if drop == 0 || crew.summary_upto > drop {
+        return (None, false);
     }
-    match &crew.summary {
-        Some(s) if !s.is_empty() => Some(s.clone()),
-        _ => None,
-    }
+    let stale = drop - crew.summary_upto;
+    let have: Option<String> = crew
+        .summary
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let need = match &have {
+        Some(_) => stale >= SUMMARY_REFRESH_SLACK,
+        None => stale >= SUMMARIZE_MIN_DROPPED,
+    };
+    (have, need)
 }
 
 /// plain-text digest of crew.messages[0..drop] for the summarizer
@@ -667,11 +691,9 @@ async fn ensure_summary(
     tx: &UnboundedSender<ApiEvent>,
 ) -> Option<String> {
     let drop = crew.messages.len().saturating_sub(TRANSCRIPT_WINDOW);
-    if drop < SUMMARIZE_MIN_DROPPED {
-        return None;
-    }
-    if let Some(s) = cached_summary(crew, drop) {
-        return Some(s);
+    let (have, need) = summary_plan(crew, drop);
+    if !need {
+        return have;
     }
     let member = crew.members.first()?.clone();
     let pc = cfg.provider_for(member.profile.as_deref(), member.model.as_deref());
@@ -696,7 +718,7 @@ async fn ensure_summary(
             .into(),
         messages: vec![Message::new(
             crate::chat::Role::User,
-            format!("<transcript>\n{digest}\n</transcript>"),
+            format!("goal: {}\n<transcript>\n{digest}\n</transcript>", crew.goal),
         )],
         model: pc.model.clone(),
         max_tokens: Some(pc.max_tokens.map_or(600, |m| m.min(600))),
@@ -707,18 +729,29 @@ async fn ensure_summary(
     };
     match summarizer_call(provider.as_ref(), &req, &pc.model, &pc.kind).await {
         Ok((text, rows)) => {
-            let s: String = text.trim().chars().take(SUMMARY_MAX_CHARS).collect();
+            let fresh: String = text.trim().chars().take(900).collect();
+            // the fresh digest covers the newest dropped messages; the previous
+            // summary still stands for everything before it — keep both
+            let merged = match crew.summary.as_deref().filter(|s| !s.is_empty()) {
+                Some(prev) => format!("{}\n{}", trunc(prev, 600), fresh),
+                None => fresh,
+            };
+            let merged: String = merged.chars().take(SUMMARY_MAX_CHARS).collect();
             if !rows.is_empty() {
                 crew.usage.entry("crew".into()).or_default().extend(rows);
             }
-            crew.summary = Some(s.clone());
+            crew.summary = Some(merged.clone());
             crew.summary_upto = drop;
             crew.updated = now();
             let _ = save(crew);
-            Some(s)
+            Some(merged)
         }
         Err(_) => {
-            // mark as covered so a failing summarizer is not retried on every step
+            if have.is_some() {
+                // keep serving the previous (slightly stale) summary, retry later
+                return have;
+            }
+            // mark as covered so a failing summarizer is not retried every step
             crew.summary = Some(String::new());
             crew.summary_upto = drop;
             crew.updated = now();
@@ -781,6 +814,26 @@ async fn step_inner(
     if crew.status == "done" {
         bail!("crew is already done — /crew new to start another");
     }
+    // budget already spent: stop before paying for anything, even the summary
+    if let Some(b) = crew.budget.filter(|b| *b > 0.0) {
+        let spent = crew_spent(&crew);
+        if spent >= b {
+            let msg = format!("crew budget reached (${spent:.2} of ${b:.2}) — stopped");
+            crew.messages.push(CrewMsg {
+                author: "crew".into(),
+                kind: "system".into(),
+                content: msg.clone(),
+                ts: now(),
+            });
+            crew.updated = now();
+            save(&crew)?;
+            let _ = tx.send(ApiEvent::Note(msg));
+            return Ok(format!(
+                "crew step finished — status: {} (budget: ${spent:.2} of ${b:.2})",
+                crew.status
+            ));
+        }
+    }
     crew.status = "running".into();
     crew.updated = now();
     save(&crew)?;
@@ -832,13 +885,23 @@ async fn step_inner(
                 }
             }
             skipped_all = false;
-            let reply = match ask_member(&crew, &member, cfg, tx, summary.as_deref()).await {
-                Ok((text, rows)) => {
-                    if !rows.is_empty() {
+            let mut spent_rows: Vec<UsageRow> = Vec::new();
+            let reply = match ask_member(
+                &crew,
+                &member,
+                cfg,
+                tx,
+                summary.as_deref(),
+                &mut spent_rows,
+            )
+            .await
+            {
+                Ok(text) => {
+                    if !spent_rows.is_empty() {
                         crew.usage
                             .entry(member.name.clone())
                             .or_default()
-                            .extend(rows);
+                            .extend(std::mem::take(&mut spent_rows));
                         if let Some(limit) = member.limit {
                             if limit > 0 && member_used(&crew, &name) >= limit {
                                 let msg =
@@ -856,6 +919,14 @@ async fn step_inner(
                     text
                 }
                 Err(e) => {
+                    // even a failed call may have streamed usage: bank it, the
+                    // budget must see what was actually spent
+                    if !spent_rows.is_empty() {
+                        crew.usage
+                            .entry(member.name.clone())
+                            .or_default()
+                            .extend(spent_rows);
+                    }
                     let msg = format!("{name}: error — {e:#}");
                     crew.messages.push(CrewMsg {
                         author: "crew".into(),
@@ -867,34 +938,9 @@ async fn step_inner(
                     continue;
                 }
             };
-            let mut renamed: Option<String> = None;
             // self-naming for placeholder members
-            if let Some(new_name) = extract_line(&reply, "RENAME:") {
-                let new_name = sanitize_name(&new_name);
-                if !new_name.is_empty()
-                    && new_name != member.name
-                    && !crew.members.iter().any(|m| m.name == new_name)
-                {
-                    let rows = crew.usage.remove(&member.name).unwrap_or_default();
-                    crew.usage.insert(new_name.clone(), rows);
-                    for m in crew.members.iter_mut() {
-                        if m.name == member.name {
-                            m.name = new_name.clone();
-                        }
-                    }
-                    crew.messages.push(CrewMsg {
-                        author: "crew".into(),
-                        kind: "system".into(),
-                        content: format!("{} is now known as {new_name}", member.name),
-                        ts: now(),
-                    });
-                    let _ = tx.send(ApiEvent::Note(format!(
-                        "crew: {} renamed to {new_name}",
-                        member.name
-                    )));
-                    renamed = Some(new_name);
-                }
-            }
+            let renamed: Option<String> = extract_line(&reply, "RENAME:")
+                .and_then(|raw| try_rename(&mut crew, &member.name, &raw, tx));
             let author = renamed.unwrap_or_else(|| member.name.clone());
             for memo in extract_lines(&reply, "MEMO:") {
                 let m = Memo {
@@ -967,6 +1013,20 @@ async fn step_inner(
                 let mut asked = 0usize;
                 let mut rejected: Vec<String> = Vec::new();
                 for r in &reviewers {
+                    if CANCEL.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    // reviewers burn money too: the budget gates them as well
+                    if let Some(b) = crew.budget.filter(|b| *b > 0.0) {
+                        if crew_spent(&crew) >= b {
+                            rejected.push(format!(
+                                "{}: skipped, crew budget spent (${:.2} of ${b:.2})",
+                                r.name,
+                                crew_spent(&crew)
+                            ));
+                            continue;
+                        }
+                    }
                     let used = member_used(&crew, &r.name);
                     if let Some(limit) = r.limit {
                         if limit > 0 && used >= limit {
@@ -974,14 +1034,22 @@ async fn step_inner(
                         }
                     }
                     asked += 1;
-                    match ask_member(&crew, r, cfg, tx, summary.as_deref()).await {
-                        Ok((text, rows)) => {
-                            if !rows.is_empty() {
-                                crew.usage.entry(r.name.clone()).or_default().extend(rows);
+                    let mut spent_rows: Vec<UsageRow> = Vec::new();
+                    match ask_member(&crew, r, cfg, tx, summary.as_deref(), &mut spent_rows).await {
+                        Ok(text) => {
+                            if !spent_rows.is_empty() {
+                                crew.usage
+                                    .entry(r.name.clone())
+                                    .or_default()
+                                    .extend(std::mem::take(&mut spent_rows));
                             }
+                            // a placeholder reviewer may pick its callsign here too
+                            let r_author = extract_line(&text, "RENAME:")
+                                .and_then(|raw| try_rename(&mut crew, &r.name, &raw, tx))
+                                .unwrap_or_else(|| r.name.clone());
                             for memo in extract_lines(&text, "MEMO:") {
                                 crew.memory.push(Memo {
-                                    author: r.name.clone(),
+                                    author: r_author.clone(),
                                     content: memo.chars().take(500).collect(),
                                     ts: now(),
                                 });
@@ -991,7 +1059,7 @@ async fn step_inner(
                                 crew.memory.drain(0..drop);
                             }
                             crew.messages.push(CrewMsg {
-                                author: r.name.clone(),
+                                author: r_author.clone(),
                                 kind: "agent".into(),
                                 content: text.clone(),
                                 ts: now(),
@@ -999,20 +1067,33 @@ async fn step_inner(
                             crew.updated = now();
                             let _ = tx.send(ApiEvent::Crew {
                                 id: crew.id.clone(),
-                                author: r.name.clone(),
+                                author: r_author.clone(),
                                 role: r.role.clone(),
                                 content: text.clone(),
                             });
                             if extract_line(&text, "APPROVE:").is_some() {
                                 approved += 1;
                             } else if let Some(ch) = extract_line(&text, "CHANGES:") {
-                                rejected.push(format!("{}: {}", r.name, trunc(&ch, 120)));
+                                rejected.push(format!("{}: {}", r_author, trunc(&ch, 120)));
                             } else {
-                                rejected.push(format!("{}: no APPROVE", r.name));
+                                rejected.push(format!("{}: no APPROVE", r_author));
                             }
                         }
-                        Err(e) => rejected.push(format!("{}: error — {e:#}", r.name)),
+                        Err(e) => {
+                            if !spent_rows.is_empty() {
+                                crew.usage
+                                    .entry(r.name.clone())
+                                    .or_default()
+                                    .extend(spent_rows);
+                            }
+                            rejected.push(format!("{}: error — {e:#}", r.name));
+                        }
                     }
+                }
+                // cancelled mid-review: persist and bail out of the whole step
+                if CANCEL.load(Ordering::Relaxed) {
+                    save(&crew)?;
+                    break 'rounds;
                 }
                 save(&crew)?;
                 if asked == 0 {
@@ -1141,7 +1222,7 @@ async fn member_call(
     model: &str,
     kind: &str,
     tx: &UnboundedSender<ApiEvent>,
-) -> Result<(String, Vec<crate::chat::ToolCall>, Vec<UsageRow>)> {
+) -> (Result<(String, Vec<crate::chat::ToolCall>)>, Vec<UsageRow>) {
     let (etx, mut erx) = tokio::sync::mpsc::unbounded_channel();
     let rows: std::sync::Arc<Mutex<Vec<UsageRow>>> = Default::default();
     let fwd = {
@@ -1183,9 +1264,8 @@ async fn member_call(
     let reply = provider.chat(req, &etx).await;
     drop(etx);
     let _ = fwd.await;
-    let reply = reply?;
-    let rows = std::mem::take(&mut *rows.lock().unwrap());
-    Ok((reply.text, reply.calls, rows))
+    let taken = std::mem::take(&mut *rows.lock().unwrap());
+    (reply.map(|r| (r.text, r.calls)), taken)
 }
 
 /// one member's turn: tool-less members stream a single call, tool-enabled
@@ -1197,10 +1277,11 @@ async fn ask_member(
     cfg: &crate::config::Config,
     tx: &UnboundedSender<ApiEvent>,
     summary: Option<&str>,
-) -> Result<(String, Vec<UsageRow>)> {
+    spent: &mut Vec<UsageRow>,
+) -> Result<String> {
     let (provider, mut req, pc) = member_request(crew, member, cfg, summary)?;
     if !member.tools {
-        let (text, _calls, rows) = member_call(
+        let (res, rows) = member_call(
             provider.as_ref(),
             &req,
             &crew.id,
@@ -1209,18 +1290,19 @@ async fn ask_member(
             &pc.kind,
             tx,
         )
-        .await?;
-        return Ok((text, rows));
+        .await;
+        spent.extend(rows);
+        let (text, _calls) = res?;
+        return Ok(text);
     }
 
     const MAX_TOOL_ROUNDS: usize = 8;
     let mut perm = cfg.permissions.clone();
     let mut msgs = req.messages.clone();
-    let mut all_rows: Vec<UsageRow> = Vec::new();
     let mut text = String::new();
     for round in 0..=MAX_TOOL_ROUNDS {
         req.messages = msgs.clone();
-        let (t, calls, rows) = member_call(
+        let (res, rows) = member_call(
             provider.as_ref(),
             &req,
             &crew.id,
@@ -1229,8 +1311,9 @@ async fn ask_member(
             &pc.kind,
             tx,
         )
-        .await?;
-        all_rows.extend(rows);
+        .await;
+        spent.extend(rows);
+        let (t, calls) = res?;
         if calls.is_empty() || round == MAX_TOOL_ROUNDS {
             text = t;
             break;
@@ -1292,13 +1375,54 @@ async fn ask_member(
             }
         }
     }
-    Ok((text, all_rows))
+    Ok(text)
 }
 
 fn extract_line(text: &str, prefix: &str) -> Option<String> {
     text.lines()
         .find_map(|l| l.trim().strip_prefix(prefix))
         .map(|s| s.trim().to_string())
+}
+
+const RESERVED_NAMES: [&str; 3] = ["all", "you", "crew"];
+
+fn name_reserved(name: &str) -> bool {
+    RESERVED_NAMES.iter().any(|r| name.eq_ignore_ascii_case(r))
+}
+
+/// apply a "RENAME:" request from a reply: migrate usage, rename the member,
+/// note the crew; None when the name is taken/reserved/a no-op
+fn try_rename(
+    crew: &mut Crew,
+    old_name: &str,
+    raw: &str,
+    tx: &UnboundedSender<ApiEvent>,
+) -> Option<String> {
+    let new_name = sanitize_name(raw);
+    if new_name.is_empty()
+        || new_name == old_name
+        || name_reserved(&new_name)
+        || crew.members.iter().any(|m| m.name == new_name)
+    {
+        return None;
+    }
+    let rows = crew.usage.remove(old_name).unwrap_or_default();
+    crew.usage.insert(new_name.clone(), rows);
+    for m in crew.members.iter_mut() {
+        if m.name == old_name {
+            m.name = new_name.clone();
+        }
+    }
+    crew.messages.push(CrewMsg {
+        author: "crew".into(),
+        kind: "system".into(),
+        content: format!("{old_name} is now known as {new_name}"),
+        ts: now(),
+    });
+    let _ = tx.send(ApiEvent::Note(format!(
+        "crew: {old_name} renamed to {new_name}"
+    )));
+    Some(new_name)
 }
 
 fn sanitize_name(s: &str) -> String {
@@ -1401,7 +1525,11 @@ pub fn mention_graph(crew: &Crew) -> Vec<(String, String, usize)> {
 }
 
 pub fn send(crew_id: &str, text: &str) -> Result<()> {
-    let mut crew = load(crew_id)?;
+    let mut crew = load(crew_id)?; // a running step holds the whole crew in memory and would clobber this
+    if is_running() {
+        bail!("crew is running — stop it first");
+    }
+
     let text = text.trim();
     if text.is_empty() {
         bail!("empty message");
@@ -1452,12 +1580,15 @@ pub fn usage_report(crew_id: &str) -> Result<String> {
     let mut tcost = 0.0f64;
     out.push_str("crew usage — per member:");
     for (name, rows) in &crew.usage {
-        let role = crew
-            .members
-            .iter()
-            .find(|m| &m.name == name)
-            .map(|m| m.role.clone())
-            .unwrap_or_default();
+        let role = if name == "crew" {
+            "auto-summary".to_string()
+        } else {
+            crew.members
+                .iter()
+                .find(|m| &m.name == name)
+                .map(|m| m.role.clone())
+                .unwrap_or_default()
+        };
         let (reqs, tin_m, tout_m, tc_m, cost_m) = crate::usage::totals(rows);
         treq += reqs;
         tin += tin_m;
@@ -1514,7 +1645,11 @@ pub fn usage_json(crew_id: &str) -> Result<serde_json::Value> {
         tcost += cost;
         rows.push(serde_json::json!({
             "name": name,
-            "role": crew.members.iter().find(|m| &m.name == name).map(|m| m.role.clone()).unwrap_or_default(),
+            "role": if name == "crew" {
+                "auto-summary".to_string()
+            } else {
+                crew.members.iter().find(|m| &m.name == name).map(|m| m.role.clone()).unwrap_or_default()
+            },
             "requests": reqs,
             "input": in_t,
             "output": out_t,
@@ -1984,31 +2119,36 @@ mod tests {
         }
         let drop = crew.messages.len() - TRANSCRIPT_WINDOW;
         assert_eq!(drop, 10);
-        // nothing cached yet
-        assert!(cached_summary(&crew, drop).is_none());
+        // nothing cached: below the slack the plan asks to generate
+        let (have, need) = summary_plan(&crew, drop);
+        assert!(have.is_none() && need);
         // digest covers the dropped range only
         let d = digest_for_summary(&crew, drop);
         assert!(d.contains("msg 9"), "{d}");
         assert!(!d.contains("msg 49"), "recent tail must not be summarized");
         assert!(!d.contains("msg 50"));
-        // fresh cache is reused; stale cache is not
+        // fresh cache is served as-is, no regeneration
         crew.summary = Some("earlier work done".into());
         crew.summary_upto = drop;
-        assert_eq!(
-            cached_summary(&crew, drop).as_deref(),
-            Some("earlier work done")
-        );
-        assert!(cached_summary(&crew, drop - 1).is_none());
-        // empty summary means "tried and failed", never injected
+        let (have, need) = summary_plan(&crew, drop);
+        assert_eq!(have.as_deref(), Some("earlier work done"));
+        assert!(!need);
+        // a slightly stale summary is still served (paid once per ~slack msgs)
+        let (have, need) = summary_plan(&crew, drop + SUMMARY_REFRESH_SLACK - 1);
+        assert_eq!(have.as_deref(), Some("earlier work done"));
+        assert!(!need, "below the slack no refresh is paid for");
+        let (have, need) = summary_plan(&crew, drop + SUMMARY_REFRESH_SLACK);
+        assert!(need, "lag >= slack must refresh");
+        // empty summary means "tried and failed": nothing injected, and a
+        // retry only comes once the lag grows past MIN_DROPPED again
         crew.summary = Some(String::new());
-        assert!(cached_summary(&crew, drop).is_none());
+        let (have, need) = summary_plan(&crew, drop);
+        assert!(have.is_none() && !need);
+        let (_, need2) = summary_plan(&crew, drop + SUMMARIZE_MIN_DROPPED);
+        assert!(need2);
         // the summary rides ahead of the recent tail
         crew.summary = Some("earlier work done".into());
-        let msgs = build_transcript(
-            &crew,
-            TRANSCRIPT_WINDOW,
-            cached_summary(&crew, drop).as_deref(),
-        );
+        let msgs = build_transcript(&crew, TRANSCRIPT_WINDOW, Some("earlier work done"));
         assert_eq!(msgs.len(), TRANSCRIPT_WINDOW + 1);
         assert!(msgs[0].content.contains("summary of the earlier messages"));
         assert!(msgs[0].content.contains("earlier work done"));
