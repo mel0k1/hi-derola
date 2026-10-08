@@ -980,9 +980,8 @@ async fn step_inner(
                                 provider, req, &cid, &pc, &wmember, &wcfg, &wtx, false,
                             )
                             .await;
-                            let out = res.map(|text| (text, rows));
                             // publish as soon as it is ready, not when the round ends
-                            if let Ok((text, _)) = &out {
+                            if let Ok(text) = &res {
                                 let _ = wtx.send(ApiEvent::Crew {
                                     id: cid,
                                     author: wmember.name.clone(),
@@ -992,7 +991,8 @@ async fn step_inner(
                             }
                             results.lock().unwrap().push(WorkerOut {
                                 member: wmember,
-                                res: out,
+                                res,
+                                rows,
                             });
                         }));
                     }
@@ -1180,11 +1180,13 @@ async fn step_inner(
     ))
 }
 
-/// a finished background worker's turn: the member it ran for and the
-/// outcome (reply text + usage rows, or the error)
+/// a finished background worker's turn: the member it ran for, the outcome
+/// and the usage rows (banked even when the call errored — the budget must
+/// see what was actually spent)
 struct WorkerOut {
     member: Member,
-    res: Result<(String, Vec<UsageRow>)>,
+    res: Result<String>,
+    rows: Vec<UsageRow>,
 }
 
 /// peer review gate: a DONE claim only ends the crew after every askable
@@ -1375,12 +1377,12 @@ async fn drain_workers(
     for out in outs {
         let member = out.member;
         let text = match out.res {
-            Ok((text, rows)) => {
-                if !rows.is_empty() {
+            Ok(text) => {
+                if !out.rows.is_empty() {
                     crew.usage
                         .entry(member.name.clone())
                         .or_default()
-                        .extend(rows);
+                        .extend(out.rows);
                     if let Some(limit) = member.limit {
                         if limit > 0 && member_used(crew, &member.name) >= limit {
                             let msg = format!(
@@ -1400,6 +1402,13 @@ async fn drain_workers(
                 text
             }
             Err(e) => {
+                // a failed worker call may still have streamed usage: bank it
+                if !out.rows.is_empty() {
+                    crew.usage
+                        .entry(member.name.clone())
+                        .or_default()
+                        .extend(out.rows);
+                }
                 let msg = format!("{}: error — {e:#}", member.name);
                 crew.messages.push(CrewMsg {
                     author: "crew".into(),
