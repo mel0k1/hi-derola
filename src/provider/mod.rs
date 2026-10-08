@@ -63,6 +63,12 @@ pub enum ApiEvent {
         role: String,
         content: String,
     },
+    /// streaming delta from a crew member's in-progress reply
+    CrewChunk {
+        id: String,
+        author: String,
+        delta: String,
+    },
     Done {
         text: String,
         messages: Vec<Message>,

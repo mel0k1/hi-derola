@@ -5,8 +5,12 @@
 //! gets the transcript and answers with its role in mind; @Name steers who
 //! speaks next, a "DONE:" line ends the crew, "RENAME:" lets a placeholder
 //! pick its own callsign. members ride any configured provider profile, so
-//! one crew can mix apis and models. usage rows are recorded per member —
-//! the `/crew usage` report splits tokens and cost by participant.
+//! one crew can mix apis and models. replies stream live to the frontends
+//! (CrewChunk), tool-enabled members ("tools" flag) may run bash/file tools
+//! inside their rounds under the permission config, and per-member token
+//! limits ("limit=N") auto-stop members (and the crew once all are spent).
+//! usage rows are recorded per member — the `/crew usage` report splits
+//! tokens and cost by participant.
 
 use crate::chat::Message;
 use crate::provider::{ApiEvent, ChatRequest};
@@ -28,6 +32,12 @@ pub struct Member {
     pub profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// token budget (input+output) for this member; auto-stops them when hit
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    /// member may use file/shell tools inside its rounds (under permissions)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tools: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -144,6 +154,8 @@ pub struct CrewMeta {
     pub members: usize,
     pub messages: usize,
     pub updated: u64,
+    /// top mention edges author→target (the resume-list mini graph)
+    pub mentions: Vec<(String, String, usize)>,
 }
 
 pub fn list() -> Vec<CrewMeta> {
@@ -164,6 +176,7 @@ pub fn list() -> Vec<CrewMeta> {
             continue;
         };
         out.push(CrewMeta {
+            mentions: mention_graph(&c).into_iter().take(6).collect(),
             id: c.id,
             goal: c.goal,
             status: c.status,
@@ -176,7 +189,9 @@ pub fn list() -> Vec<CrewMeta> {
     out
 }
 
-/// "Name|role[|profile|model]" — a leading "|role" makes a placeholder name
+/// "Name|role[|profile|model[|flags]]" — a leading "|role" makes a placeholder
+/// name; flags (any order): "tools" gives the member file/shell tools,
+/// "limit=<n>" caps its tokens (20k / 1.5m suffixes work, "off"/0 clears)
 pub fn parse_member(spec: &str, taken: &[Member]) -> Result<Member> {
     let parts: Vec<&str> = spec.split('|').map(str::trim).collect();
     if parts.is_empty() || parts.iter().all(|p| p.is_empty()) {
@@ -190,16 +205,21 @@ pub fn parse_member(spec: &str, taken: &[Member]) -> Result<Member> {
     if role.is_empty() {
         bail!("member role is empty");
     }
-    let profile = rest
-        .get(1)
-        .copied()
-        .filter(|s| !s.is_empty())
-        .map(String::from);
-    let model = rest
-        .get(2)
-        .copied()
-        .filter(|s| !s.is_empty())
-        .map(String::from);
+    let mut positional: Vec<Option<String>> = Vec::new();
+    let mut limit = None;
+    let mut tools = false;
+    for part in rest.iter().skip(1) {
+        let lower = part.to_lowercase();
+        if lower == "tools" {
+            tools = true;
+        } else if let Some(v) = lower.strip_prefix("limit=") {
+            limit = parse_limit(v)?;
+        } else if !lower.is_empty() {
+            positional.push(Some(part.to_string()));
+        }
+    }
+    let profile = positional.first().cloned().flatten();
+    let model = positional.get(1).cloned().flatten();
     let name = match name_part {
         Some(n) => n.to_string(),
         None => {
@@ -221,7 +241,56 @@ pub fn parse_member(spec: &str, taken: &[Member]) -> Result<Member> {
         role,
         profile,
         model,
+        limit,
+        tools,
     })
+}
+
+/// "20k" / "1.5m" / "500000"; "off" or 0 clears the limit
+pub fn parse_limit_opt(v: &str) -> Option<u64> {
+    parse_limit(v).ok().flatten()
+}
+
+fn parse_limit(v: &str) -> Result<Option<u64>> {
+    let v = v.trim();
+    if v.is_empty() || v == "off" || v == "0" {
+        return Ok(None);
+    }
+    let (num, mult) = match v.chars().last() {
+        Some('k') | Some('K') => (&v[..v.len() - 1], 1_000u64),
+        Some('m') | Some('M') => (&v[..v.len() - 1], 1_000_000),
+        _ => (v, 1),
+    };
+    let n: f64 = num
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("bad limit \"{v}\" — use 200000, 200k or off"))?;
+    if n < 0.0 {
+        bail!("limit must be positive");
+    }
+    Ok(Some((n * mult as f64) as u64))
+}
+
+/// change a member's token budget; None clears it
+pub fn set_limit(crew_id: &str, name: &str, limit: Option<u64>) -> Result<Crew> {
+    let mut crew = load(crew_id)?;
+    let m = crew
+        .members
+        .iter_mut()
+        .find(|m| m.name.eq_ignore_ascii_case(name))
+        .ok_or_else(|| anyhow::anyhow!("no member named \"{name}\""))?;
+    m.limit = limit;
+    crew.updated = now();
+    save(&crew)?;
+    Ok(crew)
+}
+
+/// total tokens a member has burned so far (input + output, cached included)
+pub fn member_used(crew: &Crew, name: &str) -> u64 {
+    crew.usage
+        .get(name)
+        .map(|rows| rows.iter().map(|r| r.input + r.output).sum())
+        .unwrap_or(0)
 }
 
 pub fn create(goal: &str, specs: &[String]) -> Result<Crew> {
@@ -280,9 +349,18 @@ fn crew_system_prompt(crew: &Crew, member: &Member) -> String {
         "\nProtocol:\n\
          - One reply per turn; keep it short and substantive, in the user's language.\n\
          - Address a specific member with @Name when the next step is theirs.\n\
-         - Coordinate, plan, review, split work — the crew chat has no file or shell tools.\n\
+         - Coordinate, plan, review, split work.\n\
          - When the shared goal is fully achieved, end the reply with a line \"DONE: <short summary>\".\n",
     );
+    if member.tools {
+        s.push_str(
+            "- You have file and shell tools (bash, read_file, write_file, edit, glob, grep). \
+                 Use them to actually do your part of the work; each tool run may ask the user \
+                 for permission. Keep the final reply a short report of what you did.\n",
+        );
+    } else {
+        s.push_str("- The crew chat has no file or shell tools for you.\n");
+    }
     if placeholder {
         s.push_str(
             "- Your name is a placeholder. If you want your own callsign, start this first \
@@ -356,6 +434,7 @@ async fn step_inner(
     'rounds: for _ in 0..rounds.max(1) {
         let order: Vec<String> = crew.members.iter().map(|m| m.name.clone()).collect();
         let mut queue = order.clone();
+        let mut skipped_all = true;
         while !queue.is_empty() {
             if CANCEL.load(Ordering::Relaxed) {
                 break 'rounds;
@@ -364,13 +443,42 @@ async fn step_inner(
             let Some(member) = crew.members.iter().find(|m| m.name == name).cloned() else {
                 continue;
             };
-            let reply = match ask_member(&crew, &member, cfg).await {
+            // token budget auto-stop: over-limit members sit the round out
+            let used = member_used(&crew, &name);
+            if let Some(limit) = member.limit {
+                if limit > 0 && used >= limit {
+                    let msg = format!("{name}: token limit reached ({used} ≥ {limit}) — skipped");
+                    crew.messages.push(CrewMsg {
+                        author: "crew".into(),
+                        kind: "system".into(),
+                        content: msg.clone(),
+                        ts: now(),
+                    });
+                    let _ = tx.send(ApiEvent::Note(msg));
+                    continue;
+                }
+            }
+            skipped_all = false;
+            let reply = match ask_member(&crew, &member, cfg, tx).await {
                 Ok((text, rows)) => {
                     if !rows.is_empty() {
                         crew.usage
                             .entry(member.name.clone())
                             .or_default()
                             .extend(rows);
+                        if let Some(limit) = member.limit {
+                            if limit > 0 && member_used(&crew, &name) >= limit {
+                                let msg =
+                                    format!("{name}: token limit reached ({limit}) — auto-stopped");
+                                crew.messages.push(CrewMsg {
+                                    author: "crew".into(),
+                                    kind: "system".into(),
+                                    content: msg.clone(),
+                                    ts: now(),
+                                });
+                                let _ = tx.send(ApiEvent::Note(msg));
+                            }
+                        }
                     }
                     text
                 }
@@ -447,6 +555,11 @@ async fn step_inner(
                 }
             }
         }
+        // every member is over its budget — stop the crew instead of spinning
+        if skipped_all {
+            note.push_str(" (all members hit their token limits)");
+            break;
+        }
     }
     if !done {
         crew.status = "idle".into();
@@ -462,14 +575,28 @@ async fn step_inner(
     ))
 }
 
-/// one provider call for one member; returns the reply plus the usage rows
-/// captured from the provider's usage events (attributed by the caller)
-async fn ask_member(
+/// the tool subset a tool-enabled crew member may call
+pub fn crew_tool_specs() -> Vec<crate::provider::ToolSpec> {
+    crate::tools::specs()
+        .into_iter()
+        .filter(|s| {
+            matches!(
+                s.name.as_str(),
+                "bash" | "read_file" | "write_file" | "edit" | "list_files" | "glob" | "grep"
+            )
+        })
+        .collect()
+}
+
+fn member_request(
     crew: &Crew,
     member: &Member,
     cfg: &crate::config::Config,
-) -> Result<(String, Vec<UsageRow>)> {
-    let _ = crew;
+) -> Result<(
+    std::sync::Arc<dyn crate::provider::Provider>,
+    ChatRequest,
+    crate::config::ProviderConfig,
+)> {
     let pc = cfg.provider_for(member.profile.as_deref(), member.model.as_deref());
     let api_key = pc.api_key.clone().or_else(|| cfg.api_key());
     let Some(api_key) = api_key.filter(|k| !k.trim().is_empty()) else {
@@ -480,6 +607,11 @@ async fn ask_member(
         );
     };
     let provider = crate::provider::build(&pc.kind, pc.base_url.clone(), api_key)?;
+    let tools = if member.tools {
+        crew_tool_specs()
+    } else {
+        Vec::new()
+    };
     let req = ChatRequest {
         system: crew_system_prompt(crew, member),
         messages: transcript_messages(crew, 40),
@@ -487,31 +619,173 @@ async fn ask_member(
         max_tokens: pc.max_tokens,
         temperature: pc.temperature,
         top_p: pc.top_p,
-        stream: false,
-        tools: Vec::new(),
+        stream: true,
+        tools,
     };
+    Ok((provider, req, pc))
+}
+
+/// one provider turn for one member: streams deltas out as CrewChunk
+/// events, returns the reply text, tool calls and usage rows
+async fn member_call(
+    provider: &dyn crate::provider::Provider,
+    req: &ChatRequest,
+    crew_id: &str,
+    name: &str,
+    model: &str,
+    kind: &str,
+    tx: &UnboundedSender<ApiEvent>,
+) -> Result<(String, Vec<crate::chat::ToolCall>, Vec<UsageRow>)> {
     let (etx, mut erx) = tokio::sync::mpsc::unbounded_channel();
-    let reply = provider.chat(&req, &etx).await?;
+    let rows: std::sync::Arc<Mutex<Vec<UsageRow>>> = Default::default();
+    let fwd = {
+        let tx = tx.clone();
+        let crew_id = crew_id.to_string();
+        let name = name.to_string();
+        let model = model.to_string();
+        let kind = kind.to_string();
+        let rows = rows.clone();
+        tokio::spawn(async move {
+            while let Some(ev) = erx.recv().await {
+                match ev {
+                    ApiEvent::Chunk(delta) => {
+                        let _ = tx.send(ApiEvent::CrewChunk {
+                            id: crew_id.clone(),
+                            author: name.clone(),
+                            delta,
+                        });
+                    }
+                    ApiEvent::Usage {
+                        input,
+                        output,
+                        cached,
+                    } => {
+                        let cost = cost_of(&kind, &model, input, output, cached);
+                        rows.lock().unwrap().push(UsageRow {
+                            model: model.clone(),
+                            input,
+                            output,
+                            cached,
+                            cost,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        })
+    };
+    let reply = provider.chat(req, &etx).await;
     drop(etx);
-    let mut rows: Vec<UsageRow> = Vec::new();
-    while let Ok(ev) = erx.try_recv() {
-        if let ApiEvent::Usage {
-            input,
-            output,
-            cached,
-        } = ev
-        {
-            let cost = cost_of(&pc.kind, &pc.model, input, output, cached);
-            rows.push(UsageRow {
-                model: pc.model.clone(),
-                input,
-                output,
-                cached,
-                cost,
+    let _ = fwd.await;
+    let reply = reply?;
+    let rows = std::mem::take(&mut *rows.lock().unwrap());
+    Ok((reply.text, reply.calls, rows))
+}
+
+/// one member's turn: tool-less members stream a single call, tool-enabled
+/// ones run a short agentic loop where every call goes through the
+/// permission config (Confirm events ride the same channel)
+async fn ask_member(
+    crew: &Crew,
+    member: &Member,
+    cfg: &crate::config::Config,
+    tx: &UnboundedSender<ApiEvent>,
+) -> Result<(String, Vec<UsageRow>)> {
+    let (provider, mut req, pc) = member_request(crew, member, cfg)?;
+    if !member.tools {
+        let (text, _calls, rows) = member_call(
+            provider.as_ref(),
+            &req,
+            &crew.id,
+            &member.name,
+            &pc.model,
+            &pc.kind,
+            tx,
+        )
+        .await?;
+        return Ok((text, rows));
+    }
+
+    const MAX_TOOL_ROUNDS: usize = 8;
+    let mut perm = cfg.permissions.clone();
+    let mut msgs = req.messages.clone();
+    let mut all_rows: Vec<UsageRow> = Vec::new();
+    let mut text = String::new();
+    for round in 0..=MAX_TOOL_ROUNDS {
+        req.messages = msgs.clone();
+        let (t, calls, rows) = member_call(
+            provider.as_ref(),
+            &req,
+            &crew.id,
+            &member.name,
+            &pc.model,
+            &pc.kind,
+            tx,
+        )
+        .await?;
+        all_rows.extend(rows);
+        if calls.is_empty() || round == MAX_TOOL_ROUNDS {
+            text = t;
+            break;
+        }
+        msgs.push(Message::new(crate::chat::Role::Assistant, t).with_calls(calls.clone()));
+        for call in calls {
+            let _ = tx.send(ApiEvent::Tool {
+                name: format!("{} (crew {})", call.name, member.name),
+                detail: crate::tools::detail(&call.name, &call.args),
+                diff: crate::tools::preview(&call.name, &call.args),
+                paths: crate::tools::paths(&call.name, &call.args),
             });
+            // bash routed into an attached VM is gated as the "sandbox" perm
+            let perm_tool = if call.name == "bash" && crate::sandbox::shell_route().is_some() {
+                "sandbox"
+            } else {
+                call.name.as_str()
+            };
+            let tool_msg = |content: String| Message::tool(&call.id, content);
+            match perm.check(perm_tool, &call.args) {
+                crate::perm::Perm::Deny => {
+                    msgs.push(tool_msg("denied by permissions config".into()));
+                }
+                crate::perm::Perm::Ask => {
+                    let (otx, orx) = tokio::sync::oneshot::channel();
+                    let _ = tx.send(ApiEvent::Confirm {
+                        name: call.name.clone(),
+                        args: call.args.clone(),
+                        rx: otx,
+                    });
+                    let r = orx.await.unwrap_or_default();
+                    if !r.approved {
+                        let why = if r.feedback.is_empty() {
+                            "denied by the user".to_string()
+                        } else {
+                            format!("denied by the user: {}", r.feedback)
+                        };
+                        msgs.push(tool_msg(why));
+                        continue;
+                    }
+                    if r.always {
+                        if let Some(rule) = crate::perm::derive_rule(perm_tool, &call.args) {
+                            perm.rules.push(rule);
+                        }
+                    }
+                    let out = crate::tools::execute(&call.name, &call.args, None).await;
+                    msgs.push(tool_msg(match out {
+                        Ok(o) => o,
+                        Err(e) => format!("error: {e:#}"),
+                    }));
+                }
+                crate::perm::Perm::Allow => {
+                    let out = crate::tools::execute(&call.name, &call.args, None).await;
+                    msgs.push(tool_msg(match out {
+                        Ok(o) => o,
+                        Err(e) => format!("error: {e:#}"),
+                    }));
+                }
+            }
         }
     }
-    Ok((reply.text, rows))
+    Ok((text, all_rows))
 }
 
 fn extract_line(text: &str, prefix: &str) -> Option<String> {
@@ -551,6 +825,48 @@ fn first_mention(text: &str) -> Option<String> {
     } else {
         Some(name)
     }
+}
+
+/// every @mention in one message, resolved against member names (+ "you")
+fn mentions_in(text: &str, known: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find('@') {
+        rest = &rest[at + 1..];
+        let name: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '-')
+            .collect();
+        if name.is_empty() {
+            continue;
+        }
+        if let Some(k) = known.iter().find(|k| k.eq_ignore_ascii_case(&name)) {
+            out.push(k.clone());
+        }
+    }
+    out
+}
+
+/// author→target mention edge counts for the graph view; "you" is the user
+pub fn mention_graph(crew: &Crew) -> Vec<(String, String, usize)> {
+    let mut known: Vec<String> = crew.members.iter().map(|m| m.name.clone()).collect();
+    known.push("you".into());
+    let mut edges: BTreeMap<(String, String), usize> = BTreeMap::new();
+    for m in &crew.messages {
+        if m.kind == "system" {
+            continue;
+        }
+        for target in mentions_in(&m.content, &known) {
+            if target == m.author {
+                continue;
+            }
+            *edges.entry((m.author.clone(), target)).or_default() += 1;
+        }
+    }
+    let mut out: Vec<(String, String, usize)> =
+        edges.into_iter().map(|((a, b), n)| (a, b, n)).collect();
+    out.sort_by_key(|(_, _, n)| std::cmp::Reverse(*n));
+    out
 }
 
 pub fn send(crew_id: &str, text: &str) -> Result<()> {
@@ -678,12 +994,32 @@ pub fn usage_json(crew_id: &str) -> Result<serde_json::Value> {
 /// full state for the gui crew panel
 pub fn state_json(crew_id: &str) -> Result<serde_json::Value> {
     let crew = load(crew_id)?;
+    let graph: Vec<serde_json::Value> = mention_graph(&crew)
+        .into_iter()
+        .map(|(from, to, n)| serde_json::json!({"from": from, "to": to, "n": n}))
+        .collect();
+    let members: Vec<serde_json::Value> = crew
+        .members
+        .iter()
+        .map(|m| {
+            serde_json::json!({
+                "name": m.name,
+                "role": m.role,
+                "profile": m.profile,
+                "model": m.model,
+                "limit": m.limit,
+                "tools": m.tools,
+                "used": member_used(&crew, &m.name),
+            })
+        })
+        .collect();
     Ok(serde_json::json!({
         "id": crew.id,
         "goal": crew.goal,
         "status": crew.status,
-        "members": crew.members,
+        "members": members,
         "messages": crew.messages,
+        "graph": graph,
         "running": is_running(),
     }))
 }
@@ -736,6 +1072,8 @@ mod tests {
             role: role.into(),
             profile: None,
             model: None,
+            limit: None,
+            tools: false,
         }
     }
 
@@ -751,8 +1089,57 @@ mod tests {
         let m = parse_member("Mix|coder|fast|gpt-5-mini", &taken).unwrap();
         assert_eq!(m.profile.as_deref(), Some("fast"));
         assert_eq!(m.model.as_deref(), Some("gpt-5-mini"));
+        assert!(!m.tools);
+        assert!(m.limit.is_none());
+        let m = parse_member("Max|coder|tools|limit=20k", &taken).unwrap();
+        assert!(m.tools);
+        assert_eq!(m.limit, Some(20_000));
+        let m = parse_member("Ada|dev|limit=1.5m|fast|tools", &taken).unwrap();
+        assert_eq!(m.profile.as_deref(), Some("fast"));
+        assert_eq!(m.limit, Some(1_500_000));
+        assert!(m.tools);
+        let m = parse_member("Ox|ops|limit=off", &taken).unwrap();
+        assert!(m.limit.is_none());
+        assert!(parse_member("B|ops|limit=wat", &taken).is_err());
         assert!(parse_member("", &taken).is_err());
         assert!(parse_member("||", &taken).is_err());
+    }
+
+    #[test]
+    fn mention_edges() {
+        let mut crew = Crew {
+            id: "s-1-g".into(),
+            goal: "g".into(),
+            status: "idle".into(),
+            members: vec![member("rex", "planner"), member("nora", "critic")],
+            messages: vec![],
+            usage: BTreeMap::new(),
+            created: 0,
+            updated: 0,
+        };
+        crew.messages.push(CrewMsg {
+            author: "you".into(),
+            kind: "user".into(),
+            content: "@Rex start, cc @Nora".into(),
+            ts: 0,
+        });
+        crew.messages.push(CrewMsg {
+            author: "rex".into(),
+            kind: "agent".into(),
+            content: "done, @Nora over to you (email a@b.c is not a mention)".into(),
+            ts: 0,
+        });
+        crew.messages.push(CrewMsg {
+            author: "rex".into(),
+            kind: "agent".into(),
+            content: "@rex self-ping ignored".into(),
+            ts: 0,
+        });
+        let g = mention_graph(&crew);
+        assert!(g.contains(&("you".into(), "rex".into(), 1)));
+        assert!(g.contains(&("you".into(), "nora".into(), 1)));
+        assert!(g.contains(&("rex".into(), "nora".into(), 1)));
+        assert!(!g.iter().any(|(a, b, _)| a == "rex" && b == "rex"));
     }
 
     #[test]
