@@ -685,7 +685,7 @@ impl App {
 
     fn flush_stream(&mut self) {
         if let Some(i) = self.streaming.take() {
-            if self.entries[i].text.trim().is_empty() {
+            if self.entries.get(i).is_some_and(|e| e.text.trim().is_empty()) {
                 self.entries.remove(i);
                 if let Some(r) = self.reasoning {
                     if r > i {
@@ -705,7 +705,7 @@ impl App {
     /// text in the log, remove=true drops the entry (the final reply replaces it)
     fn flush_crew_stream(&mut self, remove: bool) {
         if let Some((i, _)) = self.crew_stream.take() {
-            if remove {
+            if remove && i < self.entries.len() {
                 self.entries.remove(i);
                 if let Some(r) = self.reasoning {
                     if r > i {
@@ -2115,6 +2115,7 @@ impl App {
             "/clear" | "/new" => {
                 self.session.clear();
                 self.entries.clear();
+                self.crew_stream = None;
                 self.attachments.clear();
                 self.allow_all.store(false, Ordering::Relaxed);
                 self.queue.lock().unwrap().clear();
