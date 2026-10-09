@@ -128,6 +128,12 @@ fn summary_upto_is_zero(n: &usize) -> bool {
 static ACTIVE: Mutex<Option<String>> = Mutex::new(None);
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static CANCEL: AtomicBool = AtomicBool::new(false);
+static BG_RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// how many background-worker turns are in flight right now (status lines)
+pub fn bg_running() -> usize {
+    BG_RUNNING.load(Ordering::Relaxed)
+}
 
 pub fn active() -> Option<String> {
     ACTIVE.lock().unwrap().clone()
@@ -209,6 +215,122 @@ pub fn delete(id: &str) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e).context("delete crew"),
     }
+}
+
+/// a saved crew shape: goal + members + budget, spawnable as a fresh crew
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrewPreset {
+    pub name: String,
+    pub goal: String,
+    pub members: Vec<Member>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<f64>,
+    pub created: u64,
+}
+
+pub fn preset_dir() -> PathBuf {
+    store_dir().join("presets")
+}
+
+fn preset_file(name: &str) -> PathBuf {
+    preset_dir().join(format!("{name}.json"))
+}
+
+/// save a crew's shape (goal, members, budget) as a named preset
+pub fn preset_save(crew_id: &str, name: &str) -> Result<CrewPreset> {
+    let name = name.trim();
+    if !safe_id(name) {
+        bail!("bad preset name \"{name}\" — letters, digits, - and _");
+    }
+    let crew = load(crew_id)?;
+    let p = CrewPreset {
+        name: name.to_string(),
+        goal: crew.goal.clone(),
+        members: crew.members.clone(),
+        budget: crew.budget,
+        created: now(),
+    };
+    std::fs::create_dir_all(preset_dir()).context("create presets dir")?;
+    let raw = serde_json::to_string_pretty(&p)?;
+    let tmp = preset_file(name).with_extension("tmp");
+    std::fs::write(&tmp, raw)?;
+    std::fs::rename(&tmp, preset_file(name))?;
+    Ok(p)
+}
+
+pub fn preset_list() -> Vec<CrewPreset> {
+    let Ok(rd) = std::fs::read_dir(preset_dir()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in rd.flatten() {
+        let p = e.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&p) else {
+            continue;
+        };
+        let Ok(p) = serde_json::from_str::<CrewPreset>(&raw) else {
+            continue;
+        };
+        out.push(p);
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+pub fn preset_delete(name: &str) -> Result<()> {
+    if !safe_id(name) {
+        bail!("bad preset name");
+    }
+    match std::fs::remove_file(preset_file(name)) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).context("delete preset"),
+    }
+}
+
+/// spawn a fresh crew from a preset: same members and budget, empty
+/// transcript, usage and memory; the goal can be overridden for a new mission
+pub fn preset_apply(name: &str, goal: Option<&str>) -> Result<Crew> {
+    if !safe_id(name) {
+        bail!("bad preset name");
+    }
+    let raw = std::fs::read_to_string(preset_file(name)).context("read preset")?;
+    let p: CrewPreset = serde_json::from_str(&raw).context("parse preset")?;
+    let goal = match goal.map(str::trim).filter(|g| !g.is_empty()) {
+        Some(g) => g.to_string(),
+        None => p.goal.clone(),
+    };
+    if goal.is_empty() {
+        bail!(
+            "the preset has no goal — pass one: /crew spawn {} <goal>",
+            p.name
+        );
+    }
+    let crew = Crew {
+        id: crate::sessions::new_id(),
+        goal: goal.clone(),
+        status: "idle".into(),
+        members: p.members,
+        messages: vec![CrewMsg {
+            author: "crew".into(),
+            kind: "system".into(),
+            content: format!("crew goal: {goal}"),
+            ts: now(),
+        }],
+        usage: BTreeMap::new(),
+        memory: Vec::new(),
+        budget: p.budget,
+        summary: None,
+        summary_upto: 0,
+        created: now(),
+        updated: now(),
+    };
+    save(&crew)?;
+    set_active(Some(crew.id.clone()));
+    Ok(crew)
 }
 
 pub struct CrewMeta {
@@ -1006,6 +1128,7 @@ async fn step_inner(
                         let wmember = member.clone();
                         let cid = crew.id.clone();
                         workers.push(tokio::spawn(async move {
+                            BG_RUNNING.fetch_add(1, Ordering::Relaxed);
                             let (res, rows) = run_member_turn(
                                 provider, req, &cid, &pc, &wmember, &wcfg, &wtx, false,
                             )
@@ -1024,6 +1147,7 @@ async fn step_inner(
                                 res,
                                 rows,
                             });
+                            BG_RUNNING.fetch_sub(1, Ordering::Relaxed);
                         }));
                     }
                     Err(e) => {
@@ -1493,6 +1617,154 @@ async fn drain_workers(
         }
     }
     Ok(ended)
+}
+
+/// restart grant: a limit-stopped member gets one fresh limit-worth of
+/// allowance, so a retry actually revives them for the rounds to come
+fn grant_restart_limit(member: &mut Member, used: u64) -> Option<u64> {
+    let limit = member.limit?;
+    if limit == 0 || used < limit {
+        return None;
+    }
+    let fresh = used + limit;
+    member.limit = Some(fresh);
+    Some(fresh)
+}
+
+/// manually re-run one member's turn outside a round: revives an errored or
+/// limit-stopped member on demand. the reply lands in the transcript like any
+/// inline turn (MEMO/RENAME apply, a DONE line runs the review gate); a
+/// member stopped by its token limit also gets one fresh allowance
+pub async fn retry_member(
+    crew_id: &str,
+    name: &str,
+    cfg: &crate::config::Config,
+    tx: &UnboundedSender<ApiEvent>,
+) -> Result<String> {
+    if RUNNING.swap(true, Ordering::Relaxed) {
+        bail!("a crew is already running — /crew stop first");
+    }
+    CANCEL.store(false, Ordering::Relaxed);
+    let out = retry_inner(crew_id, name, cfg, tx).await;
+    RUNNING.store(false, Ordering::Relaxed);
+    out
+}
+
+async fn retry_inner(
+    crew_id: &str,
+    name: &str,
+    cfg: &crate::config::Config,
+    tx: &UnboundedSender<ApiEvent>,
+) -> Result<String> {
+    let mut crew = load(crew_id)?;
+    let Some(member) = crew
+        .members
+        .iter()
+        .find(|m| m.name.eq_ignore_ascii_case(name))
+        .cloned()
+    else {
+        bail!("no member named \"{name}\" — /crew status lists them");
+    };
+    // the retry is an explicit user action: over budget it proceeds with a note
+    if let Some(b) = crew.budget.filter(|b| *b > 0.0) {
+        let spent = crew_spent(&crew);
+        if spent >= b {
+            let _ = tx.send(ApiEvent::Note(format!(
+                "crew budget already spent (${spent:.2} of ${b:.2}) — retrying {name} anyway"
+            )));
+        }
+    }
+    let over_limit = match member.limit {
+        Some(l) => l > 0 && member_used(&crew, &member.name) >= l,
+        None => false,
+    };
+    let prev_status = crew.status.clone();
+    crew.status = "running".into();
+    crew.updated = now();
+    save(&crew)?;
+    let summary = ensure_summary(&mut crew, cfg, tx).await;
+    let mut spent_rows: Vec<UsageRow> = Vec::new();
+    let reply = match ask_member(&crew, &member, cfg, tx, summary.as_deref(), &mut spent_rows).await
+    {
+        Ok(text) => text,
+        Err(e) => {
+            if !spent_rows.is_empty() {
+                crew.usage
+                    .entry(member.name.clone())
+                    .or_default()
+                    .extend(spent_rows);
+            }
+            crew.status = prev_status;
+            crew.updated = now();
+            save(&crew)?;
+            return Err(anyhow::anyhow!("{name}: retry failed — {e:#}"));
+        }
+    };
+    if !spent_rows.is_empty() {
+        crew.usage
+            .entry(member.name.clone())
+            .or_default()
+            .extend(std::mem::take(&mut spent_rows));
+    }
+    if over_limit {
+        let used = member_used(&crew, &member.name);
+        if let Some(m) = crew.members.iter_mut().find(|m| m.name == member.name) {
+            if let Some(fresh) = grant_restart_limit(m, used) {
+                let msg =
+                    format!("{name}: restarted with a fresh allowance — limit raised to {fresh}");
+                crew.messages.push(CrewMsg {
+                    author: "crew".into(),
+                    kind: "system".into(),
+                    content: msg.clone(),
+                    ts: now(),
+                });
+                let _ = tx.send(ApiEvent::Note(msg));
+            }
+        }
+    }
+    let renamed: Option<String> = extract_line(&reply, "RENAME:")
+        .and_then(|raw| try_rename(&mut crew, &member.name, &raw, tx));
+    let author = renamed.unwrap_or_else(|| member.name.clone());
+    for memo in extract_lines(&reply, "MEMO:") {
+        crew.memory.push(Memo {
+            author: author.clone(),
+            content: memo.chars().take(500).collect(),
+            ts: now(),
+        });
+    }
+    if crew.memory.len() > MEMORY_CAP {
+        let drop = crew.memory.len() - MEMORY_CAP;
+        crew.memory.drain(0..drop);
+    }
+    crew.messages.push(CrewMsg {
+        author: author.clone(),
+        kind: "agent".into(),
+        content: reply.clone(),
+        ts: now(),
+    });
+    crew.updated = now();
+    let _ = tx.send(ApiEvent::Crew {
+        id: crew.id.clone(),
+        author: author.clone(),
+        role: member.role.clone(),
+        content: reply.clone(),
+    });
+    if let Some(done_line) = extract_line(&reply, "DONE:") {
+        if review_done(&mut crew, &author, &done_line, cfg, tx, summary.as_deref()).await? {
+            return Ok(format!(
+                "crew retry: {author} finished the crew — DONE accepted"
+            ));
+        }
+    }
+    if crew.status != "done" {
+        crew.status = "idle".into();
+    }
+    crew.updated = now();
+    save(&crew)?;
+    Ok(format!(
+        "crew retry: {author} replied — crew is {}",
+        crew.status
+    ))
 }
 
 /// the tool subset a tool-enabled crew member may call; the skill tool
@@ -2082,6 +2354,7 @@ pub fn state_json(crew_id: &str) -> Result<serde_json::Value> {
         "spent": crew_spent(&crew),
         "summarized": crew.summary_upto,
         "running": is_running(),
+        "bg_running": bg_running(),
     }))
 }
 
@@ -2655,5 +2928,84 @@ mod tests {
             toml::from_str("[provider]\ntype = \"openai\"\nmodel = \"\"\napi_key = \"sk-test\"\n")
                 .unwrap();
         assert!(preflight(&crew, &cfg).is_err());
+    }
+
+    #[test]
+    fn preset_roundtrip() {
+        let _g = TEST_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("hiderola-crew-preset-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("HI_DEROLA_CREW_DIR", &dir);
+        let crew = create(
+            "ship the thing",
+            &["rex|planner".into(), "max|coder|tools|limit=20k".into()],
+        )
+        .unwrap();
+        let id = crew.id.clone();
+        memo_add(&id, "you", "secret").unwrap();
+        set_budget(&id, Some(3.0)).unwrap();
+        let p = preset_save(&id, "ship-team").unwrap();
+        assert_eq!(p.members.len(), 2);
+        assert_eq!(p.budget, Some(3.0));
+        assert!(preset_save(&id, "bad name!").is_err());
+        assert_eq!(preset_list().len(), 1);
+        // the spawned crew keeps the shape, drops the history
+        let c2 = preset_apply("ship-team", None).unwrap();
+        assert_ne!(c2.id, id);
+        assert_eq!(c2.goal, "ship the thing");
+        assert_eq!(c2.members.len(), 2);
+        assert_eq!(c2.members[1].name, "max");
+        assert_eq!(c2.members[1].limit, Some(20_000));
+        assert_eq!(c2.budget, Some(3.0));
+        assert_eq!(c2.messages.len(), 1);
+        assert!(c2.memory.is_empty());
+        assert!(c2.usage.is_empty());
+        assert_eq!(c2.status, "idle");
+        assert_eq!(active().as_deref(), Some(c2.id.as_str()));
+        // the goal can be overridden for a new mission
+        let c3 = preset_apply("ship-team", Some("  new mission  ")).unwrap();
+        assert_eq!(c3.goal, "new mission");
+        preset_delete("ship-team").unwrap();
+        assert!(preset_list().is_empty());
+        delete(&id).unwrap();
+        delete(&c2.id).unwrap();
+        delete(&c3.id).unwrap();
+        std::env::remove_var("HI_DEROLA_CREW_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retry_grant_only_when_over_limit() {
+        let mut m = member("rex", "planner");
+        m.limit = Some(100);
+        assert_eq!(grant_restart_limit(&mut m, 50), None);
+        assert_eq!(m.limit, Some(100));
+        assert_eq!(grant_restart_limit(&mut m, 120), Some(220));
+        assert_eq!(m.limit, Some(220));
+        m.limit = None;
+        assert_eq!(grant_restart_limit(&mut m, 999), None);
+    }
+
+    #[tokio::test]
+    async fn retry_unknown_member_errors_cleanly() {
+        let _g = TEST_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("hiderola-crew-retry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("HI_DEROLA_CREW_DIR", &dir);
+        let crew = create("g", &["rex|planner".into()]).unwrap();
+        let id = crew.id.clone();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let cfg: crate::config::Config =
+            toml::from_str("[provider]\ntype = \"openai\"\nmodel = \"m\"\napi_key = \"sk-test\"\n")
+                .unwrap();
+        let err = retry_member(&id, "nobody", &cfg, &tx)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no member named"), "{err}");
+        delete(&id).unwrap();
+        std::env::remove_var("HI_DEROLA_CREW_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+        while rx.try_recv().is_ok() {}
     }
 }
