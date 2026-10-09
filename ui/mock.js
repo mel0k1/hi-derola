@@ -521,6 +521,11 @@
   commands.crew_review = async () => ({ none: true });
   commands.crew_memo = async () => ({ none: true });
   commands.crew_forget = async () => ({ none: true });
+  commands.crew_retry = async () => ({ none: true });
+  commands.crew_preset_save = async () => ({ saved: "mock", members: 0 });
+  commands.crew_presets = async () => ({ presets: [] });
+  commands.crew_preset_del = async () => {};
+  commands.crew_spawn = async () => ({ none: true });
   commands.set_plan = async () => {};
   commands.answer = async () => {};
   commands.task_kill = async () => {};

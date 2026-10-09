@@ -2435,6 +2435,65 @@ async fn crew_review(sh: State<'_, Arc<Shared>>, name: String) -> Result<Value, 
     crew::state_json(&id).map_err(|e| format!("{e:#}"))
 }
 
+#[tauri::command]
+async fn crew_retry(sh: State<'_, Arc<Shared>>, name: String) -> Result<Value, String> {
+    let id = crew_active_id(&sh).ok_or("no active crew")?;
+    if crew::is_running() {
+        return Err("crew is already running".into());
+    }
+    let cfg = sh.cfg.lock().unwrap().clone();
+    let tx = sh.tx.clone();
+    tauri::async_runtime::spawn(async move { crew::retry_member(&id, &name, &cfg, &tx).await })
+        .await
+        .map_err(|e| format!("{e}"))?
+        .map_err(|e| format!("{e:#}"))?;
+    crew::state_json(&id).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn crew_preset_save(sh: State<'_, Arc<Shared>>, name: String) -> Result<Value, String> {
+    let id = crew_active_id(&sh).ok_or("no active crew")?;
+    let p = crew::preset_save(&id, &name).map_err(|e| format!("{e:#}"))?;
+    Ok(json!({"saved": p.name, "members": p.members.len()}))
+}
+
+#[tauri::command]
+async fn crew_presets() -> Result<Value, String> {
+    let list: Vec<Value> = crew::preset_list()
+        .into_iter()
+        .map(|p| {
+            json!({
+                "name": p.name,
+                "goal": p.goal,
+                "members": p.members.len(),
+                "budget": p.budget,
+                "created": p.created,
+            })
+        })
+        .collect();
+    Ok(json!({"presets": list}))
+}
+
+#[tauri::command]
+async fn crew_preset_del(name: String) -> Result<(), String> {
+    crew::preset_delete(&name).map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+async fn crew_spawn(
+    sh: State<'_, Arc<Shared>>,
+    name: String,
+    goal: Option<String>,
+) -> Result<Value, String> {
+    if crew::is_running() {
+        return Err("a crew is running — stop it first".into());
+    }
+    let c = crew::preset_apply(&name, goal.as_deref().filter(|g| !g.trim().is_empty()))
+        .map_err(|e| format!("{e:#}"))?;
+    *sh.crew.lock().unwrap() = Some(c.id.clone());
+    crew::state_json(&c.id).map_err(|e| format!("{e:#}"))
+}
+
 pub fn run() -> Result<()> {
     let (cfg, _) = Config::load_or_default()?;
     lsp::set_enabled(cfg.lsp.enabled);
@@ -2614,7 +2673,12 @@ pub fn run() -> Result<()> {
             crew_usage,
             crew_limit,
             crew_budget,
-            crew_review
+            crew_review,
+            crew_retry,
+            crew_preset_save,
+            crew_presets,
+            crew_preset_del,
+            crew_spawn
         ])
         .run(tauri::generate_context!())
         .map_err(|e| anyhow!("{e}"))?;

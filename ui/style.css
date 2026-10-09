@@ -698,6 +698,8 @@ pre.diff .ctx { color: var(--dim); }
 .sbx-state.failed { color: var(--del); border-color: rgba(247, 118, 142, 0.5); }
 .sbx-meta { display: flex; flex-wrap: wrap; gap: 4px 14px; font: 11.5px var(--mono); color: var(--dim); margin-top: 7px; }
 .sbx-kind { color: var(--accent); }
+.chip-retry { color: var(--dim); margin-left: 7px; cursor: pointer; }
+.chip-retry:hover { color: var(--accent); }
 .sbx-card-actions { display: flex; align-items: center; gap: 6px; margin-top: 10px; justify-content: flex-end; }
 .sbx-btn { font-size: 12.5px; gap: 6px; }
 .sbx-del { width: 26px; height: 26px; }

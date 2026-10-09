@@ -2936,7 +2936,9 @@ function renderCrew() {
     $("crew-graph-btn").classList.remove("active");
     $("crew-saved").classList.remove("hidden");
     $("crew-saved-btn").classList.add("active");
+    $("crew-presets").classList.remove("hidden");
     refreshCrewSaved();
+    refreshCrewPresets(true);
     list.appendChild(el("div", "sbx-empty", "no active crew — create one: a goal and a few members. agents talk in rounds, @Name steers the next speaker, a DONE: line finishes the goal."));
     return;
   }
@@ -2947,6 +2949,8 @@ function renderCrew() {
   $("crew-memorow").classList.remove("hidden");
   $("crew-saved").classList.add("hidden");
   $("crew-saved-btn").classList.remove("active");
+  $("crew-presets").classList.add("hidden");
+  $("crew-presets-btn").classList.remove("active");
   head.replaceChildren();
   const h1 = el("div", "sbx-name", `goal: ${st.goal}`);
   head.appendChild(h1);
@@ -2955,6 +2959,11 @@ function renderCrew() {
     `<span class="sbx-state ${st.status === "done" ? "running" : st.status === "running" ? "waiting" : ""}">${esc(st.status)}${st.running ? " (working)" : ""}</span>`
   );
   const chips = el("div", "sbx-meta");
+  if (st.running && st.bg_running > 0) {
+    chips.appendChild(
+      el("span", "sbx-kind waiting", `${st.bg_running} bg running`)
+    );
+  }
   if (st.budget) {
     chips.appendChild(
       el("span", "sbx-kind", `budget: $${(+st.spent || 0).toFixed(2)} / $${(+st.budget).toFixed(2)}`)
@@ -2971,6 +2980,7 @@ function renderCrew() {
     chip.textContent = label;
     chip.title = "click to set a token limit for this member (off clears it)";
     chip.style.cursor = "pointer";
+    chip.appendChild(retryChipBtn(m));
     chip.onclick = async () => {
       const v = prompt(
         `token limit for ${m.name} (e.g. 200000, 200k; off to clear)\nused so far: ${m.used || 0}`,
@@ -3004,6 +3014,25 @@ function renderCrew() {
   renderCrewMemory();
   renderCrewFeed();
   renderCrewGraph();
+}
+
+/* per-member retry: re-run one member's turn now (revives errored/limit-stopped) */
+
+function retryChipBtn(m) {
+  const b = el("span", "chip-retry", "\u21bb");
+  b.title = "re-run this member's turn now (revives an errored or limit-stopped member)";
+  b.onclick = async (e) => {
+    e.stopPropagation();
+    try {
+      const d = await invoke("crew_retry", { name: m.name });
+      CREW.state = d.none ? null : d;
+      CREW.lastJson = null;
+      renderCrew();
+    } catch (e) {
+      showPanelMsg("crew-msg", String(e));
+    }
+  };
+  return b;
 }
 
 /* long-term memory: list + memo input; entries ride in crew state */
@@ -3318,6 +3347,86 @@ function toggleCrewSaved() {
   if (active) refreshCrewSaved(true);
 }
 
+/* crew presets: save the active shape, spawn fresh crews from it */
+
+async function refreshCrewPresets(force) {
+  const box = $("crew-presets");
+  if (!force && box.classList.contains("hidden")) return;
+  try {
+    const d = await invoke("crew_presets");
+    box.replaceChildren();
+    box.appendChild(el("div", "sbx-label", "crew presets - spawn a fresh crew with the saved members and budget"));
+    if (!d.presets.length) {
+      box.appendChild(el("div", "sbx-empty", "no presets yet - save the active crew with the preset button"));
+      return;
+    }
+    for (const p of d.presets) {
+      const row = el("div", "crew-saved-row");
+      const info = el("div", "crew-saved-info");
+      info.appendChild(el("div", "sbx-name", p.name));
+      info.appendChild(
+        el("div", "hint", `${p.members} member(s)${p.budget ? " · $" + (+p.budget).toFixed(2) : ""} · ${p.goal}`)
+      );
+      row.appendChild(info);
+      const spawn = el("button", "ghost", "spawn");
+      spawn.onclick = async () => {
+        try {
+          const st = await invoke("crew_spawn", { name: p.name });
+          CREW.state = st.none ? null : st;
+          CREW.lastJson = null;
+          $("crew-saved").classList.add("hidden");
+          $("crew-saved-btn").classList.remove("active");
+          $("crew-presets").classList.add("hidden");
+          $("crew-presets-btn").classList.remove("active");
+          renderCrew();
+        } catch (e) {
+          showPanelMsg("crew-msg", String(e));
+        }
+      };
+      row.appendChild(spawn);
+      const regoal = el("button", "ghost", "new goal");
+      regoal.onclick = async () => {
+        const g = prompt(`new goal for a crew spawned from "${p.name}":`, p.goal);
+        if (g === null) return;
+        try {
+          const st = await invoke("crew_spawn", { name: p.name, goal: g.trim() || null });
+          CREW.state = st.none ? null : st;
+          CREW.lastJson = null;
+          $("crew-saved").classList.add("hidden");
+          $("crew-saved-btn").classList.remove("active");
+          $("crew-presets").classList.add("hidden");
+          $("crew-presets-btn").classList.remove("active");
+          renderCrew();
+        } catch (e) {
+          showPanelMsg("crew-msg", String(e));
+        }
+      };
+      row.appendChild(regoal);
+      const del = el("button", "ghost", "del");
+      del.onclick = async () => {
+        try {
+          await invoke("crew_preset_del", { name: p.name });
+          await refreshCrewPresets(true);
+        } catch (e) {
+          showPanelMsg("crew-msg", String(e));
+        }
+      };
+      row.appendChild(del);
+      box.appendChild(row);
+    }
+  } catch (e) {
+    showPanelMsg("crew-msg", String(e));
+  }
+}
+
+function toggleCrewPresets() {
+  const box = $("crew-presets");
+  const active = box.classList.contains("hidden");
+  box.classList.toggle("hidden", !active);
+  $("crew-presets-btn").classList.toggle("active", active);
+  if (active) refreshCrewPresets(true);
+}
+
 async function showCrewUsage() {
   try {
     const u = await invoke("crew_usage");
@@ -3488,6 +3597,31 @@ $("crew-stop").onclick = () =>
 $("crew-usage").onclick = showCrewUsage;
 $("crew-graph-btn").onclick = toggleCrewGraph;
 $("crew-saved-btn").onclick = toggleCrewSaved;
+$("crew-presets-btn").onclick = toggleCrewPresets;
+$("crew-retry").onclick = async () => {
+  if (!CREW.state) return;
+  const v = prompt("member to re-run now (revives an errored or limit-stopped member):", "");
+  if (!v || !v.trim()) return;
+  try {
+    const d = await invoke("crew_retry", { name: v.trim() });
+    CREW.state = d.none ? null : d;
+    CREW.lastJson = null;
+    renderCrew();
+  } catch (e) {
+    showPanelMsg("crew-msg", String(e));
+  }
+};
+$("crew-preset").onclick = async () => {
+  if (!CREW.state) return;
+  const v = prompt("save this crew as preset (name: letters, digits, - and _):", "");
+  if (!v || !v.trim()) return;
+  try {
+    const r = await invoke("crew_preset_save", { name: v.trim() });
+    showPanelMsg("crew-msg", `preset ${r.saved} saved - spawn fresh crews from the presets panel`);
+  } catch (e) {
+    showPanelMsg("crew-msg", String(e));
+  }
+};
 $("crew-drop").onclick = async () => {
   if (!CREW.state) return;
   try {
