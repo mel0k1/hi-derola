@@ -700,6 +700,7 @@ pre.diff .ctx { color: var(--dim); }
 .sbx-kind { color: var(--accent); }
 .chip-retry { color: var(--dim); margin-left: 7px; cursor: pointer; }
 .chip-retry:hover { color: var(--accent); }
+.sbx-kind.waiting { animation: breathe 2.4s ease-in-out infinite; }
 .sbx-card-actions { display: flex; align-items: center; gap: 6px; margin-top: 10px; justify-content: flex-end; }
 .sbx-btn { font-size: 12.5px; gap: 6px; }
 .sbx-del { width: 26px; height: 26px; }
