@@ -262,6 +262,28 @@
   }
 }
 
+/* welcome hero mark: slow idle bob (DSH-style), hover tilt on the img layer */
+.logo-float {
+  animation: float 5s ease-in-out 0.5s infinite;
+}
+@keyframes float {
+  0%,
+  100% {
+    transform: none;
+  }
+  50% {
+    transform: translateY(-4px);
+  }
+}
+.logo-mark {
+  transition: transform 0.35s cubic-bezier(0.2, 0, 0, 1);
+}
+@media (hover: hover) {
+  .logo-mark:hover {
+    transform: rotate(-3deg) scale(1.05);
+  }
+}
+
 .shake {
   animation: msg-in 0.25s cubic-bezier(0.2, 0, 0, 1), shake 0.3s ease 0.25s;
 }

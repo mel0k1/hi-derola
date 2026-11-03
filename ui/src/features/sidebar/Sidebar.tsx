@@ -107,7 +107,7 @@ export function Sidebar() {
             title={t.title}
             onClick={() => setView(t.id)}
             className={cn(
-              "flex items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
+              "flex items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] transition-[background-color,color,transform] duration-150 ease-out outline-none active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-ring/50",
               "text-sidebar-foreground/85 hover:bg-accent hover:text-accent-foreground",
               view === t.id && "bg-primary/12 font-medium text-primary hover:bg-primary/15 hover:text-primary"
             )}

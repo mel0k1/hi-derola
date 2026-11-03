@@ -17,35 +17,39 @@ function Welcome() {
   const doSend = useStore((s) => s.doSend);
   return (
     <div className="flex flex-col items-center pt-[14vh] text-center">
-      <img
-        src="/logo.png"
-        alt="Hi!Derola"
-        width={72}
-        height={72}
-        draggable={false}
-        className="msg-in rounded-2xl border border-border"
-        style={{ animationDelay: "0s" }}
-      />
+      <div className="msg-in" style={{ animationDelay: "0s" }}>
+        <div className="logo-float">
+          <img
+            src="/logo.png"
+            alt="Hi!Derola"
+            width={72}
+            height={72}
+            draggable={false}
+            className="logo-mark rounded-2xl border border-border"
+          />
+        </div>
+      </div>
       <div className="msg-in mt-3 text-[26px] font-bold tracking-tight" style={{ animationDelay: "0.08s" }}>
         Hi!<span className="text-primary">Derola</span>
       </div>
       <div className="msg-in text-[13.5px] text-muted-foreground" style={{ animationDelay: "0.16s" }}>
         a fast coding assistant in pure rust
       </div>
-      <div className="msg-in mt-6 flex flex-wrap items-center justify-center gap-2" style={{ animationDelay: "0.24s" }}>
-        {SUGGESTIONS.map((s) => (
+      <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
+        {SUGGESTIONS.map((s, i) => (
           <Button
             key={s.label}
             variant="outline"
             size="sm"
-            className="h-8 border-input bg-transparent font-normal text-muted-foreground shadow-none hover:border-primary/50 hover:text-foreground dark:bg-transparent"
+            className="msg-in h-8 border-input bg-transparent font-normal text-muted-foreground shadow-none hover:border-primary/50 hover:text-foreground dark:bg-transparent"
+            style={{ animationDelay: `${0.24 + i * 0.06}s` }}
             onClick={() => doSend(s.prompt)}
           >
             {s.label}
           </Button>
         ))}
       </div>
-      <div className="msg-in mt-7 flex flex-wrap items-center justify-center gap-1.5 text-[12px] text-muted-foreground" style={{ animationDelay: "0.32s" }}>
+      <div className="msg-in mt-7 flex flex-wrap items-center justify-center gap-1.5 text-[12px] text-muted-foreground" style={{ animationDelay: "0.5s" }}>
         ask anything · attach files with <Icon name="paperclip" className="text-primary" /> · /help for commands
       </div>
     </div>
@@ -75,8 +79,8 @@ function ToolOut({ item }: { item: Extract<ChatItem, { kind: "toolout" }> }) {
     <pre
       onClick={() => setOpen(!open)}
       className={cn(
-        "msg-in my-1 ml-3.5 cursor-pointer overflow-y-auto border-l-2 border-border py-0.5 pl-2.5 font-mono text-[11px] leading-relaxed text-muted-foreground transition-colors hover:border-primary/50 hover:text-foreground",
-        open ? "max-h-none" : "max-h-30"
+        "msg-in my-1 ml-3.5 cursor-pointer overflow-y-auto border-l-2 border-border py-0.5 pl-2.5 font-mono text-[11px] leading-relaxed text-muted-foreground transition-[max-height,border-color,color] duration-200 ease-out hover:border-primary/50 hover:text-foreground",
+        open ? "max-h-120" : "max-h-30"
       )}
     >
       {item.text}
@@ -98,7 +102,7 @@ function ThinkBox({ item }: { item: Extract<ChatItem, { kind: "think" }> }) {
         <Icon name="chevron" className={cn("ml-auto transition-transform", open && "rotate-180")} />
       </button>
       {open && (
-        <div className="max-h-64 overflow-y-auto px-3.5 pb-2.5 text-[12.5px] break-words whitespace-pre-wrap text-muted-foreground">
+        <div className="max-h-64 animate-in fade-in slide-in-from-top-1 overflow-y-auto px-3.5 pb-2.5 text-[12.5px] break-words whitespace-pre-wrap text-muted-foreground duration-200">
           {item.text}
         </div>
       )}

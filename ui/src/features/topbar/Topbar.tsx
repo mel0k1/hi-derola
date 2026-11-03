@@ -69,7 +69,7 @@ export function Topbar() {
           <Icon name="diff" />
           <span
             className={cn(
-              "absolute -top-0.5 -right-1 rounded-full px-1.5 text-[9px] leading-4 font-bold font-mono",
+              "msg-in absolute -top-0.5 -right-1 rounded-full px-1.5 text-[9px] leading-4 font-bold font-mono",
               totals.dels > 0 ? "bg-destructive text-white" : "bg-primary text-primary-foreground"
             )}
           >

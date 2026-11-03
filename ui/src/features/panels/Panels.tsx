@@ -8,7 +8,7 @@ import type { SandboxInfo, HostInfo } from "@/lib/types";
 
 export function PanelShell({ icon, title, sub, action, msg, children }: { icon: string; title: string; sub: ReactNode; action?: ReactNode; msg?: ReactNode; children: ReactNode }) {
   return (
-    <div className="h-full overflow-y-auto">
+    <div className="h-full animate-in fade-in slide-in-from-bottom-1 overflow-y-auto duration-200 ease-out">
       <div className="mx-auto max-w-3xl px-5 py-6 pb-10">
         <div className="msg-in mb-4 flex items-start justify-between gap-3">
           <div>
@@ -56,7 +56,7 @@ export function StateBadge({ state, className }: { state: string; className?: st
 
 export function Card({ children, title, className }: { children: ReactNode; title?: string; className?: string }) {
   return (
-    <div title={title} className={cn("msg-in rounded-xl border border-border bg-card p-3.5 transition-colors hover:border-primary/40", className)}>
+    <div title={title} className={cn("msg-in rounded-xl border border-border bg-card p-3.5 transition-[border-color,box-shadow,transform] duration-150 hover:-translate-y-px hover:border-primary/40 hover:shadow-sm", className)}>
       {children}
     </div>
   );

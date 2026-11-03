@@ -28,6 +28,19 @@ export default function App() {
   }, [init]);
 
   useEffect(() => {
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    for (const id of ["chat-pane", "input-bar"]) {
+      const el = document.getElementById(id);
+      if (el && !el.classList.contains("hidden")) {
+        el.animate([{ opacity: 0, transform: "translateY(5px)" }, { opacity: 1, transform: "none" }], {
+          duration: 190,
+          easing: "cubic-bezier(0.2, 0, 0, 1)",
+        });
+      }
+    }
+  }, [view]);
+
+  useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       const st = useStore.getState();
       if (st.ask) {
@@ -148,14 +161,14 @@ export default function App() {
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <Topbar />
-        <div className={cn("relative min-h-0 flex-1", view !== "chat" && "hidden")}>
+        <div id="chat-pane" className={cn("relative min-h-0 flex-1", view !== "chat" && "hidden")}>
           <ChatView />
         </div>
         {view === "sandbox" && <SandboxView />}
         {view === "hosts" && <HostsView />}
         {view === "skills" && <SkillsView />}
         {view === "crew" && <CrewView />}
-        {view === "chat" && <InputBar />}
+        <InputBar />
         <Statusbar />
       </div>
       <ConfirmDialog />

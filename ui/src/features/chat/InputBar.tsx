@@ -167,11 +167,11 @@ export function InputBar() {
   };
 
   return (
-    <div className={cn("flex-none px-5 pt-1 pb-2", view !== "chat" && "hidden")}>
+    <div id="input-bar" className={cn("flex-none px-5 pt-1 pb-2", view !== "chat" && "hidden")}>
       <Chips />
       <div className="relative mx-auto w-full max-w-3xl">
         {mention && (
-          <div className="absolute bottom-full left-0 z-40 mb-2.5 max-h-64 min-w-72 max-w-[26rem] overflow-y-auto rounded-xl border border-border bg-popover p-1 shadow-lg">
+          <div className="absolute bottom-full left-0 z-40 mb-2.5 max-h-64 min-w-72 max-w-[26rem] animate-in fade-in slide-in-from-bottom-1 overflow-y-auto rounded-xl border border-border bg-popover p-1 shadow-lg duration-150">
             {mention.items.map((p, i) => (
               <div
                 key={p.v + i}
