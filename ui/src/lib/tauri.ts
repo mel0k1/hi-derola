@@ -21,3 +21,9 @@ export function listen(cb: (payload: unknown) => void): Promise<() => void> {
   if (!t) return Promise.reject("no backend");
   return t.event.listen("ev", (e) => cb(e.payload));
 }
+
+export function listenRaw(name: string, cb: (payload: unknown) => void): Promise<() => void> {
+  const t = window.__TAURI__;
+  if (!t) return Promise.reject("no backend");
+  return t.event.listen(name, (e) => cb(e.payload));
+}

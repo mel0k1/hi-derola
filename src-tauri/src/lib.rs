@@ -1243,6 +1243,26 @@ async fn attach_path(
 }
 
 #[tauri::command]
+async fn pick_files() -> Result<Vec<String>, String> {
+    let handles = rfd::AsyncFileDialog::new()
+        .pick_files()
+        .await
+        .unwrap_or_default();
+    Ok(handles
+        .iter()
+        .map(|h| h.path().display().to_string())
+        .collect())
+}
+
+#[tauri::command]
+async fn pick_folder() -> Result<Option<String>, String> {
+    Ok(rfd::AsyncFileDialog::new()
+        .pick_folder()
+        .await
+        .map(|h| h.path().display().to_string()))
+}
+
+#[tauri::command]
 async fn detach(sh: State<'_, Arc<Shared>>, app: AppHandle, index: usize) -> Result<(), String> {
     let mut at = sh.attachments.lock().unwrap();
     if index < at.len() {
@@ -2624,6 +2644,8 @@ pub fn run() -> Result<()> {
             delete_session,
             list_dir,
             attach_path,
+            pick_files,
+            pick_folder,
             detach,
             set_theme,
             list_project_files,

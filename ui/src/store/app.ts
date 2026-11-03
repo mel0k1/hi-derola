@@ -161,6 +161,8 @@ interface Store {
   };
 
   applyEvent: (ev: Ev) => void;
+  toasts: { id: number; text: string }[];
+  toast: (s: string) => void;
   setTheme: (t: string, persist: boolean) => void;
   toggleTheme: () => void;
   togglePlan: () => void;
@@ -363,6 +365,12 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   autoscrollFlag: 0,
+  toasts: [],
+  toast: (s) => {
+    const id = nextId();
+    set((st) => ({ toasts: [...st.toasts.slice(-3), { id, text: s }] }));
+    setTimeout(() => set((st) => ({ toasts: st.toasts.filter((t) => t.id !== id) })), 3200);
+  },
   note: (s) => {
     get().clearWelcomeItems();
     set((st) => ({

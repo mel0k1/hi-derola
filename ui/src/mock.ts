@@ -503,6 +503,12 @@ export function installMock() {
         })),
       };
     },
+    async pick_files() {
+      return ["~/README.md", "~/src/main.rs"];
+    },
+    async pick_folder() {
+      return "~/src";
+    },
     async attach_path(a) {
       const target = resolve(String(a?.path || ""));
       const n = node(target);

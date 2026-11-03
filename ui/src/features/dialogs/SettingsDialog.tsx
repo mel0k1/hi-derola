@@ -5,32 +5,107 @@ import { Switch } from "@/components/ui/switch";
 import { Icon } from "@/lib/icons";
 import { useStore } from "@/store/app";
 import { invoke } from "@/lib/tauri";
-import { parseKVLines } from "@/lib/utils";
+import { parseKVLines, cn } from "@/lib/utils";
 import { comboFromEvent, comboToText } from "@/lib/keys";
 import { KEY_ACTIONS } from "@/store/keysStore";
 import type { Cfg, McpPrompt, McpResource, McpTemplate } from "@/lib/types";
 import { useEffect, useState } from "react";
 
-function HotkeyRow({ action, label, value, onChange }: { action: string; label: string; value: string; onChange: (v: string) => void }) {
+function HotkeyRow({ action, label, value, base, onChange }: { action: string; label: string; value: string; base: string; onChange: (v: string) => void }) {
+  const [rec, setRec] = useState(false);
+  const caps = value && value !== "none" ? value.split("+") : [];
   return (
-    <div className="flex items-center gap-2">
-      <span className="flex-1 text-[12.5px] text-muted-foreground">{label}</span>
-      <input
-        readOnly
-        data-action={action}
-        value={value || "none"}
-        onKeyDown={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          if (e.key === "Escape") {
-            onChange("none");
-            return;
-          }
-          const c = comboFromEvent(e.nativeEvent);
-          if (c) onChange(comboToText(c));
+    <div className="flex items-center gap-2 border-b-[0.5px] border-hairline py-2.5 last:border-b-0">
+      <span className="flex-1 text-[13px]">{label}</span>
+      {rec ? (
+        <button
+          autoFocus
+          data-action={action}
+          tabIndex={-1}
+          onKeyDown={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (e.key === "Escape") {
+              setRec(false);
+              return;
+            }
+            if (["Control", "Shift", "Alt", "Meta"].includes(e.key)) return;
+            const c = comboFromEvent(e.nativeEvent);
+            if (c) {
+              onChange(comboToText(c));
+              setRec(false);
+            }
+          }}
+          onBlur={() => setRec(false)}
+          className="flex h-7 min-w-28 animate-pulse items-center justify-center rounded-[8px] border border-info/60 bg-info/10 px-2 text-center font-mono text-[11.5px] text-info outline-none"
+        >
+          press keys…
+        </button>
+      ) : (
+        <button
+          title="click to record a shortcut"
+          onClick={() => setRec(true)}
+          className="flex h-7 min-w-28 items-center justify-center gap-1 rounded-[8px] border-[0.5px] border-hairline bg-secondary px-2 transition-colors duration-100 hover:border-info/40 hover:bg-muted"
+        >
+          {caps.length ? (
+            caps.map((c) => (
+              <kbd key={c} className="rounded-[5px] border-[0.5px] border-hairline bg-background px-1.5 py-px font-mono text-[10.5px] text-foreground shadow-[0_1px_0_rgba(0,0,0,0.15)]">
+                {c}
+              </kbd>
+            ))
+          ) : (
+            <span className="text-[11.5px] text-caption">none</span>
+          )}
+        </button>
+      )}
+      <button
+        title="reset to default"
+        onClick={() => {
+          setRec(false);
+          onChange(base);
         }}
-        className="w-36 rounded-md border border-input bg-background px-2 py-1.5 text-center font-mono text-[11.5px] text-primary outline-none focus:border-ring"
-      />
+        className="rounded-[7px] p-1 text-caption transition-colors duration-100 hover:bg-accent hover:text-foreground"
+      >
+        <Icon name="undo" className="[&>svg]:size-3.5" />
+      </button>
+      <button
+        title="clear"
+        onClick={() => {
+          setRec(false);
+          onChange("none");
+        }}
+        className="rounded-[7px] p-1 text-caption transition-colors duration-100 hover:bg-accent hover:text-destructive"
+      >
+        <Icon name="x" className="[&>svg]:size-3.5" />
+      </button>
+    </div>
+  );
+}
+
+function ThemeCubes() {
+  const theme = useStore((s) => s.theme);
+  const setTheme = useStore((s) => s.setTheme);
+  const cubes = [
+    { id: "light", label: "light", icon: "sun", sw: "bg-[#f4f5f7] text-[#3c414b]" },
+    { id: "dark", label: "dark", icon: "moon", sw: "bg-[#1b1b1d] text-[#dfe2e7]" },
+  ];
+  return (
+    <div className="flex gap-2.5">
+      {cubes.map((c) => (
+        <button
+          key={c.id}
+          onClick={() => setTheme(c.id, true)}
+          className={cn(
+            "flex flex-1 flex-col items-center gap-2 rounded-[14px] border-[0.5px] p-2.5 transition-all duration-150",
+            theme === c.id ? "border-info bg-info/8 ring-1 ring-info/30" : "border-hairline hover:border-foreground/25"
+          )}
+        >
+          <span className={cn("flex h-14 w-full items-center justify-center rounded-[10px]", c.sw)}>
+            <Icon name={c.icon} className="[&>svg]:size-5" />
+          </span>
+          <span className={cn("text-[12px]", theme === c.id ? "font-medium text-foreground" : "text-muted-foreground")}>{c.label}</span>
+        </button>
+      ))}
     </div>
   );
 }
@@ -397,15 +472,29 @@ function PromptRow({ p, intoInput, note }: { p: McpPrompt; intoInput: (t: string
   );
 }
 
+
+const SECTIONS = [
+  { id: "general", label: "general", icon: "sliders" },
+  { id: "provider", label: "provider", icon: "server" },
+  { id: "hotkeys", label: "hotkeys", icon: "command" },
+  { id: "mcp", label: "mcp servers", icon: "box" },
+  { id: "permissions", label: "permissions", icon: "warn" },
+  { id: "about", label: "about", icon: "spark" },
+];
+
+const APP_VERSION = "0.3.1";
+
 export function SettingsDialog() {
   const open = useStore((s) => s.settingsOpen);
   const cfg = useStore((s) => s.cfg);
   const keys = useStore((s) => s.keys);
+  const theme = useStore((s) => s.theme);
+  const models = useStore((s) => s.models);
   const setModels = useStore((s) => s.setModels);
   const saveSettings = useStore((s) => s.saveSettings);
   const note = useStore((s) => s.note);
-  const theme = useStore((s) => s.theme);
 
+  const [sec, setSec] = useState("general");
   const [form, setForm] = useState<Record<string, unknown>>({});
   const [keyOverrides, setKeyOverrides] = useState<Record<string, string>>({});
   const [msg, setMsg] = useState("");
@@ -427,6 +516,7 @@ export function SettingsDialog() {
       setShowKey(false);
       setKeyOverrides({ ...cfg.keys });
       setMsg(p.active ? `profile "${p.active}" is active; its fields override the values below (switch with /profile in the chat)` : "");
+      setSec("general");
     }
   }, [open, cfg]);
 
@@ -435,82 +525,18 @@ export function SettingsDialog() {
   const set = (k: string, val: unknown) => setForm((f) => ({ ...f, [k]: val }));
 
   const loadModels = async () => {
-    setMsg("loading...");
+    setMsg("loading models...");
     try {
-      const models = await invoke<string[]>("list_models", {
+      const ms = await invoke<string[]>("list_models", {
         kind: v("type"),
         base_url: v("base").trim() || null,
         api_key: v("key").trim() || null,
       });
-      setModels(models);
-      setMsg(models.length + " models");
+      setModels(ms);
+      setMsg(ms.length + " models loaded");
     } catch (e) {
       setMsg(String(e));
     }
-  };
-
-  const save = async () => {
-    if (!v("model").trim()) {
-      setMsg("model is required");
-      return;
-    }
-    const num = (k: string) => (v(k).trim() === "" ? null : Number(v(k)));
-    const keysOut: Record<string, string> = {};
-    for (const [action] of KEY_ACTIONS) {
-      keysOut[action] = keyOverrides[action] !== undefined ? keyOverrides[action] || "none" : keys[action] || "none";
-    }
-    const out: Cfg = {
-      provider: {
-        type: v("type"),
-        model: v("model").trim(),
-        base_url: v("base").trim() || null,
-        api_key: v("key"),
-        max_tokens: num("maxTokens"),
-        temperature: num("temperature"),
-        top_p: num("topP"),
-        stream: !!form.stream,
-        active: cfg.provider.active || null,
-      },
-      profiles: cfg.profiles,
-      mcp: cfg.mcp,
-      keys: keysOut,
-      ui: { theme },
-      agent: cfg.agent,
-      permissions: cfg.permissions,
-      lsp: cfg.lsp,
-      formatters: cfg.formatters,
-    };
-    const ok = await saveSettings(out);
-    if (!ok) {
-      setMsg("save failed");
-      return;
-    }
-    useStore.setState({ settingsOpen: false });
-    note("settings saved");
-  };
-
-  const addMcp = async (entry: Cfg["mcp"][number]) => {
-    const next: Cfg = { ...cfg, mcp: [...cfg.mcp, entry] };
-    try {
-      await invoke("save", { cfg: { ...buildCfg(), mcp: next.mcp } });
-      useStore.setState({ cfg: next });
-      const logs = await invoke<string[]>("mcp_reconnect");
-      for (const l of logs) note(l);
-    } catch (e) {
-      note(String(e));
-    }
-  };
-
-  const removeMcp = (m: Cfg["mcp"][number]) => {
-    const next: Cfg = { ...cfg, mcp: cfg.mcp.filter((x) => x.name !== m.name) };
-    useStore.setState({ cfg: next });
-    invoke("save", { cfg: { ...buildCfg(), mcp: next.mcp } })
-      .then(async () => {
-        const logs = await invoke<string[]>("mcp_reconnect");
-        for (const l of logs) note(l);
-        note(`server ${m.name} removed from config`);
-      })
-      .catch((e) => note(String(e)));
   };
 
   const buildCfg = (): Cfg => {
@@ -542,6 +568,45 @@ export function SettingsDialog() {
     };
   };
 
+  const save = async () => {
+    if (!v("model").trim()) {
+      setSec("provider");
+      setMsg("model is required");
+      return;
+    }
+    const ok = await saveSettings(buildCfg());
+    if (!ok) {
+      setMsg("save failed");
+      return;
+    }
+    useStore.setState({ settingsOpen: false });
+    useStore.getState().toast("settings saved");
+  };
+
+  const addMcp = async (entry: Cfg["mcp"][number]) => {
+    const next: Cfg = { ...cfg, mcp: [...cfg.mcp, entry] };
+    try {
+      await invoke("save", { cfg: { ...buildCfg(), mcp: next.mcp } });
+      useStore.setState({ cfg: next });
+      const logs = await invoke<string[]>("mcp_reconnect");
+      for (const l of logs) note(l);
+    } catch (e) {
+      note(String(e));
+    }
+  };
+
+  const removeMcp = (m: Cfg["mcp"][number]) => {
+    const next: Cfg = { ...cfg, mcp: cfg.mcp.filter((x) => x.name !== m.name) };
+    useStore.setState({ cfg: next });
+    invoke("save", { cfg: { ...buildCfg(), mcp: next.mcp } })
+      .then(async () => {
+        const logs = await invoke<string[]>("mcp_reconnect");
+        for (const l of logs) note(l);
+        note(`server ${m.name} removed from config`);
+      })
+      .catch((e) => note(String(e)));
+  };
+
   const perm = cfg.permissions || {};
   const permLines: string[] = [];
   for (const k of ["edit", "write_file", "bash", "sandbox", "mcp"]) {
@@ -551,99 +616,173 @@ export function SettingsDialog() {
     permLines.push(`${r.tool} ${r.pattern || "*"} = ${r.permission}`);
   }
 
+  const field =
+    "h-9 w-full rounded-[10px] border border-input bg-background px-2.5 font-mono text-[12.5px] outline-none transition-colors duration-100 focus-visible:border-info focus-visible:ring-1 focus-visible:ring-info/30";
+  const fieldLabel = "text-[12px] text-muted-foreground";
+  const secTitle = "font-mono text-[11.5px] font-semibold tracking-wider text-muted-foreground lowercase";
+
   return (
     <Dialog open={open} onOpenChange={(o) => !o && useStore.setState({ settingsOpen: false })}>
-      <DialogContent className="flex h-[88vh] w-[min(640px,94vw)] flex-col gap-0 p-0" showCloseButton={false}>
-        <DialogHeader className="flex-row items-center justify-between border-b border-border px-4 py-3">
+      <DialogContent
+        className="grid h-[min(760px,92vh)] w-[min(840px,94vw)] grid-cols-[188px_minmax(0,1fr)] grid-rows-[auto_minmax(0,1fr)_auto] gap-0 overflow-hidden p-0"
+        showCloseButton={false}
+      >
+        <DialogHeader className="col-span-2 flex-row items-center justify-between border-b border-border px-4 py-3">
           <DialogTitle className="text-[14px]">settings</DialogTitle>
           <Button variant="ghost" size="icon-sm" className="text-muted-foreground" onClick={() => useStore.setState({ settingsOpen: false })}>
             <Icon name="x" />
           </Button>
         </DialogHeader>
-        <div className="flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto px-5 py-4">
-          <section className="flex flex-col gap-2.5">
-            <h3 className="font-mono text-[11.5px] font-semibold tracking-wider text-muted-foreground lowercase">provider</h3>
-            <div className="grid grid-cols-2 gap-2.5">
-              <div className="flex flex-col gap-1">
-                <Label className="text-[12px] text-muted-foreground">type</Label>
-                <select value={v("type")} onChange={(e) => set("type", e.target.value)} className="h-8.5 rounded-lg border border-input bg-background px-2 font-mono text-[12.5px] outline-none focus:border-ring">
-                  <option value="openai">openai / compatible</option>
-                  <option value="anthropic">anthropic</option>
-                </select>
+
+        <nav className="flex min-h-0 flex-col gap-0.5 overflow-y-auto border-r-[0.5px] border-hairline p-2">
+          {SECTIONS.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => setSec(s.id)}
+              className={cn(
+                "flex h-9 flex-none items-center gap-2.5 rounded-[10px] px-3 text-left text-[13px] transition-colors duration-100",
+                sec === s.id ? "bg-accent font-medium text-foreground" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+              )}
+            >
+              <Icon name={s.icon} className="flex-none [&>svg]:size-4" />
+              {s.label}
+            </button>
+          ))}
+        </nav>
+
+        <div key={sec} className="view-in min-h-0 overflow-y-auto px-6 py-5">
+          {sec === "general" && (
+            <div className="flex max-w-xl flex-col gap-6">
+              <section className="flex flex-col gap-2.5">
+                <h3 className={secTitle}>appearance</h3>
+                <ThemeCubes />
+                <div className="text-[11.5px] text-muted-foreground">applied instantly and saved to config.toml</div>
+              </section>
+              <section className="flex flex-col gap-2.5">
+                <h3 className={secTitle}>chat</h3>
+                <div className="flex items-center gap-2.5">
+                  <Switch id="s-stream" checked={!!form.stream} onCheckedChange={(c) => set("stream", c)} />
+                  <Label htmlFor="s-stream" className="text-[13px]">stream responses</Label>
+                </div>
+                <div className="text-[11.5px] text-muted-foreground">part of the saved form — press save to apply</div>
+              </section>
+            </div>
+          )}
+
+          {sec === "provider" && (
+            <div className="flex max-w-xl flex-col gap-4">
+              <h3 className={secTitle}>provider</h3>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="flex flex-col gap-1.5">
+                  <Label className={fieldLabel}>type</Label>
+                  <select value={v("type")} onChange={(e) => set("type", e.target.value)} className={field}>
+                    <option value="openai">openai / compatible</option>
+                    <option value="anthropic">anthropic</option>
+                  </select>
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <Label className={fieldLabel}>base url</Label>
+                  <input value={v("base")} onChange={(e) => set("base", e.target.value)} placeholder="https://api.openai.com/v1" spellCheck={false} className={field} />
+                </div>
               </div>
-              <div className="flex flex-col gap-1">
-                <Label className="text-[12px] text-muted-foreground">base url</Label>
-                <input value={v("base")} onChange={(e) => set("base", e.target.value)} placeholder="https://api.openai.com/v1" spellCheck={false} className="h-8.5 rounded-lg border border-input bg-background px-2.5 font-mono text-[12.5px] outline-none focus:border-ring" />
+              <div className="flex flex-col gap-1.5">
+                <Label className={fieldLabel}>api key</Label>
+                <div className="relative">
+                  <input type={showKey ? "text" : "password"} value={v("key")} onChange={(e) => set("key", e.target.value)} placeholder="sk-..." spellCheck={false} autoComplete="off" className={field + " pr-10"} />
+                  <button
+                    title={showKey ? "hide key" : "show key"}
+                    onClick={() => setShowKey(!showKey)}
+                    className="absolute top-1/2 right-1.5 -translate-y-1/2 rounded-[7px] p-1 text-caption transition-colors duration-100 hover:bg-accent hover:text-foreground"
+                  >
+                    <Icon name={showKey ? "eyeoff" : "eye"} className="[&>svg]:size-3.5" />
+                  </button>
+                </div>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label className={fieldLabel}>model</Label>
+                <input value={v("model")} onChange={(e) => set("model", e.target.value)} list="model-list" spellCheck={false} className={field} />
+                <datalist id="model-list">
+                  {models.map((m) => (
+                    <option key={m} value={m} />
+                  ))}
+                </datalist>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button variant="ghost" size="sm" onClick={loadModels}>
+                  <Icon name="download" className="[&>svg]:size-3.5" /> load models
+                </Button>
+                <span className="text-[11.5px] text-muted-foreground">fetches the list from the provider, then pick models right in the composer</span>
+              </div>
+              <div className="grid grid-cols-3 gap-3 pt-1">
+                <div className="flex flex-col gap-1.5">
+                  <Label className={fieldLabel}>max tokens</Label>
+                  <input type="number" min={128} step={128} value={v("maxTokens")} onChange={(e) => set("maxTokens", e.target.value)} className={field} />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <Label className={fieldLabel}>temperature</Label>
+                  <input type="number" step={0.1} min={0} max={2} value={v("temperature")} onChange={(e) => set("temperature", e.target.value)} className={field} />
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <Label className={fieldLabel}>top p</Label>
+                  <input type="number" step={0.05} min={0} max={1} value={v("topP")} onChange={(e) => set("topP", e.target.value)} className={field} />
+                </div>
               </div>
             </div>
-            <div className="flex flex-col gap-1">
-              <Label className="text-[12px] text-muted-foreground">api key</Label>
-              <div className="flex gap-2">
-                <input type={showKey ? "text" : "password"} value={v("key")} onChange={(e) => set("key", e.target.value)} placeholder="sk-..." spellCheck={false} className="h-8.5 flex-1 rounded-lg border border-input bg-background px-2.5 font-mono text-[12.5px] outline-none focus:border-ring" />
-                <Button variant="ghost" size="sm" onClick={() => setShowKey(!showKey)}>{showKey ? "hide" : "show"}</Button>
-              </div>
-            </div>
-            <div className="flex flex-col gap-1">
-              <Label className="text-[12px] text-muted-foreground">model</Label>
-              <input value={v("model")} onChange={(e) => set("model", e.target.value)} list="model-list" spellCheck={false} className="h-8.5 rounded-lg border border-input bg-background px-2.5 font-mono text-[12.5px] outline-none focus:border-ring" />
-              <datalist id="model-list">
-                {useStore.getState().models.map((m) => (
-                  <option key={m} value={m} />
+          )}
+
+          {sec === "hotkeys" && (
+            <div className="flex max-w-xl flex-col gap-3">
+              <h3 className={secTitle}>hotkeys</h3>
+              <div className="rounded-[12px] border-[0.5px] border-hairline px-3 py-1">
+                {KEY_ACTIONS.map(([action, label]) => (
+                  <HotkeyRow
+                    key={action}
+                    action={action}
+                    label={label}
+                    value={keyOverrides[action] !== undefined ? keyOverrides[action] || "none" : keys[action] || "none"}
+                    base={keys[action] || "none"}
+                    onChange={(val) => setKeyOverrides((kv) => ({ ...kv, [action]: val }))}
+                  />
                 ))}
-              </datalist>
-            </div>
-            <div className="flex items-center gap-2">
-              <Button variant="ghost" size="sm" onClick={loadModels}>load models</Button>
-              <span className="text-[11.5px] text-muted-foreground">{msg}</span>
-            </div>
-            <div className="grid grid-cols-3 gap-2.5">
-              <div className="flex flex-col gap-1">
-                <Label className="text-[12px] text-muted-foreground">max tokens</Label>
-                <input type="number" min={128} step={128} value={v("maxTokens")} onChange={(e) => set("maxTokens", e.target.value)} className="h-8.5 rounded-lg border border-input bg-background px-2.5 font-mono text-[12.5px] outline-none focus:border-ring" />
               </div>
-              <div className="flex flex-col gap-1">
-                <Label className="text-[12px] text-muted-foreground">temperature</Label>
-                <input type="number" step={0.1} min={0} max={2} value={v("temperature")} onChange={(e) => set("temperature", e.target.value)} className="h-8.5 rounded-lg border border-input bg-background px-2.5 font-mono text-[12.5px] outline-none focus:border-ring" />
+              <div className="text-[11.5px] text-muted-foreground">click a shortcut to record a new combination · escape cancels recording · undo restores the default, x clears it</div>
+            </div>
+          )}
+
+          {sec === "mcp" && <McpSection mcp={cfg.mcp} onAdd={addMcp} onRemove={removeMcp} setMsg={setMsg} />}
+
+          {sec === "permissions" && (
+            <div className="flex max-w-xl flex-col gap-2.5">
+              <h3 className={secTitle}>permissions</h3>
+              <div className="text-[12.5px] whitespace-pre-wrap text-muted-foreground">
+                {permLines.length ? permLines.join("\n") : "default: mutations (write/edit/bash/sandbox/mcp) ask, reads allowed"}
               </div>
-              <div className="flex flex-col gap-1">
-                <Label className="text-[12px] text-muted-foreground">top p</Label>
-                <input type="number" step={0.05} min={0} max={1} value={v("topP")} onChange={(e) => set("topP", e.target.value)} className="h-8.5 rounded-lg border border-input bg-background px-2.5 font-mono text-[12.5px] outline-none focus:border-ring" />
+              <div className="text-[11.5px] text-muted-foreground">edited in config.toml: allow | ask | deny per tool, [[permissions.rules]] adds wildcard patterns</div>
+            </div>
+          )}
+
+          {sec === "about" && (
+            <div className="flex max-w-xl flex-col gap-4">
+              <h3 className={secTitle}>about</h3>
+              <div className="flex items-center gap-3">
+                <span className="flex size-11 flex-none items-center justify-center rounded-[14px] bg-info/10 text-info">
+                  <Icon name="spark" className="[&>svg]:size-5" />
+                </span>
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-[14px] font-medium">Hi!Derola</span>
+                  <span className="text-[12px] text-muted-foreground">desktop assistant · v{APP_VERSION}</span>
+                </div>
               </div>
+              <Button variant="ghost" size="sm" className="w-fit" onClick={() => window.open("https://github.com/mel0k1/hi-derola", "_blank")}>
+                <Icon name="crew" className="[&>svg]:size-3.5" /> github repository
+              </Button>
+              <div className="text-[11.5px] text-muted-foreground">settings live in config.toml in the platform config directory; the same file is shared with the cli and tui</div>
             </div>
-            <div className="flex items-center gap-2">
-              <Switch id="s-stream" checked={!!form.stream} onCheckedChange={(c) => set("stream", c)} />
-              <Label htmlFor="s-stream" className="text-[13px]">stream responses</Label>
-            </div>
-          </section>
-
-          <section className="flex flex-col gap-2.5">
-            <h3 className="font-mono text-[11.5px] font-semibold tracking-wider text-muted-foreground lowercase">hotkeys</h3>
-            <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-              {KEY_ACTIONS.map(([action, label]) => (
-                <HotkeyRow
-                  key={action}
-                  action={action}
-                  label={label}
-                  value={keyOverrides[action] !== undefined ? keyOverrides[action] || "none" : keys[action] || "none"}
-                  onChange={(val) => setKeyOverrides((kv) => ({ ...kv, [action]: val }))}
-                />
-              ))}
-            </div>
-            <div className="text-[11.5px] text-muted-foreground">click a field and press the combination, escape sets none</div>
-          </section>
-
-          <McpSection mcp={cfg.mcp} onAdd={addMcp} onRemove={removeMcp} setMsg={setMsg} />
-
-          <section className="flex flex-col gap-2.5">
-            <h3 className="font-mono text-[11.5px] font-semibold tracking-wider text-muted-foreground lowercase">permissions</h3>
-            <div className="text-[12px] whitespace-pre-wrap text-muted-foreground">
-              {permLines.length ? permLines.join("\n") : "default: mutations (write/edit/bash/sandbox/mcp) ask, reads allowed"}
-            </div>
-            <div className="text-[11.5px] text-muted-foreground">edited in config.toml: allow | ask | deny per tool, [[permissions.rules]] adds wildcard patterns</div>
-          </section>
+          )}
         </div>
-        <div className="flex items-center gap-2.5 border-t border-border px-5 py-3">
-          <span className="flex-1 text-left text-[11.5px] text-muted-foreground">{msg}</span>
+
+        <div className="col-span-2 flex items-center gap-2.5 border-t border-border px-5 py-3">
+          <span className="flex-1 truncate text-left text-[11.5px] text-muted-foreground">{msg}</span>
           <Button variant="ghost" size="sm" onClick={() => useStore.setState({ settingsOpen: false })}>cancel</Button>
           <Button size="sm" onClick={save}>save</Button>
         </div>

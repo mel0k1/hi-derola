@@ -1,8 +1,9 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Icon } from "@/lib/icons";
 import { invoke } from "@/lib/tauri";
 import { useStore, type MentionItem } from "@/store/app";
 import { chipName, cn, fmtCost, fmtTokens } from "@/lib/utils";
+import { ModelMenu } from "./ModelMenu";
 
 let mfilesCache: string[] | null = null;
 let mentionSeq = 0;
@@ -38,6 +39,82 @@ function Chips() {
           </button>
         </span>
       ))}
+    </div>
+  );
+}
+
+function PlusMenu() {
+  const openFilesDlg = useStore((s) => s.openFiles);
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [open]);
+
+  const pick = async (kind: "files" | "folder") => {
+    setOpen(false);
+    const st = useStore.getState();
+    try {
+      if (kind === "files") {
+        const paths = await invoke<string[]>("pick_files");
+        for (const p of paths) await st.attachPath(p);
+        if (paths.length) st.toast(`attached ${paths.length} file(s)`);
+      } else {
+        const p = await invoke<string | null>("pick_folder");
+        if (p) {
+          await st.attachPath(p);
+          st.toast("folder attached");
+        }
+      }
+    } catch (e) {
+      st.note(String(e));
+    }
+  };
+
+  const item =
+    "flex w-full items-center gap-2.5 rounded-[10px] px-2.5 py-1.5 text-left text-[12.5px] text-foreground/90 transition-colors duration-100 hover:bg-accent";
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        title="attach files or folders"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+        className="flex size-7 flex-none items-center justify-center rounded-full bg-secondary text-muted-foreground transition-all duration-150 hover:bg-muted hover:text-foreground"
+      >
+        <Icon name="plus" className={cn("[&>svg]:size-4 transition-transform duration-200", open && "rotate-45")} />
+      </button>
+      {open && (
+        <div className="absolute bottom-full left-0 z-50 mb-2 w-60 animate-in fade-in slide-in-from-bottom-1 rounded-[14px] border-[0.5px] border-hairline bg-glass p-1 shadow-panel backdrop-blur-[40px] backdrop-saturate-150 duration-150">
+          <button className={item} onMouseDown={(e) => { e.preventDefault(); pick("files"); }}>
+            <Icon name="file" className="flex-none text-tertiary" />
+            choose files…
+          </button>
+          <button className={item} onMouseDown={(e) => { e.preventDefault(); pick("folder"); }}>
+            <Icon name="folder" className="flex-none text-tertiary" />
+            choose folder…
+          </button>
+          <button
+            className={item}
+            onMouseDown={(e) => {
+              e.preventDefault();
+              setOpen(false);
+              openFilesDlg();
+            }}
+          >
+            <Icon name="search" className="flex-none text-tertiary" />
+            browse project…
+          </button>
+          <div className="mt-0.5 border-t-[0.5px] border-hairline px-2.5 pt-1.5 pb-1 text-[11px] text-caption">or drop files anywhere</div>
+        </div>
+      )}
     </div>
   );
 }
@@ -83,7 +160,6 @@ function Dock() {
 
 export function InputBar() {
   const doSend = useStore((s) => s.doSend);
-  const openFiles = useStore((s) => s.openFiles);
   const waiting = useStore((s) => s.waiting);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [mention, setMention] = useState<MentionState | null>(null);
@@ -241,14 +317,9 @@ export function InputBar() {
             onKeyDown={onKeyDown}
           />
           <div className="flex items-center gap-1.5 px-0.5 pt-0.5 pb-0.5">
-            <button
-              title="attach file or folder"
-              onClick={openFiles}
-              className="flex size-7 flex-none items-center justify-center rounded-full bg-secondary text-muted-foreground transition-colors duration-100 hover:bg-muted hover:text-foreground"
-            >
-              <Icon name="paperclip" className="[&>svg]:size-3.5" />
-            </button>
+            <PlusMenu />
             <span className="flex-1" />
+            <ModelMenu />
             {waiting ? (
               <button
                 title="stop (esc)"

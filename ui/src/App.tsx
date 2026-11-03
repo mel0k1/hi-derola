@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Sidebar } from "@/features/sidebar/Sidebar";
 import { Topbar } from "@/features/topbar/Topbar";
 import { ChatView } from "@/features/chat/ChatView";
@@ -12,17 +12,66 @@ import { FilesDialog } from "@/features/dialogs/FilesDialog";
 import { SettingsDialog } from "@/features/dialogs/SettingsDialog";
 import { ReviewDialog } from "@/features/dialogs/ReviewDialog";
 import { PaletteDialog } from "@/features/dialogs/PaletteDialog";
+import { Toasts } from "@/features/dialogs/Toasts";
 import { useStore } from "@/store/app";
 import { comboFromEvent, parseCombo, sameCombo } from "@/lib/keys";
-import { invoke } from "@/lib/tauri";
+import { invoke, listenRaw } from "@/lib/tauri";
+import { Icon } from "@/lib/icons";
+
+function DropOverlay({ show }: { show: boolean }) {
+  if (!show) return null;
+  return (
+    <div className="pointer-events-none fixed inset-0 z-[70] flex items-center justify-center bg-background/60 backdrop-blur-[2px]">
+      <div className="msg-in flex flex-col items-center gap-3 rounded-[24px] border-2 border-dashed border-info/50 bg-card/95 px-10 py-8 shadow-panel">
+        <Icon name="download" className="text-info [&>svg]:size-8" />
+        <div className="text-[15px] font-medium">drop files or folders to attach</div>
+        <div className="text-[12px] text-caption">they will be added to your next message</div>
+      </div>
+    </div>
+  );
+}
 
 export default function App() {
   const view = useStore((s) => s.view);
   const init = useStore((s) => s.init);
+  const [dragOver, setDragOver] = useState(false);
 
   useEffect(() => {
     init();
   }, [init]);
+
+  // native drag & drop: tauri webview events carry real file paths
+  useEffect(() => {
+    if (!window.__TAURI__) return;
+    let depth = 0;
+    const unsubs: (() => void)[] = [];
+    const on = (name: string, cb: (p: unknown) => void) => {
+      listenRaw(name, cb)
+        .then((u) => unsubs.push(u))
+        .catch(() => {});
+    };
+    on("tauri://drag-enter", () => {
+      depth++;
+      setDragOver(true);
+    });
+    on("tauri://drag-over", () => setDragOver(true));
+    on("tauri://drag-leave", () => {
+      depth = Math.max(0, depth - 1);
+      if (!depth) setDragOver(false);
+    });
+    on("tauri://drag-drop", (p) => {
+      depth = 0;
+      setDragOver(false);
+      const paths = (p as { paths?: string[] })?.paths || [];
+      if (!paths.length) return;
+      const st = useStore.getState();
+      void (async () => {
+        for (const x of paths) await st.attachPath(x);
+        st.toast(`attached ${paths.length} item(s)`);
+      })();
+    });
+    return () => unsubs.forEach((u) => u());
+  }, []);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -159,6 +208,8 @@ export default function App() {
       <SettingsDialog />
       <ReviewDialog />
       <PaletteDialog />
+      <Toasts />
+      <DropOverlay show={dragOver} />
     </div>
   );
 }

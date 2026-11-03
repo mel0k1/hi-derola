@@ -2,37 +2,6 @@ import { Icon } from "@/lib/icons";
 import { changesTotals, useStore } from "@/store/app";
 import { cn } from "@/lib/utils";
 
-function ModelSelect() {
-  const model = useStore((s) => s.model);
-  const models = useStore((s) => s.models);
-  const runCmd = useStore((s) => s.runCmd);
-  const list = [model, ...models.filter((m) => m !== model)].filter(Boolean);
-  if (!list.length) return null;
-  return (
-    <select
-      value={model}
-      title="switch model"
-      onChange={(e) => {
-        const v = e.target.value;
-        if (v && v !== model) runCmd("/model " + v);
-      }}
-      className="h-7 max-w-52 cursor-pointer appearance-none truncate rounded-[8px] border-[0.5px] border-border bg-transparent px-2 pr-6 font-mono text-[12px] text-muted-foreground transition-colors duration-100 outline-none hover:bg-accent focus:border-info"
-      style={{
-        backgroundImage:
-          "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2381858C' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E\")",
-        backgroundRepeat: "no-repeat",
-        backgroundPosition: "right 6px center",
-      }}
-    >
-      {list.map((m) => (
-        <option key={m} value={m} className="bg-popover text-popover-foreground">
-          {m}
-        </option>
-      ))}
-    </select>
-  );
-}
-
 export function Topbar() {
   const view = useStore((s) => s.view);
   const plan = useStore((s) => s.plan);
@@ -59,7 +28,6 @@ export function Topbar() {
       </button>
       <span className="mx-1 h-4 w-px flex-none bg-hairline" />
       <h1 className="min-w-0 flex-1 truncate text-[14px] font-medium text-foreground">{title}</h1>
-      {view === "chat" && <ModelSelect />}
       <button
         title="plan mode: read-only research, the agent proposes a plan (ctrl+shift+p)"
         onClick={togglePlan}
