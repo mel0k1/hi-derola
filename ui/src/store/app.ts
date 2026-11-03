@@ -119,6 +119,9 @@ interface Store {
   theme: string;
   plan: boolean;
   waiting: boolean;
+  // composer button state machine: idle -> sending (spinner) -> running (stop)
+  phase: "idle" | "sending" | "running";
+  queue: string[];
   tokens: { in: number; out: number; cost: number; cached: number };
   ctx: { used: number; limit: number };
   changes: Record<string, ChangeEntry>;
@@ -179,6 +182,11 @@ interface Store {
   doSend: (text: string) => Promise<void>;
   runCmd: (text: string) => Promise<void>;
   stopGen: () => void;
+
+  queueRemove: (index: number) => Promise<void>;
+  queueMove: (index: number, to: number) => Promise<void>;
+  queueEdit: (index: number, text: string) => Promise<void>;
+  retryLast: () => Promise<void>;
 
   resolveConfirm: (ok: boolean, always?: boolean) => void;
   allowAll: () => void;
@@ -329,6 +337,8 @@ export const useStore = create<Store>((set, get) => ({
   theme: "dark",
   plan: false,
   waiting: false,
+  phase: "idle",
+  queue: [],
   tokens: { in: 0, out: 0, cost: 0, cached: 0 },
   ctx: { used: 0, limit: 0 },
   changes: {},
@@ -437,6 +447,8 @@ export const useStore = create<Store>((set, get) => ({
     streamRaw = null;
     set({
       sid: st.id,
+      phase: "idle",
+      queue: st.queue || [],
       tokens: { in: st.tokens_in || 0, out: st.tokens_out || 0, cost: st.cost || 0, cached: 0 },
       ctx: { used: 0, limit: get().ctx.limit },
       changes,
@@ -479,7 +491,7 @@ export const useStore = create<Store>((set, get) => ({
       transcript: [...s.transcript, { kind: "user", id: myId, text: t }],
       autoscrollFlag: s.autoscrollFlag + 1,
     }));
-    set({ waiting: true });
+    set({ waiting: true, phase: "sending" });
     let res: { cmd?: boolean; note?: string };
     try {
       res = await invoke<{ cmd?: boolean; note?: string }>("send", { text: t });
@@ -487,6 +499,7 @@ export const useStore = create<Store>((set, get) => ({
       set((s) => ({
         transcript: s.transcript.filter((x) => x.id !== myId),
         waiting: false,
+        phase: "idle",
       }));
       get().note(String(e));
       if (String(e).includes("api key")) set({ settingsOpen: true });
@@ -496,6 +509,7 @@ export const useStore = create<Store>((set, get) => ({
       set((s) => ({
         transcript: s.transcript.filter((x) => x.id !== myId),
         waiting: false,
+        phase: "idle",
       }));
       if (res.note) get().note(res.note);
     }
@@ -512,6 +526,39 @@ export const useStore = create<Store>((set, get) => ({
 
   stopGen: () => {
     invoke("stop").catch(() => {});
+  },
+
+  queueRemove: async (index) => {
+    try {
+      await invoke("queue_remove", { index });
+    } catch (e) {
+      get().note(String(e));
+    }
+  },
+  queueMove: async (index, to) => {
+    try {
+      await invoke("queue_move", { index, to });
+    } catch (e) {
+      get().note(String(e));
+    }
+  },
+  queueEdit: async (index, text) => {
+    try {
+      await invoke("queue_edit", { index, text });
+    } catch (e) {
+      get().note(String(e));
+    }
+  },
+  retryLast: async () => {
+    const st = get();
+    if (st.waiting || st.confirm?.open || st.ask?.open) return;
+    set({ waiting: true, phase: "sending" });
+    try {
+      await invoke("retry");
+    } catch (e) {
+      set({ waiting: false, phase: "idle" });
+      get().note(String(e));
+    }
   },
 
   resolveConfirm: (ok, always = false) => {
@@ -797,7 +844,7 @@ export const useStore = create<Store>((set, get) => ({
                   break;
                 }
               }
-              return { transcript: items, streamText: streamRaw, autoscrollFlag: s.autoscrollFlag + 1 };
+              return { transcript: items, streamText: streamRaw, phase: "running", autoscrollFlag: s.autoscrollFlag + 1 };
             });
           }, 90);
         }
@@ -820,7 +867,7 @@ export const useStore = create<Store>((set, get) => ({
           } else {
             items.push({ kind: "think", id: nextId(), text: ev.s, streaming: true, open: true });
           }
-          return { transcript: items, autoscrollFlag: s.autoscrollFlag + 1 };
+          return { transcript: items, phase: "running", autoscrollFlag: s.autoscrollFlag + 1 };
         });
         break;
       }
@@ -853,6 +900,7 @@ export const useStore = create<Store>((set, get) => ({
             { kind: "tool", id: nextId(), name: ev.name, detail: ev.detail, diff: ev.diff },
           ],
           ...(changes ? { changes } : {}),
+          phase: "running",
           autoscrollFlag: s.autoscrollFlag + 1,
         }));
         break;
@@ -923,7 +971,7 @@ export const useStore = create<Store>((set, get) => ({
           let output = bg.output + ev.s;
           if (output.length > 24000) output = output.slice(-18000);
           items[idx] = { ...bg, output };
-          return { transcript: items, autoscrollFlag: s.autoscrollFlag + 1 };
+          return { transcript: items, phase: "running", autoscrollFlag: s.autoscrollFlag + 1 };
         });
         break;
       }
@@ -959,6 +1007,8 @@ export const useStore = create<Store>((set, get) => ({
           reviewExpanded: new Set(),
           transcript: [],
           streamText: null,
+          queue: [],
+          phase: "idle",
           view: "chat",
         });
         break;
@@ -983,7 +1033,7 @@ export const useStore = create<Store>((set, get) => ({
           } else if (ev.text) {
             items = [...items, { kind: "bot", id: nextId(), text: ev.text }];
           }
-          return { transcript: items, streamText: null, waiting: false, autoscrollFlag: s.autoscrollFlag + 1 };
+          return { transcript: items, streamText: null, waiting: false, phase: "idle", autoscrollFlag: s.autoscrollFlag + 1 };
         });
         break;
       }
@@ -994,14 +1044,20 @@ export const useStore = create<Store>((set, get) => ({
             { kind: "error", id: nextId(), text: ev.s },
           ],
           waiting: false,
+          phase: "idle",
           autoscrollFlag: s.autoscrollFlag + 1,
         }));
         break;
       case "idle":
-        set({ waiting: false });
+        set({ waiting: false, phase: "idle" });
         break;
       case "queued":
-        set({ waiting: true });
+        // either a fresh run is starting, or the user queued behind an active
+        // run (streamText still live) — the next stream event flips it back
+        set((s) => ({ waiting: true, phase: s.streamText !== null ? "running" : "sending" }));
+        break;
+      case "queue":
+        set({ queue: ev.list || [] });
         break;
       case "model":
         set({ model: ev.name, kind: ev.kind || get().kind });

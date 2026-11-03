@@ -113,6 +113,7 @@ export type Ev =
       ctx_limit?: number;
     }
   | { t: "attachments"; list: string[] }
+  | { t: "queue"; list: string[] }
   | { t: "sessions"; list: SessionMeta[]; sid?: string }
   | { t: "cleared" }
   | { t: "done"; text: string }

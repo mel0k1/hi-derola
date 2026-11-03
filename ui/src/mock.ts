@@ -57,6 +57,17 @@ function seedSession(): MockSession {
 
 export function installMock() {
   if (window.__TAURI__) return;
+  // dev-preview hooks: drive queue/phase states from the console or e2e checks
+  (window as unknown as Record<string, unknown>).__mock = {
+    queue: (texts: string[]) => {
+      queue.push(...texts);
+      emit({ t: "queue", list: [...queue] });
+    },
+    queueClear: () => {
+      queue.length = 0;
+      emit({ t: "queue", list: [] });
+    },
+  };
 
   let CFG: Cfg = (load("hiderola.mock.cfg") as Cfg) || CFG_DEFAULT;
   let THEME: string = CFG.ui.theme || "dark";
@@ -250,6 +261,7 @@ export function installMock() {
       running = false;
       if (queue.length) {
         const next = queue.shift()!;
+        emit({ t: "queue", list: [...queue] });
         const s2 = current();
         if (s2) {
           s2.messages.push({ role: "user", content: next });
@@ -427,6 +439,7 @@ export function installMock() {
       }
       if (running) {
         queue.push(composed);
+        emit({ t: "queue", list: [...queue] });
         emit({ t: "note", s: "queued: will steer the current run" });
         return { cmd: false, queued: true };
       }
@@ -450,6 +463,40 @@ export function installMock() {
       }
       emit({ t: "note", s: "cancelled" });
       emit({ t: "idle" });
+    },
+    async queue_remove(a) {
+      const i = Number(a?.index);
+      if (i >= 0 && i < queue.length) queue.splice(i, 1);
+      emit({ t: "queue", list: [...queue] });
+      return {};
+    },
+    async queue_move(a) {
+      const i = Number(a?.index);
+      const to = Math.max(0, Math.min(Number(a?.to) || 0, queue.length));
+      if (i >= 0 && i < queue.length) {
+        const [it] = queue.splice(i, 1);
+        queue.splice(to, 0, it);
+      }
+      emit({ t: "queue", list: [...queue] });
+      return {};
+    },
+    async queue_edit(a) {
+      const i = Number(a?.index);
+      const text = String(a?.text || "").trim();
+      if (i >= 0 && i < queue.length && text) queue[i] = text;
+      emit({ t: "queue", list: [...queue] });
+      return {};
+    },
+    async retry() {
+      if (running) throw "wait for the current run to finish";
+      const s = current();
+      if (!s || !s.messages.length) throw "nothing to retry";
+      while (s.messages.length && s.messages[s.messages.length - 1].role !== "user") s.messages.pop();
+      if (!s.messages.length || s.messages[s.messages.length - 1].role !== "user") throw "nothing to retry";
+      saveState();
+      emitSessions();
+      fakeRun(s.messages[s.messages.length - 1].content as string);
+      return {};
     },
     async list_models() {
       await sleep(400);

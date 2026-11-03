@@ -402,6 +402,7 @@
   padding: 0.08em 0.35em;
 }
 .md pre {
+  position: relative;
   background: var(--code);
   border: 0.5px solid var(--hairline);
   border-radius: 12px;
@@ -415,6 +416,56 @@
   padding: 0;
   font-size: 0.8rem;
   line-height: 1.6;
+}
+
+/* per-block copy button (dsh CodeToolbar) */
+.md .md-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  border: 0.5px solid var(--hairline);
+  background: var(--card);
+  color: var(--muted-foreground);
+  opacity: 0;
+  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+@media (hover: hover) {
+  .md pre:hover .md-copy,
+  .md pre:focus-within .md-copy {
+    opacity: 1;
+  }
+}
+.md .md-copy:hover {
+  color: var(--foreground);
+  background: var(--accent);
+}
+.md .md-copy:focus-visible {
+  opacity: 1;
+  outline: 1.5px solid var(--info);
+  outline-offset: 1px;
+}
+.md .md-copy-i {
+  display: none;
+}
+.md .md-copy-i svg {
+  width: 13px;
+  height: 13px;
+}
+.md .md-copy .md-copy-copy {
+  display: inline-flex;
+}
+.md .md-copy.copied .md-copy-copy {
+  display: none;
+}
+.md .md-copy.copied .md-copy-check {
+  display: inline-flex;
+  color: var(--info);
 }
 .md a {
   color: var(--info);

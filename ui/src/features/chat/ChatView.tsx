@@ -1,9 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "@/lib/icons";
+import { Hint } from "@/lib/hint";
 import { DiffLines, Md } from "@/lib/md";
 import { invoke } from "@/lib/tauri";
 import { useStore, type ChatItem } from "@/store/app";
-import { cn } from "@/lib/utils";
+import { cn, copyText } from "@/lib/utils";
 import { InputBar } from "@/features/chat/InputBar";
 
 const SUGGESTIONS = [
@@ -143,22 +144,86 @@ function BgTask({ item }: { item: Extract<ChatItem, { kind: "bg" }> }) {
   );
 }
 
-function Item({ item }: { item: ChatItem }) {
+// dsh MessageIconActions: hover-revealed chrome under each message,
+// reserved space (no layout shift), kept visible while focused
+function MsgActions({ side, children }: { side: "left" | "right"; children: React.ReactNode }) {
+  return (
+    <div
+      className={cn(
+        "absolute -bottom-5 flex items-center gap-0.5 opacity-0 transition-opacity duration-100 group-focus-within/msg:opacity-100 [@media(hover:hover)]:group-hover/msg:opacity-100",
+        side === "right" ? "right-1" : "left-1",
+      )}
+    >
+      {children}
+    </div>
+  );
+}
+
+function CopyBtn({ getText, side }: { getText: () => string; side: "left" | "right" }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <Hint label={copied ? "copied" : "copy"} side={side}>
+      <button
+        aria-label="copy message"
+        onClick={() => {
+          void copyText(getText()).then((ok) => {
+            if (!ok) return;
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1400);
+          });
+        }}
+        className="rounded-[7px] p-1 text-caption transition-colors duration-100 hover:bg-accent hover:text-foreground"
+      >
+        <Icon name={copied ? "check" : "copy"} className={cn("[&>svg]:size-3.5", copied && "text-info")} />
+      </button>
+    </Hint>
+  );
+}
+
+function UserItem({ item }: { item: Extract<ChatItem, { kind: "user" }> }) {
+  return (
+    <div className="group/msg relative my-3 flex flex-col items-end">
+      <div className="msg-in max-w-[85%] rounded-[20px] bg-bubble px-4 py-2.5 text-[14px] leading-[22px] whitespace-pre-wrap break-words text-foreground">
+        {item.text}
+      </div>
+      <MsgActions side="right">
+        <CopyBtn getText={() => item.text} side="left" />
+      </MsgActions>
+    </div>
+  );
+}
+
+function BotItem({ item, canRetry }: { item: Extract<ChatItem, { kind: "bot" }>; canRetry: boolean }) {
+  const retryLast = useStore((s) => s.retryLast);
+  return (
+    <div className="group/msg relative my-3">
+      <div className="msg-in">
+        <Md text={item.text} />
+      </div>
+      <MsgActions side="left">
+        <CopyBtn getText={() => item.text} side="right" />
+        {canRetry && (
+          <Hint label="regenerate" side="right">
+            <button
+              aria-label="regenerate reply"
+              onClick={() => void retryLast()}
+              className="rounded-[7px] p-1 text-caption transition-colors duration-100 hover:bg-accent hover:text-foreground"
+            >
+              <Icon name="retry" className="[&>svg]:size-3.5" />
+            </button>
+          </Hint>
+        )}
+      </MsgActions>
+    </div>
+  );
+}
+
+function Item({ item, canRetry }: { item: ChatItem; canRetry?: boolean }) {
   switch (item.kind) {
     case "user":
-      return (
-        <div className="msg-in my-3 flex flex-col items-end">
-          <div className="max-w-[85%] rounded-[20px] bg-bubble px-4 py-2.5 text-[14px] leading-[22px] whitespace-pre-wrap break-words text-foreground">
-            {item.text}
-          </div>
-        </div>
-      );
+      return <UserItem item={item} />;
     case "bot":
-      return (
-        <div className="msg-in my-3">
-          <Md text={item.text} />
-        </div>
-      );
+      return <BotItem item={item} canRetry={!!canRetry} />;
     case "note":
       return (
         <div className="my-1.5 flex items-start gap-2 text-[12.5px] leading-[18px] break-words whitespace-pre-wrap text-tertiary">
@@ -195,8 +260,16 @@ export function ChatView() {
   const transcript = useStore((s) => s.transcript);
   const streamText = useStore((s) => s.streamText);
   const autoscrollFlag = useStore((s) => s.autoscrollFlag);
+  const phase = useStore((s) => s.phase);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [away, setAway] = useState(false);
+
+  const lastBotId = useMemo(() => {
+    for (let i = transcript.length - 1; i >= 0; i--) {
+      if (transcript[i].kind === "bot") return transcript[i].id;
+    }
+    return -1;
+  }, [transcript]);
 
   const scrollBottom = () => {
     const el = scrollRef.current;
@@ -226,7 +299,7 @@ export function ChatView() {
       ) : (
         <div className="mx-auto w-full max-w-[768px] flex-1 px-5 pt-4 pb-2">
           {transcript.map((it) => (
-            <Item key={it.id} item={it} />
+            <Item key={it.id} item={it} canRetry={it.kind === "bot" && it.id === lastBotId && phase === "idle"} />
           ))}
           {streamText !== null && (
             <div className="my-3">
@@ -241,19 +314,19 @@ export function ChatView() {
         style={{ background: "linear-gradient(180deg, transparent 0px, var(--background) 40px)" }}
       >
         <div className="relative mx-auto w-full max-w-[800px]">
-          <button
-            title="jump to latest"
-            onClick={() => {
-              const el = scrollRef.current;
-              if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-            }}
-            className={cn(
-              "absolute -top-11 right-0 flex size-8 items-center justify-center rounded-full bg-card text-muted-foreground shadow-panel transition-all duration-150 ease-[cubic-bezier(0.4,0,0.2,1)] hover:text-foreground",
-              away ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-2 opacity-0"
-            )}
-          >
-            <Icon name="down" className="[&>svg]:size-4" />
-          </button>
+          <div className={cn("absolute -top-11 right-0 transition-all duration-150 ease-[cubic-bezier(0.4,0,0.2,1)]", away ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-2 opacity-0")}>
+            <Hint label="jump to latest" side="top">
+              <button
+                onClick={() => {
+                  const el = scrollRef.current;
+                  if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+                }}
+                className="flex size-8 items-center justify-center rounded-full bg-card text-muted-foreground shadow-panel transition-colors duration-150 hover:text-foreground active:scale-95"
+              >
+                <Icon name="down" className="[&>svg]:size-4" />
+              </button>
+            </Hint>
+          </div>
           <InputBar />
         </div>
       </div>

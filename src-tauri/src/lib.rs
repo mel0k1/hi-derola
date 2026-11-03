@@ -37,6 +37,8 @@ pub struct Shared {
     allow_all: Arc<AtomicBool>,
     plan: AtomicBool,
     queue: Arc<Mutex<Vec<String>>>,
+    // serializes resume_queue so stop + run-end can never double-launch
+    resume_gate: Mutex<()>,
     titled: AtomicBool,
     changes: Mutex<Vec<SessionChange>>,
     crew: Mutex<Option<String>>,
@@ -115,6 +117,11 @@ fn emit_attachments(sh: &Shared, app: &AppHandle) {
     let _ = app.emit("ev", json!({"t": "attachments", "list": list}));
 }
 
+fn emit_queue(sh: &Shared, app: &AppHandle) {
+    let list = sh.queue.lock().unwrap().clone();
+    let _ = app.emit("ev", json!({"t": "queue", "list": list}));
+}
+
 fn clip_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
@@ -182,6 +189,13 @@ fn launch(sh: &Arc<Shared>) -> Result<(), String> {
 }
 
 fn resume_queue(app: &AppHandle, sh: &Arc<Shared>) {
+    // hold the gate across pop+launch: a concurrent resume (stop racing a
+    // done/failed event) then sees inflight set and skips instead of spawning
+    // a second parallel run
+    let _gate = sh.resume_gate.lock().unwrap();
+    if sh.inflight.lock().unwrap().is_some() {
+        return;
+    }
     let next = {
         let mut q = sh.queue.lock().unwrap();
         if q.is_empty() {
@@ -199,6 +213,7 @@ fn resume_queue(app: &AppHandle, sh: &Arc<Shared>) {
     }
     persist(sh);
     emit_sessions(app, sh);
+    emit_queue(sh, app);
     let _ = app.emit("ev", json!({"t": "queued"}));
     if let Err(e) = launch(sh) {
         let _ = app.emit("ev", json!({"t": "failed", "s": e}));
@@ -483,6 +498,7 @@ fn start_new(sh: &Shared, app: &AppHandle) {
     sh.queue.lock().unwrap().clear();
     hi_derola::todo::clear();
     let _ = app.emit("ev", json!({"t": "cleared"}));
+    emit_queue(sh, app);
     emit_sessions(app, sh);
     emit_attachments(sh, app);
 }
@@ -646,6 +662,93 @@ async fn stop(sh: State<'_, Arc<Shared>>, app: AppHandle) -> Result<(), String> 
     } else {
         resume_queue(&app, &sh);
     }
+    Ok(())
+}
+
+#[tauri::command]
+async fn queue_remove(
+    sh: State<'_, Arc<Shared>>,
+    app: AppHandle,
+    index: usize,
+) -> Result<(), String> {
+    {
+        let mut q = sh.queue.lock().unwrap();
+        if index >= q.len() {
+            return Err("queue index out of range".into());
+        }
+        q.remove(index);
+    }
+    persist(&sh);
+    emit_queue(&sh, &app);
+    Ok(())
+}
+
+#[tauri::command]
+async fn queue_move(
+    sh: State<'_, Arc<Shared>>,
+    app: AppHandle,
+    index: usize,
+    to: usize,
+) -> Result<(), String> {
+    {
+        let mut q = sh.queue.lock().unwrap();
+        if index >= q.len() || to > q.len() {
+            return Err("queue index out of range".into());
+        }
+        let item = q.remove(index);
+        let to = to.min(q.len());
+        q.insert(to, item);
+    }
+    persist(&sh);
+    emit_queue(&sh, &app);
+    Ok(())
+}
+
+#[tauri::command]
+async fn queue_edit(
+    sh: State<'_, Arc<Shared>>,
+    app: AppHandle,
+    index: usize,
+    text: String,
+) -> Result<(), String> {
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("empty message".into());
+    }
+    {
+        let mut q = sh.queue.lock().unwrap();
+        if index >= q.len() {
+            return Err("queue index out of range".into());
+        }
+        q[index] = text;
+    }
+    persist(&sh);
+    emit_queue(&sh, &app);
+    Ok(())
+}
+
+// regenerate the last answer: drop the trailing assistant/tool messages and
+// relaunch with the same trailing user prompt still in the session
+#[tauri::command]
+async fn retry(sh: State<'_, Arc<Shared>>, app: AppHandle) -> Result<(), String> {
+    if sh.inflight.lock().unwrap().is_some() {
+        return Err("wait for the current run to finish".into());
+    }
+    {
+        let mut ses = sh.session.lock().unwrap();
+        while matches!(
+            ses.messages.last().map(|m| m.role),
+            Some(Role::Assistant) | Some(Role::Tool)
+        ) {
+            ses.messages.pop();
+        }
+        if ses.messages.last().map(|m| m.role) != Some(Role::User) {
+            return Err("nothing to retry".into());
+        }
+    }
+    persist(&sh);
+    emit_sessions(&app, &sh);
+    launch(&sh)?;
     Ok(())
 }
 
@@ -1036,6 +1139,7 @@ async fn open_session(
     *sh.changes.lock().unwrap() = st.changes.clone();
     *sh.queue.lock().unwrap() = st.queue.clone();
     emit_attachments(&sh, &app);
+    emit_queue(&sh, &app);
     if !st.queue.is_empty() {
         let _ = sh.tx.send(ApiEvent::Note(format!(
             "restored {} queued message(s) from the previous run, they will steer the next run",
@@ -1894,6 +1998,7 @@ fn dispatch_prompt(sh: &Arc<Shared>, app: &AppHandle, text: String) -> Value {
         sh.queue.lock().unwrap().push(text);
 
         persist(sh);
+        emit_queue(sh, app);
         let _ = sh.tx.send(ApiEvent::Note(
             "queued: will run after the current task".into(),
         ));
@@ -2575,6 +2680,7 @@ pub fn run() -> Result<()> {
                 allow_all: Arc::new(AtomicBool::new(false)),
                 plan: AtomicBool::new(false),
                 queue: Arc::new(Mutex::new(Vec::new())),
+                resume_gate: Mutex::new(()),
                 titled: AtomicBool::new(restore.is_some()),
                 changes: Mutex::new(
                     restore
@@ -2616,6 +2722,10 @@ pub fn run() -> Result<()> {
             answer,
             allow_all,
             stop,
+            queue_remove,
+            queue_move,
+            queue_edit,
+            retry,
             list_models,
             mcp_reconnect,
             mcp_auth,

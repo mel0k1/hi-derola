@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "@/lib/icons";
+import { Hint, keyChips } from "@/lib/hint";
 import { invoke } from "@/lib/tauri";
 import { useStore, type MentionItem } from "@/store/app";
 import { chipName, cn, fmtCost, fmtTokens } from "@/lib/utils";
@@ -82,15 +83,16 @@ function PlusMenu() {
 
   return (
     <div ref={ref} className="relative">
-      <button
-        title="attach files or folders"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={() => setOpen(!open)}
-        className="flex size-7 flex-none items-center justify-center rounded-full bg-secondary text-muted-foreground transition-all duration-150 hover:bg-muted hover:text-foreground"
-      >
-        <Icon name="plus" className={cn("[&>svg]:size-4 transition-transform duration-200", open && "rotate-45")} />
-      </button>
+      <Hint label="attach files or folders" side="top">
+        <button
+          aria-haspopup="menu"
+          aria-expanded={open}
+          onClick={() => setOpen(!open)}
+          className="flex size-7 flex-none items-center justify-center rounded-full bg-secondary text-muted-foreground transition-all duration-150 hover:bg-muted hover:text-foreground active:scale-95"
+        >
+          <Icon name="plus" className={cn("[&>svg]:size-4 transition-transform duration-200", open && "rotate-45")} />
+        </button>
+      </Hint>
       {open && (
         <div className="absolute bottom-full left-0 z-50 mb-2 w-60 animate-in fade-in slide-in-from-bottom-1 rounded-[14px] border-[0.5px] border-hairline bg-glass p-1 shadow-panel backdrop-blur-[40px] backdrop-saturate-150 duration-150">
           <button className={item} onMouseDown={(e) => { e.preventDefault(); pick("files"); }}>
@@ -113,6 +115,135 @@ function PlusMenu() {
             browse project…
           </button>
           <div className="mt-0.5 border-t-[0.5px] border-hairline px-2.5 pt-1.5 pb-1 text-[11px] text-caption">or drop files anywhere</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// dsh QueueDock: visible strip of messages waiting behind the current run,
+// each with inline edit / run-next / remove
+function QueueRow({ text, index }: { text: string; index: number }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(text);
+  const taRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    if (!editing) return;
+    const el = taRef.current;
+    if (el) {
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    }
+  }, [editing]);
+
+  const stopEdit = () => {
+    setEditing(false);
+    setDraft(text);
+  };
+
+  const save = () => {
+    const v = draft.trim();
+    if (v && v !== text) void useStore.getState().queueEdit(index, v);
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <div className="msg-in mx-2 mb-1 rounded-[12px] border-[0.5px] border-info/40 bg-secondary/60 p-1.5">
+        <textarea
+          ref={taRef}
+          value={draft}
+          rows={2}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              save();
+            } else if (e.key === "Escape") {
+              e.preventDefault();
+              stopEdit();
+            }
+          }}
+          className="w-full resize-none bg-transparent px-1.5 py-1 text-[12.5px] leading-[19px] outline-none"
+        />
+        <div className="flex justify-end gap-1 pt-0.5">
+          <button
+            onClick={stopEdit}
+            className="h-6 rounded-[8px] px-2 text-[11px] text-caption transition-colors duration-100 hover:bg-accent hover:text-foreground"
+          >
+            cancel
+          </button>
+          <button
+            onClick={save}
+            className="h-6 rounded-[8px] bg-info px-2.5 text-[11px] font-medium text-white transition-colors duration-100 hover:bg-info-hover active:scale-[0.97]"
+          >
+            save
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="group/qrow mx-2 mb-0.5 flex items-start gap-2 rounded-[12px] px-1.5 py-1 transition-colors duration-100 hover:bg-accent/60">
+      <span className="mt-[2px] flex-none font-mono text-[10px] leading-[19px] text-caption">{index + 1}</span>
+      <span className="line-clamp-2 min-w-0 flex-1 text-[12.5px] leading-[19px] break-words text-muted-foreground">{text}</span>
+      <div className="flex flex-none items-center gap-0.5 opacity-0 transition-opacity duration-100 group-focus-within/qrow:opacity-100 [@media(hover:hover)]:group-hover/qrow:opacity-100">
+        {index > 0 && (
+          <Hint label="run next" side="left">
+            <button
+              onClick={() => void useStore.getState().queueMove(index, 0)}
+              className="rounded-[7px] p-1 text-caption transition-colors duration-100 hover:bg-accent hover:text-foreground"
+            >
+              <Icon name="up" className="[&>svg]:size-3.5" />
+            </button>
+          </Hint>
+        )}
+        <Hint label="edit" side="left">
+          <button
+            onClick={() => setEditing(true)}
+            className="rounded-[7px] p-1 text-caption transition-colors duration-100 hover:bg-accent hover:text-foreground"
+          >
+            <Icon name="pencil" className="[&>svg]:size-3.5" />
+          </button>
+        </Hint>
+        <Hint label="remove" side="left">
+          <button
+            onClick={() => void useStore.getState().queueRemove(index)}
+            className="rounded-[7px] p-1 text-caption transition-colors duration-100 hover:bg-accent hover:text-destructive"
+          >
+            <Icon name="x" className="[&>svg]:size-3.5" />
+          </button>
+        </Hint>
+      </div>
+    </div>
+  );
+}
+
+function QueueDock() {
+  const queue = useStore((s) => s.queue);
+  const waiting = useStore((s) => s.waiting);
+  const [open, setOpen] = useState(true);
+  if (!queue.length) return null;
+  return (
+    <div className="msg-in mb-1.5 overflow-hidden rounded-[18px] border-[0.5px] border-hairline bg-card/70 shadow-[0_1px_8px_rgba(0,0,0,0.03)]">
+      <button
+        aria-expanded={open}
+        onClick={() => setOpen(!open)}
+        className="flex h-8 w-full items-center gap-2 px-3.5 text-left transition-colors duration-100 hover:bg-accent/40"
+      >
+        <Icon name="list" className="flex-none text-tertiary [&>svg]:size-3.5" />
+        <span className="text-[12px] font-medium text-foreground">queued</span>
+        <span className="rounded-full bg-secondary px-1.5 py-px font-mono text-[10px] font-semibold text-muted-foreground">{queue.length}</span>
+        <span className="min-w-0 flex-1 truncate text-[11px] text-caption">{waiting ? "runs after the current task" : ""}</span>
+        <Icon name="chevron" className={cn("flex-none text-caption transition-transform duration-150 [&>svg]:size-3.5", open && "rotate-180")} />
+      </button>
+      {open && (
+        <div className="animate-in fade-in slide-in-from-top-1 px-1 pb-1.5 duration-150">
+          {queue.map((text, i) => (
+            <QueueRow key={i} text={text} index={i} />
+          ))}
         </div>
       )}
     </div>
@@ -160,7 +291,8 @@ function Dock() {
 
 export function InputBar() {
   const doSend = useStore((s) => s.doSend);
-  const waiting = useStore((s) => s.waiting);
+  const phase = useStore((s) => s.phase);
+  const keys = useStore((s) => s.keys);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [mention, setMention] = useState<MentionState | null>(null);
   const [hasText, setHasText] = useState(false);
@@ -276,6 +408,7 @@ export function InputBar() {
 
   return (
     <div id="input-bar" className="mx-auto w-full max-w-[800px]">
+      <QueueDock />
       <Chips />
       <div className="relative">
         {mention && (
@@ -320,23 +453,36 @@ export function InputBar() {
             <PlusMenu />
             <span className="flex-1" />
             <ModelMenu />
-            {waiting ? (
-              <button
-                title="stop (esc)"
-                onClick={() => invoke("stop").catch(() => {})}
-                className="flex size-[34px] flex-none items-center justify-center rounded-full bg-info text-white transition-colors duration-100 hover:bg-info-hover"
+            {phase === "sending" ? (
+              <span
+                aria-label="starting"
+                className="flex size-[34px] flex-none items-center justify-center rounded-full bg-info/90 text-white"
               >
-                <Icon name="stop" className="[&>svg]:size-3.5" />
-              </button>
+                <span key="spin" className="animate-in fade-in zoom-in-50 size-4 animate-spin rounded-full border-2 border-white/30 border-t-white duration-100" />
+              </span>
+            ) : phase === "running" && !hasText ? (
+              <Hint label="stop" keys={keyChips("escape")}>
+                <button
+                  onClick={() => invoke("stop").catch(() => {})}
+                  className="flex size-[34px] flex-none items-center justify-center rounded-full bg-info text-white transition-all duration-100 hover:bg-info-hover active:scale-95"
+                >
+                  <span key="stop" className="animate-in fade-in zoom-in-50 flex duration-100">
+                    <Icon name="stop" className="[&>svg]:size-3.5" />
+                  </span>
+                </button>
+              </Hint>
             ) : (
-              <button
-                disabled={!hasText}
-                title="send"
-                onClick={send}
-                className="flex size-[34px] flex-none items-center justify-center rounded-full bg-info text-white transition-all duration-100 hover:bg-info-hover active:scale-95 disabled:opacity-40 disabled:hover:bg-info"
-              >
-                <Icon name="send" className="[&>svg]:size-4" />
-              </button>
+              <Hint label={phase === "running" ? "queue after the current task" : "send"} keys={keyChips(keys.send)}>
+                <button
+                  disabled={!hasText}
+                  onClick={send}
+                  className="flex size-[34px] flex-none items-center justify-center rounded-full bg-info text-white transition-all duration-100 hover:bg-info-hover active:scale-95 disabled:opacity-40 disabled:hover:bg-info"
+                >
+                  <span key={phase === "running" ? "queue" : "send"} className="animate-in fade-in zoom-in-50 flex duration-100">
+                    <Icon name="send" className="[&>svg]:size-4" />
+                  </span>
+                </button>
+              </Hint>
             )}
           </div>
         </div>

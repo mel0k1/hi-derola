@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "@/lib/icons";
+import { Hint } from "@/lib/hint";
 import { invoke } from "@/lib/tauri";
 import { useStore } from "@/store/app";
 import { cn } from "@/lib/utils";
@@ -91,21 +92,22 @@ export function ModelMenu() {
 
   return (
     <div ref={rootRef} className="relative" onKeyDown={onKey}>
-      <button
-        title="switch model"
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        disabled={waiting}
-        onClick={() => {
-          setErr("");
-          setOpen(!open);
-        }}
-        className="flex h-7 max-w-[300px] items-center gap-1.5 rounded-[8px] px-2 text-[12px] text-muted-foreground transition-colors duration-100 outline-none hover:bg-accent hover:text-foreground focus-visible:ring-1 focus-visible:ring-info/50 disabled:opacity-50"
-      >
-        <Icon name="spark" className="flex-none text-info [&>svg]:size-3.5" />
-        <span className="truncate font-mono">{model || "model"}</span>
-        <Icon name="chevron" className={cn("flex-none transition-transform duration-150 [&>svg]:size-3", open && "rotate-180")} />
-      </button>
+      <Hint label="switch model" side="top">
+        <button
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          disabled={waiting}
+          onClick={() => {
+            setErr("");
+            setOpen(!open);
+          }}
+          className="flex h-7 max-w-[300px] items-center gap-1.5 rounded-[8px] px-2 text-[12px] text-muted-foreground transition-colors duration-100 outline-none hover:bg-accent hover:text-foreground focus-visible:ring-1 focus-visible:ring-info/50 disabled:opacity-50"
+        >
+          <Icon name="spark" className="flex-none text-info [&>svg]:size-3.5" />
+          <span className="truncate font-mono">{model || "model"}</span>
+          <Icon name="chevron" className={cn("flex-none transition-transform duration-150 [&>svg]:size-3", open && "rotate-180")} />
+        </button>
+      </Hint>
       {open && (
         <div
           role="listbox"

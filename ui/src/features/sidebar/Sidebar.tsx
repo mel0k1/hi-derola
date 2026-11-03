@@ -1,4 +1,5 @@
 import { Icon } from "@/lib/icons";
+import { Hint, keyChips } from "@/lib/hint";
 import { fmtCost, fmtRel, cn } from "@/lib/utils";
 import { useStore } from "@/store/app";
 import { invoke } from "@/lib/tauri";
@@ -80,6 +81,8 @@ export function Sidebar() {
   const toggleSidebar = useStore((s) => s.toggleSidebar);
   const theme = useStore((s) => s.theme);
   const toggleTheme = useStore((s) => s.toggleTheme);
+  const keys = useStore((s) => s.keys);
+  const openSettings = () => useStore.setState({ settingsOpen: true });
 
   return (
     <aside
@@ -150,20 +153,22 @@ export function Sidebar() {
 
         {/* foot */}
         <div className="flex flex-none items-center gap-0.5 border-t-[0.5px] border-hairline px-3 py-2">
-          <button
-            title="toggle theme (ctrl+shift+t)"
-            onClick={toggleTheme}
-            className="flex size-7 items-center justify-center rounded-[8px] text-tertiary transition-colors duration-100 hover:bg-accent hover:text-foreground"
-          >
-            <Icon name={theme === "light" ? "moon" : "sun"} className="[&>svg]:size-4" />
-          </button>
-          <button
-            title="settings (ctrl+,)"
-            onClick={() => useStore.setState({ settingsOpen: true })}
-            className="flex size-7 items-center justify-center rounded-[8px] text-tertiary transition-colors duration-100 hover:bg-accent hover:text-foreground"
-          >
-            <Icon name="sliders" className="[&>svg]:size-4" />
-          </button>
+          <Hint label="toggle theme" keys={keyChips(keys.toggle_theme)} side="top">
+            <button
+              onClick={toggleTheme}
+              className="flex size-7 items-center justify-center rounded-[8px] text-tertiary transition-colors duration-100 hover:bg-accent hover:text-foreground"
+            >
+              <Icon name={theme === "light" ? "moon" : "sun"} className="[&>svg]:size-4" />
+            </button>
+          </Hint>
+          <Hint label="settings" keys={keyChips(keys.open_settings)} side="top">
+            <button
+              onClick={openSettings}
+              className="flex size-7 items-center justify-center rounded-[8px] text-tertiary transition-colors duration-100 hover:bg-accent hover:text-foreground"
+            >
+              <Icon name="sliders" className="[&>svg]:size-4" />
+            </button>
+          </Hint>
           <span className="max-w-36 truncate pl-1.5 font-mono text-[10.5px] text-caption" title={cwd}>
             {cwd}
           </span>
@@ -181,9 +186,11 @@ export function Sidebar() {
         <button title="expand sidebar" onClick={toggleSidebar} className="mb-3 flex size-9 items-center justify-center rounded-[10px] transition-colors duration-100 hover:bg-accent">
           <img src="/logo.png" alt="" draggable={false} className="h-6 w-6 rounded-[6px]" />
         </button>
-        <button title="new chat" onClick={newChat} className="flex size-9 items-center justify-center rounded-[12px] text-foreground transition-colors duration-100 hover:bg-accent">
-          <Icon name="plus" className="[&>svg]:size-4.5" />
-        </button>
+        <Hint label="new chat" keys={keyChips(keys.new_session)} side="right">
+          <button onClick={newChat} className="flex size-9 items-center justify-center rounded-[12px] text-foreground transition-colors duration-100 hover:bg-accent">
+            <Icon name="plus" className="[&>svg]:size-4.5" />
+          </button>
+        </Hint>
         <div className="mt-3 flex flex-col items-center gap-1.5">
           {TOOLS.map((t) => (
             <button
@@ -200,20 +207,22 @@ export function Sidebar() {
           ))}
         </div>
         <span className="flex-1" />
-        <button
-          title="toggle theme"
-          onClick={toggleTheme}
-          className="flex size-9 items-center justify-center rounded-[10px] text-tertiary transition-colors duration-100 hover:bg-accent hover:text-foreground"
-        >
-          <Icon name={theme === "light" ? "moon" : "sun"} className="[&>svg]:size-4.5" />
-        </button>
-        <button
-          title="settings (ctrl+,)"
-          onClick={() => useStore.setState({ settingsOpen: true })}
-          className="mt-1 flex size-9 items-center justify-center rounded-[10px] text-tertiary transition-colors duration-100 hover:bg-accent hover:text-foreground"
-        >
-          <Icon name="sliders" className="[&>svg]:size-4.5" />
-        </button>
+        <Hint label="toggle theme" keys={keyChips(keys.toggle_theme)} side="right">
+          <button
+            onClick={toggleTheme}
+            className="flex size-9 items-center justify-center rounded-[10px] text-tertiary transition-colors duration-100 hover:bg-accent hover:text-foreground"
+          >
+            <Icon name={theme === "light" ? "moon" : "sun"} className="[&>svg]:size-4.5" />
+          </button>
+        </Hint>
+        <Hint label="settings" keys={keyChips(keys.open_settings)} side="right">
+          <button
+            onClick={openSettings}
+            className="mt-1 flex size-9 items-center justify-center rounded-[10px] text-tertiary transition-colors duration-100 hover:bg-accent hover:text-foreground"
+          >
+            <Icon name="sliders" className="[&>svg]:size-4.5" />
+          </button>
+        </Hint>
       </div>
     </aside>
   );

@@ -1,3 +1,5 @@
+import { copyText } from "@/lib/utils";
+
 function esc(s: string) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
@@ -9,6 +11,9 @@ function inline(s: string) {
     .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<i>$2</i>")
     .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
 }
+
+const COPY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+const CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>';
 
 export function md(src: string) {
   const blocks: [string, string][] = [];
@@ -49,7 +54,10 @@ export function md(src: string) {
       closeList();
       closeQuote();
       const [lang, code] = blocks[+bm[1]];
-      html += `<pre><code${lang ? ` class="lang-${esc(lang)}"` : ""}>${esc(code)}</code></pre>`;
+      html +=
+        `<pre class="md-code"><button type="button" class="md-copy" aria-label="copy code">` +
+        `<span class="md-copy-i md-copy-copy">${COPY_SVG}</span><span class="md-copy-i md-copy-check">${CHECK_SVG}</span></button>` +
+        `<code${lang ? ` class="lang-${esc(lang)}"` : ""}>${esc(code)}</code></pre>`;
       continue;
     }
     const h = t.match(/^(#{1,6})\s+(.*)$/);
@@ -116,7 +124,19 @@ export function md(src: string) {
 }
 
 export function Md({ text, className }: { text: string; className?: string }) {
-  return <div className={"md " + (className || "")} dangerouslySetInnerHTML={{ __html: md(text) }} />;
+  // delegated click for the generated per-block copy buttons
+  const onCopy = (e: React.MouseEvent<HTMLDivElement>) => {
+    const btn = (e.target as HTMLElement).closest("button.md-copy");
+    if (!btn) return;
+    const code = btn.parentElement?.querySelector("code");
+    if (!code) return;
+    void copyText(code.textContent || "").then((ok) => {
+      if (!ok) return;
+      btn.classList.add("copied");
+      setTimeout(() => btn.classList.remove("copied"), 1400);
+    });
+  };
+  return <div className={"md " + (className || "")} onClick={onCopy} dangerouslySetInnerHTML={{ __html: md(text) }} />;
 }
 
 export function DiffLines({ rows }: { rows: { tag: 0 | 1 | 2; text: string }[] }) {
