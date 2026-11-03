@@ -553,7 +553,7 @@ export function SettingsDialog() {
 
   return (
     <Dialog open={open} onOpenChange={(o) => !o && useStore.setState({ settingsOpen: false })}>
-      <DialogContent className="flex h-[88vh] w-[min(640px,94vw)] flex-col gap-0 p-0">
+      <DialogContent className="flex h-[88vh] w-[min(640px,94vw)] flex-col gap-0 p-0" showCloseButton={false}>
         <DialogHeader className="flex-row items-center justify-between border-b border-border px-4 py-3">
           <DialogTitle className="text-[14px]">settings</DialogTitle>
           <Button variant="ghost" size="icon-sm" className="text-muted-foreground" onClick={() => useStore.setState({ settingsOpen: false })}>

@@ -937,6 +937,7 @@ export const useStore = create<Store>((set, get) => ({
           reviewExpanded: new Set(),
           transcript: [],
           streamText: null,
+          view: "chat",
         });
         break;
       case "done": {
