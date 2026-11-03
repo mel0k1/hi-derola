@@ -2047,7 +2047,6 @@ async fn sandbox_fetch_vm(id: String, vm_path: String) -> Result<String, String>
         .to_string();
     let tmp = std::env::temp_dir().join(format!("hiderola-fetch-{}-{name}", std::process::id()));
     let _ = std::fs::remove_file(&tmp);
-    let m = sandbox::SandboxManager::global().clone();
     let id2 = id.clone();
     let vm2 = vm_path.clone();
     let tmp2 = tmp.clone();
@@ -2252,7 +2251,6 @@ async fn crew_list() -> Result<Value, String> {
 #[tauri::command]
 async fn crew_new(
     sh: State<'_, Arc<Shared>>,
-    app: AppHandle,
     goal: String,
     members: Vec<String>,
 ) -> Result<Value, String> {
@@ -2336,7 +2334,10 @@ fn crew_run(sh: &Arc<Shared>, rounds: usize, auto: bool) -> Result<(), String> {
     let tx = sh.tx.clone();
     let handle = tauri::async_runtime::spawn(async move {
         let res = if auto {
-            Ok(Some(crew::run_auto(&id, rounds, &cfg, &tx).await))
+            crew::run_auto(&id, rounds, &cfg, &tx)
+                .await
+                .map(Some)
+                .map_err(|e| format!("crew task: {e}"))
         } else {
             crew::step(&id, rounds, &cfg, &tx)
                 .await
@@ -2429,7 +2430,8 @@ async fn crew_retry(sh: State<'_, Arc<Shared>>, name: String) -> Result<Value, S
     }
     let cfg = sh.cfg.lock().unwrap().clone();
     let tx = sh.tx.clone();
-    tauri::async_runtime::spawn(async move { crew::retry_member(&id, &name, &cfg, &tx).await })
+    let id2 = id.clone();
+    tauri::async_runtime::spawn(async move { crew::retry_member(&id2, &name, &cfg, &tx).await })
         .await
         .map_err(|e| format!("{e}"))?
         .map_err(|e| format!("{e:#}"))?;

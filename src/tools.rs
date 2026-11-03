@@ -10,6 +10,7 @@ pub(crate) const MAX_LIST: usize = 500;
 const MAX_CAPTURE: usize = 256 * 1024;
 const READ_LIMIT: usize = 2000;
 
+#[cfg(unix)]
 const KILL_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 pub fn budget(out: String, max: usize) -> String {
