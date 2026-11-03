@@ -142,6 +142,7 @@ interface Store {
   } | null;
   files: { open: boolean; data: DirList | null; parent: string | null };
   settingsOpen: boolean;
+  quitAsk: boolean;
   reviewOpen: boolean;
   reviewExpanded: Set<string>;
   palette: { open: boolean; query: string; idx: number };
@@ -187,6 +188,9 @@ interface Store {
   queueMove: (index: number, to: number) => Promise<void>;
   queueEdit: (index: number, text: string) => Promise<void>;
   retryLast: () => Promise<void>;
+
+  quitHide: () => void;
+  quitNow: () => void;
 
   resolveConfirm: (ok: boolean, always?: boolean) => void;
   allowAll: () => void;
@@ -353,6 +357,7 @@ export const useStore = create<Store>((set, get) => ({
   ask: null,
   files: { open: false, data: null, parent: null },
   settingsOpen: false,
+  quitAsk: false,
   reviewOpen: false,
   reviewExpanded: new Set(),
   palette: { open: false, query: "", idx: 0 },
@@ -559,6 +564,15 @@ export const useStore = create<Store>((set, get) => ({
       set({ waiting: false, phase: "idle" });
       get().note(String(e));
     }
+  },
+
+  quitHide: () => {
+    set({ quitAsk: false });
+    invoke("hide_window").catch(() => {});
+  },
+  quitNow: () => {
+    set({ quitAsk: false });
+    invoke("quit_now").catch(() => {});
   },
 
   resolveConfirm: (ok, always = false) => {
@@ -1058,6 +1072,9 @@ export const useStore = create<Store>((set, get) => ({
         break;
       case "queue":
         set({ queue: ev.list || [] });
+        break;
+      case "quit_ask":
+        set({ quitAsk: true });
         break;
       case "model":
         set({ model: ev.name, kind: ev.kind || get().kind });

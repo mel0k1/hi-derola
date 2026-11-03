@@ -13,6 +13,7 @@ import { SettingsDialog } from "@/features/dialogs/SettingsDialog";
 import { ReviewDialog } from "@/features/dialogs/ReviewDialog";
 import { PaletteDialog } from "@/features/dialogs/PaletteDialog";
 import { Toasts } from "@/features/dialogs/Toasts";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { useStore } from "@/store/app";
 import { comboFromEvent, parseCombo, sameCombo } from "@/lib/keys";
 import { invoke, listenRaw } from "@/lib/tauri";
@@ -29,6 +30,23 @@ function DropOverlay({ show }: { show: boolean }) {
       </div>
     </div>
   );
+}
+
+// dsh StopSequence: the stop shortcut must be pressed twice — a single press
+// only nudges, a second press within the window actually cancels the run
+const STOP_PRESS_WINDOW = 700;
+let lastStopPress = 0;
+
+function stopSequence(event: KeyboardEvent, st: ReturnType<typeof useStore.getState>): boolean {
+  const now = Date.now();
+  if (event.repeat) return true;
+  if (now - lastStopPress < STOP_PRESS_WINDOW) {
+    lastStopPress = 0;
+    return false; // caller stops the run
+  }
+  lastStopPress = now;
+  st.toast("press the stop shortcut again to cancel");
+  return true;
 }
 
 export default function App() {
@@ -138,6 +156,7 @@ export default function App() {
       const hit = (action: string) => sameCombo(comboFromEvent(e), parseCombo(st.keys[action]));
       if (st.waiting && hit("stop")) {
         e.preventDefault();
+        if (stopSequence(e, st)) return;
         invoke("stop").catch(() => {});
         return;
       }
@@ -210,6 +229,46 @@ export default function App() {
       <PaletteDialog />
       <Toasts />
       <DropOverlay show={dragOver} />
+      <QuitDialog />
     </div>
+  );
+}
+
+// shown when the window is closed (or tray quit chosen) while a run is live
+function QuitDialog() {
+  const quitAsk = useStore((s) => s.quitAsk);
+  const quitHide = useStore((s) => s.quitHide);
+  const quitNow = useStore((s) => s.quitNow);
+  return (
+    <AlertDialog open={quitAsk}>
+      <AlertDialogContent className="max-w-sm gap-3 rounded-[20px] p-5">
+        <AlertDialogHeader className="gap-1.5">
+          <AlertDialogTitle className="text-[15px]">agent is still running</AlertDialogTitle>
+          <AlertDialogDescription className="text-[13px]">
+            quitting now interrupts the current task and its queued messages.
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter className="gap-2">
+          <AlertDialogCancel
+            onClick={() => useStore.setState({ quitAsk: false })}
+            className="h-8 rounded-[10px] text-[12.5px]"
+          >
+            stay
+          </AlertDialogCancel>
+          <button
+            onClick={quitHide}
+            className="h-8 rounded-[10px] bg-secondary px-3 text-[12.5px] font-medium text-foreground transition-colors duration-100 hover:bg-muted"
+          >
+            hide to tray
+          </button>
+          <AlertDialogAction
+            onClick={quitNow}
+            className="h-8 rounded-[10px] bg-destructive text-[12.5px] text-white hover:bg-destructive/90"
+          >
+            quit
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
   );
 }

@@ -11,7 +11,11 @@ use hi_derola::{crew, fmt, hosts, lsp, models, sandbox, skills, snapshot, tools}
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    AppHandle, Emitter, Manager, State,
+};
 use tokio::sync::{mpsc, oneshot};
 
 pub struct Shared {
@@ -749,6 +753,43 @@ async fn retry(sh: State<'_, Arc<Shared>>, app: AppHandle) -> Result<(), String>
     persist(&sh);
     emit_sessions(&app, &sh);
     launch(&sh)?;
+    Ok(())
+}
+
+fn agent_busy(sh: &Shared) -> bool {
+    sh.inflight.lock().unwrap().is_some() || crew::is_running()
+}
+
+fn app_show(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+// quit path shared by the window close button and the tray: while an agent
+// or crew run is live, hand the decision to the user in the ui
+fn request_quit(app: &AppHandle, sh: &Arc<Shared>) {
+    if agent_busy(&sh) {
+        app_show(app);
+        let _ = app.emit("ev", json!({"t": "quit_ask"}));
+    } else {
+        app.exit(0);
+    }
+}
+
+#[tauri::command]
+async fn quit_now(app: AppHandle) -> Result<(), String> {
+    app.exit(0);
+    Ok(())
+}
+
+#[tauri::command]
+async fn hide_window(app: AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.hide();
+    }
     Ok(())
 }
 
@@ -2614,7 +2655,26 @@ pub fn run() -> Result<()> {
     hi_derola::tools::set_shell(cfg.agent.shell.clone());
     let cfg = Arc::new(cfg);
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // second launch: bring the existing window forward
+            app_show(app);
+        }))
         .plugin(tauri_plugin_notification::init())
+        .on_window_event(|window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                // the tray keeps the app alive; closing hides the window and
+                // an active run asks for confirmation through the ui
+                api.prevent_close();
+                let app = window.app_handle().clone();
+                let sh = app.state::<Arc<Shared>>();
+                if agent_busy(&sh) {
+                    request_quit(&app, &sh);
+                } else {
+                    let _ = window.hide();
+                }
+            }
+            _ => {}
+        })
         .setup(move |app| {
             let (tx, rx) = mpsc::unbounded_channel::<ApiEvent>();
             let cfg = (*cfg).clone();
@@ -2712,6 +2772,38 @@ pub fn run() -> Result<()> {
             });
             pump(rx, app.handle().clone(), sh.clone());
             app.manage(sh);
+
+            // tray: left click shows the window, menu offers open/quit
+            let open_item =
+                MenuItem::with_id(app, "tray-open", "open hi!derola", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "tray-quit", "quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&open_item, &quit_item])?;
+            let handle = app.handle().clone();
+            TrayIconBuilder::with_id("hiderola-tray")
+                .icon(tauri::include_image!("icons/32x32.png"))
+                .tooltip("Hi!Derola")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(move |_tray, event| match event.id.as_ref() {
+                    "tray-open" => app_show(&handle),
+                    "tray-quit" => {
+                        let app = handle.app_handle();
+                        let sh = app.state::<Arc<Shared>>();
+                        request_quit(app, &sh);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        app_show(tray.app_handle());
+                    }
+                })
+                .build(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -2726,6 +2818,8 @@ pub fn run() -> Result<()> {
             queue_move,
             queue_edit,
             retry,
+            quit_now,
+            hide_window,
             list_models,
             mcp_reconnect,
             mcp_auth,

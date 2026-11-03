@@ -114,6 +114,7 @@ export type Ev =
     }
   | { t: "attachments"; list: string[] }
   | { t: "queue"; list: string[] }
+  | { t: "quit_ask" }
   | { t: "sessions"; list: SessionMeta[]; sid?: string }
   | { t: "cleared" }
   | { t: "done"; text: string }

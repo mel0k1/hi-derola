@@ -5,7 +5,7 @@ import { Switch } from "@/components/ui/switch";
 import { Icon } from "@/lib/icons";
 import { useStore } from "@/store/app";
 import { invoke } from "@/lib/tauri";
-import { parseKVLines, cn } from "@/lib/utils";
+import { parseKVLines, cn, copyText } from "@/lib/utils";
 import { comboFromEvent, comboToText } from "@/lib/keys";
 import { KEY_ACTIONS } from "@/store/keysStore";
 import type { Cfg, McpPrompt, McpResource, McpTemplate } from "@/lib/types";
@@ -482,7 +482,17 @@ const SECTIONS = [
   { id: "about", label: "about", icon: "spark" },
 ];
 
-const APP_VERSION = "0.3.1";
+const APP_VERSION = "0.3.2";
+// real version comes from the tauri shell when available (global app api)
+let VERSION = APP_VERSION;
+try {
+  const t = window.__TAURI__ as unknown as { app?: { getVersion?: () => Promise<string> } } | undefined;
+  if (t?.app?.getVersion) {
+    void t.app.getVersion().then((v) => {
+      if (v) VERSION = v;
+    });
+  }
+} catch {}
 
 export function SettingsDialog() {
   const open = useStore((s) => s.settingsOpen);
@@ -770,7 +780,17 @@ export function SettingsDialog() {
                 </span>
                 <div className="flex flex-col gap-0.5">
                   <span className="text-[14px] font-medium">Hi!Derola</span>
-                  <span className="text-[12px] text-muted-foreground">desktop assistant · v{APP_VERSION}</span>
+                  <button
+                    title="click to copy the version"
+                    onClick={() => {
+                      void copyText("Hi!Derola " + VERSION).then((ok) => {
+                        if (ok) useStore.getState().toast("version copied: " + VERSION);
+                      });
+                    }}
+                    className="w-fit rounded-[6px] text-[12px] text-muted-foreground transition-colors duration-100 hover:bg-accent hover:text-foreground"
+                  >
+                    desktop assistant · v{VERSION}
+                  </button>
                 </div>
               </div>
               <Button variant="ghost" size="sm" className="w-fit" onClick={() => window.open("https://github.com/mel0k1/hi-derola", "_blank")}>

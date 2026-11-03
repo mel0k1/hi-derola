@@ -12,7 +12,18 @@ const TOOLS: { id: "sandbox" | "hosts" | "skills" | "crew"; icon: string; label:
   { id: "crew", icon: "crew", label: "crew", title: "crew — several AI agents in one session" },
 ];
 
-function SessionRow({ id, title, count, updated, cost, active }: { id: string; title: string; count: number; updated: number; cost?: number; active: boolean }) {
+const PIN_KEY = "hiderola.pinned";
+
+function loadPins(): string[] {
+  try {
+    const v = JSON.parse(localStorage.getItem(PIN_KEY) || "[]");
+    return Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function SessionRow({ id, title, count, updated, cost, active, pinned, attention, onPin }: { id: string; title: string; count: number; updated: number; cost?: number; active: boolean; pinned: boolean; attention: boolean; onPin: (id: string) => void }) {
   const openSession = useStore((s) => s.openSession);
   const waiting = useStore((s) => s.waiting);
   const note = useStore((s) => s.note);
@@ -35,9 +46,24 @@ function SessionRow({ id, title, count, updated, cost, active }: { id: string; t
       <span className={cn("min-w-0 flex-1 truncate text-[13px] leading-5", active ? "font-medium text-foreground" : "text-foreground/90")}>
         {title || "new chat"}
       </span>
+      {attention && <span className="pulse-dot size-1.5 flex-none rounded-full bg-warning" title="the agent is working here" />}
       <span className={cn("flex-none font-mono text-[10.5px] text-caption transition-opacity duration-100 group-hover:opacity-0", confirming && "opacity-0")}>
         {fmtRel(updated)}
       </span>
+      <button
+        title={pinned ? "unpin" : "pin"}
+        className={cn(
+          "size-6 flex-none items-center justify-center rounded-[8px] text-caption transition-colors duration-100 hover:bg-accent hover:text-foreground",
+          pinned ? "flex text-tertiary" : "hidden group-hover:flex",
+          confirming && "hidden"
+        )}
+        onClick={(e) => {
+          e.stopPropagation();
+          onPin(id);
+        }}
+      >
+        <Icon name="pin" className={cn("[&>svg]:size-3.5", pinned && "text-info")} />
+      </button>
       <button
         title="delete"
         className={cn(
@@ -82,7 +108,20 @@ export function Sidebar() {
   const theme = useStore((s) => s.theme);
   const toggleTheme = useStore((s) => s.toggleTheme);
   const keys = useStore((s) => s.keys);
+  const waiting = useStore((s) => s.waiting);
   const openSettings = () => useStore.setState({ settingsOpen: true });
+
+  const [query, setQuery] = useState("");
+  const [pins, setPins] = useState<string[]>(loadPins);
+  const togglePin = (id: string) =>
+    setPins((p) => {
+      const next = p.includes(id) ? p.filter((x) => x !== id) : [...p, id];
+      localStorage.setItem(PIN_KEY, JSON.stringify(next));
+      return next;
+    });
+  const q = query.trim().toLowerCase();
+  const filtered = q ? sessions.filter((s) => (s.title || "new chat").toLowerCase().includes(q)) : sessions;
+  const ordered = [...filtered.filter((s) => pins.includes(s.id)), ...filtered.filter((s) => !pins.includes(s.id))];
 
   return (
     <aside
@@ -139,13 +178,38 @@ export function Sidebar() {
 
         {/* sessions */}
         <SectionLabel>sessions</SectionLabel>
+        <div className="flex-none px-3 pb-1.5">
+          <div className="relative">
+            <Icon name="search" className="absolute top-1/2 left-2.5 -translate-y-1/2 text-caption [&>svg]:size-3.5" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="search sessions"
+              spellCheck={false}
+              className="h-7.5 w-full rounded-[10px] bg-secondary py-1 pr-2.5 pl-8 text-[12px] outline-none placeholder:text-caption focus-visible:ring-1 focus-visible:ring-info/40"
+            />
+          </div>
+        </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-2">
           {sessions.length === 0 ? (
             <div className="px-2.5 py-1 text-[12.5px] text-caption">no history yet</div>
+          ) : ordered.length === 0 ? (
+            <div className="px-2.5 py-1 text-[12.5px] text-caption">no match</div>
           ) : (
             <div className="flex flex-col gap-0.5">
-              {sessions.map((s) => (
-                <SessionRow key={s.id} id={s.id} title={s.title} count={s.count} updated={s.updated} cost={s.cost} active={s.id === sid} />
+              {ordered.map((s) => (
+                <SessionRow
+                  key={s.id}
+                  id={s.id}
+                  title={s.title}
+                  count={s.count}
+                  updated={s.updated}
+                  cost={s.cost}
+                  active={s.id === sid}
+                  pinned={pins.includes(s.id)}
+                  attention={s.id === sid && waiting}
+                  onPin={togglePin}
+                />
               ))}
             </div>
           )}

@@ -19,9 +19,15 @@ export function ModelMenu() {
   const [q, setQ] = useState("");
   const [idx, setIdx] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [pending, setPending] = useState("");
   const [err, setErr] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+
+  // clear the pending spinner once the backend confirms the switch
+  useEffect(() => {
+    if (pending && model === pending) setPending("");
+  }, [model, pending]);
 
   const list = useMemo(() => {
     const all = [model, ...models.filter((m) => m !== model)].filter(Boolean);
@@ -65,6 +71,7 @@ export function ModelMenu() {
     setOpen(false);
     setQ("");
     if (m && m !== model) {
+      setPending(m);
       runCmd("/model " + m);
       useStore.getState().toast("model → " + m);
     }
@@ -104,8 +111,12 @@ export function ModelMenu() {
           className="flex h-7 max-w-[300px] items-center gap-1.5 rounded-[8px] px-2 text-[12px] text-muted-foreground transition-colors duration-100 outline-none hover:bg-accent hover:text-foreground focus-visible:ring-1 focus-visible:ring-info/50 disabled:opacity-50"
         >
           <Icon name="spark" className="flex-none text-info [&>svg]:size-3.5" />
-          <span className="truncate font-mono">{model || "model"}</span>
-          <Icon name="chevron" className={cn("flex-none transition-transform duration-150 [&>svg]:size-3", open && "rotate-180")} />
+          <span className="truncate font-mono">{pending && pending !== model ? pending : model || "model"}</span>
+          {pending && pending !== model ? (
+            <span className="size-3 flex-none animate-spin rounded-full border-[1.5px] border-info/30 border-t-info" />
+          ) : (
+            <Icon name="chevron" className={cn("flex-none transition-transform duration-150 [&>svg]:size-3", open && "rotate-180")} />
+          )}
         </button>
       </Hint>
       {open && (
@@ -146,7 +157,11 @@ export function ModelMenu() {
                 )}
               >
                 <span className="min-w-0 flex-1 truncate">{m}</span>
-                {m === model && <Icon name="check" className="flex-none text-info [&>svg]:size-3.5" />}
+                {pending && pending !== model && m === pending ? (
+                  <span className="size-3.5 flex-none animate-spin rounded-full border-[1.5px] border-info/30 border-t-info" />
+                ) : (
+                  m === model && <Icon name="check" className="flex-none text-info [&>svg]:size-3.5" />
+                )}
               </button>
             ))}
             {!list.length && <div className="px-2.5 py-2 text-[12px] text-caption">no match</div>}

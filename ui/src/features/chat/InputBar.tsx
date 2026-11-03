@@ -372,8 +372,8 @@ export function InputBar() {
       }
     }
     const st = useStore.getState();
+    // escape-to-stop is handled globally (double-press sequence in App.tsx)
     if (st.waiting && st.keys.stop === "escape" && e.key === "Escape") {
-      invoke("stop").catch(() => {});
       return;
     }
     if (st.keys.send === "enter" && e.key === "Enter" && !e.shiftKey) {
@@ -461,7 +461,7 @@ export function InputBar() {
                 <span key="spin" className="animate-in fade-in zoom-in-50 size-4 animate-spin rounded-full border-2 border-white/30 border-t-white duration-100" />
               </span>
             ) : phase === "running" && !hasText ? (
-              <Hint label="stop" keys={keyChips("escape")}>
+              <Hint label="stop" keys={["esc", "esc"]}>
                 <button
                   onClick={() => invoke("stop").catch(() => {})}
                   className="flex size-[34px] flex-none items-center justify-center rounded-full bg-info text-white transition-all duration-100 hover:bg-info-hover active:scale-95"
