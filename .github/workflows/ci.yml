@@ -39,11 +39,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
-      - name: js syntax
+          node-version: 22
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: build
         run: |
-          node --check ui/app.js
-          node --check ui/mock.js
+          npm ci
+          npm run build
+        working-directory: ui
 
   gui:
     runs-on: windows-latest
