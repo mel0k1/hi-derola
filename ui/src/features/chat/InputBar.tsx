@@ -1,9 +1,8 @@
-import { useEffect, useRef, useState } from "react";
-import { Button } from "@/components/ui/button";
+import { useRef, useState } from "react";
 import { Icon } from "@/lib/icons";
 import { invoke } from "@/lib/tauri";
 import { useStore, type MentionItem } from "@/store/app";
-import { chipName, cn } from "@/lib/utils";
+import { chipName, cn, fmtCost, fmtTokens } from "@/lib/utils";
 
 let mfilesCache: string[] | null = null;
 let mentionSeq = 0;
@@ -21,26 +20,63 @@ function Chips() {
   const detachChip = useStore((s) => s.detachChip);
   if (!attachments.length) return null;
   return (
-    <div className="mx-auto w-full max-w-3xl px-5">
-      <div className="mb-1.5 flex flex-wrap gap-1.5">
-        {attachments.map((p, i) => (
-          <span
-            key={i}
-            title={p}
-            className="msg-in flex max-w-80 items-center gap-1.5 rounded-lg border border-border bg-secondary/70 py-0.5 pr-1 pl-2.5 text-[12px]"
+    <div className="mb-1.5 flex flex-wrap gap-1.5">
+      {attachments.map((p, i) => (
+        <span
+          key={i}
+          title={p}
+          className="msg-in flex max-w-72 items-center gap-1.5 rounded-[10px] border-[0.5px] border-hairline bg-secondary py-1 pr-1 pl-2.5 text-[12px] text-foreground"
+        >
+          <Icon name="file" className="flex-none text-tertiary [&>svg]:size-3.5" />
+          <span className="truncate">{chipName(p)}</span>
+          <button
+            className="rounded-[6px] p-0.5 text-caption transition-colors duration-100 hover:text-foreground"
+            title="remove"
+            onClick={() => detachChip(i)}
           >
-            <Icon name="file" className="text-primary" />
-            <span className="truncate">{chipName(p)}</span>
-            <button
-              className="rounded p-0.5 text-muted-foreground hover:text-foreground"
-              title="remove"
-              onClick={() => detachChip(i)}
-            >
-              <Icon name="x" className="[&>svg]:size-3" />
-            </button>
-          </span>
-        ))}
-      </div>
+            <Icon name="x" className="[&>svg]:size-3" />
+          </button>
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function Dock() {
+  const waiting = useStore((s) => s.waiting);
+  const tokens = useStore((s) => s.tokens);
+  const ctx = useStore((s) => s.ctx);
+  const runCmd = useStore((s) => s.runCmd);
+  const pct = ctx.limit > 0 && ctx.used > 0 ? Math.min(100, Math.round((ctx.used / ctx.limit) * 100)) : null;
+
+  let stats = "";
+  if (!waiting && (tokens.in || tokens.out)) {
+    stats = `${fmtTokens(tokens.in)} in · ${fmtTokens(tokens.out)} out`;
+    if (tokens.cached > 0) stats += ` (${fmtTokens(tokens.cached)} cached)`;
+    if (tokens.cost > 0) stats += " · " + fmtCost(tokens.cost);
+  }
+
+  return (
+    <div className="flex h-6 items-center gap-2 px-2.5 pt-0.5 font-mono text-[11px] text-caption">
+      {pct !== null && (
+        <button
+          title={`context: ${fmtTokens(ctx.used)} of ${fmtTokens(ctx.limit)} tokens · click to /compact`}
+          onClick={() => runCmd("/compact")}
+          className={cn(
+            "rounded-full border-[0.5px] px-2 py-px font-mono text-[10.5px] font-semibold transition-colors duration-100",
+            pct >= 92
+              ? "border-destructive/50 text-destructive hover:bg-destructive/10"
+              : pct >= 80
+                ? "border-warning/50 text-warning hover:bg-warning/10"
+                : "border-hairline text-caption hover:text-muted-foreground"
+          )}
+        >
+          {pct}% ctx
+        </button>
+      )}
+      <span className="truncate">{stats}</span>
+      <span className="flex-1" />
+      {waiting && <span className="shimmer-text shrink-0 font-sans text-[12px] font-medium">thinking…</span>}
     </div>
   );
 }
@@ -49,20 +85,15 @@ export function InputBar() {
   const doSend = useStore((s) => s.doSend);
   const openFiles = useStore((s) => s.openFiles);
   const waiting = useStore((s) => s.waiting);
-  const view = useStore((s) => s.view);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [mention, setMention] = useState<MentionState | null>(null);
   const [hasText, setHasText] = useState(false);
-
-  useEffect(() => {
-    if (view === "chat") inputRef.current?.focus();
-  }, [view]);
 
   const autosize = () => {
     const el = inputRef.current;
     if (!el) return;
     el.style.height = "auto";
-    el.style.height = Math.min(el.scrollHeight, 220) + "px";
+    el.style.height = Math.min(el.scrollHeight, 240) + "px";
   };
 
   const hideMention = () => setMention(null);
@@ -148,7 +179,8 @@ export function InputBar() {
     }
     if (st.keys.newline === "shift+enter" && e.key === "Enter" && e.shiftKey) {
       e.preventDefault();
-      const s = el.selectionStart, epos = el.selectionEnd;
+      const s = el.selectionStart,
+        epos = el.selectionEnd;
       el.value = el.value.slice(0, s) + "\n" + el.value.slice(epos);
       el.selectionStart = el.selectionEnd = s + 1;
       autosize();
@@ -167,11 +199,11 @@ export function InputBar() {
   };
 
   return (
-    <div id="input-bar" className={cn("flex-none px-5 pt-1 pb-2", view !== "chat" && "hidden")}>
+    <div id="input-bar" className="mx-auto w-full max-w-[800px]">
       <Chips />
-      <div className="relative mx-auto w-full max-w-3xl">
+      <div className="relative">
         {mention && (
-          <div className="absolute bottom-full left-0 z-40 mb-2.5 max-h-64 min-w-72 max-w-[26rem] animate-in fade-in slide-in-from-bottom-1 overflow-y-auto rounded-xl border border-border bg-popover p-1 shadow-lg duration-150">
+          <div className="absolute bottom-full left-0 z-40 mb-2.5 max-h-64 min-w-72 max-w-[26rem] animate-in fade-in slide-in-from-bottom-1 overflow-y-auto rounded-[16px] border-[0.5px] border-hairline bg-glass p-1.5 shadow-panel backdrop-blur-[40px] backdrop-saturate-150 duration-150">
             {mention.items.map((p, i) => (
               <div
                 key={p.v + i}
@@ -180,37 +212,26 @@ export function InputBar() {
                   completeMention(mention, i);
                 }}
                 className={cn(
-                  "flex cursor-pointer items-center gap-2 overflow-hidden rounded-md px-2.5 py-1.5 font-mono text-[12px] whitespace-nowrap",
-                  i === mention.idx ? "bg-accent text-accent-foreground" : "text-foreground"
+                  "flex cursor-pointer items-center gap-2 overflow-hidden rounded-[10px] px-2.5 py-1.5 font-mono text-[12px] whitespace-nowrap transition-colors duration-100",
+                  i === mention.idx ? "bg-accent text-foreground" : "text-foreground/90"
                 )}
               >
-                <Icon name={p.agent ? "spark" : "file"} className="flex-none text-muted-foreground" />
+                <Icon name={p.agent ? "spark" : "file"} className="flex-none text-tertiary" />
                 <span className="truncate">{p.label}</span>
               </div>
             ))}
           </div>
         )}
-        <div
-          className={cn(
-            "flex items-end gap-1.5 rounded-2xl border border-input bg-card px-2 py-1.5 transition-colors focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/30"
-          )}
-        >
-          <Button
-            variant="ghost"
-            size="icon-sm"
-            className="mb-0.5 flex-none text-muted-foreground"
-            title="attach file or folder"
-            onClick={openFiles}
-          >
-            <Icon name="paperclip" />
-          </Button>
+        {/* composer card, dsh InputBar: 28px radius, soft elevation, blue caret */}
+        <div className="flex flex-col gap-0.5 rounded-[28px] bg-card px-2 pt-2 pb-1.5 shadow-[0_0_0_0.5px_var(--border),0_4px_16px_rgba(0,0,0,0.04),0_0_24px_rgba(0,0,0,0.03)]">
           <textarea
             id="chat-input"
             ref={inputRef}
             rows={1}
+            autoFocus
             spellCheck={false}
-            placeholder="message · /help for commands"
-            className="max-h-56 min-h-9 flex-1 resize-none bg-transparent py-1.5 leading-relaxed outline-none placeholder:text-muted-foreground"
+            placeholder="message · /help for commands · @ files"
+            className="max-h-60 min-h-9 flex-1 resize-none bg-transparent px-2.5 py-1.5 text-[14px] leading-[22px] outline-none placeholder:text-caption"
             onInput={() => {
               autosize();
               showMention();
@@ -219,20 +240,37 @@ export function InputBar() {
             onClick={hideMention}
             onKeyDown={onKeyDown}
           />
-          <Button
-            size="icon-sm"
-            className={cn(
-              "mb-0.5 flex-none rounded-xl transition-transform active:scale-95",
-              hasText && !waiting && "shadow-[0_0_0_3px_var(--ring)]"
+          <div className="flex items-center gap-1.5 px-0.5 pt-0.5 pb-0.5">
+            <button
+              title="attach file or folder"
+              onClick={openFiles}
+              className="flex size-7 flex-none items-center justify-center rounded-full bg-secondary text-muted-foreground transition-colors duration-100 hover:bg-muted hover:text-foreground"
+            >
+              <Icon name="paperclip" className="[&>svg]:size-3.5" />
+            </button>
+            <span className="flex-1" />
+            {waiting ? (
+              <button
+                title="stop (esc)"
+                onClick={() => invoke("stop").catch(() => {})}
+                className="flex size-[34px] flex-none items-center justify-center rounded-full bg-info text-white transition-colors duration-100 hover:bg-info-hover"
+              >
+                <Icon name="stop" className="[&>svg]:size-3.5" />
+              </button>
+            ) : (
+              <button
+                disabled={!hasText}
+                title="send"
+                onClick={send}
+                className="flex size-[34px] flex-none items-center justify-center rounded-full bg-info text-white transition-all duration-100 hover:bg-info-hover active:scale-95 disabled:opacity-40 disabled:hover:bg-info"
+              >
+                <Icon name="send" className="[&>svg]:size-4" />
+              </button>
             )}
-            disabled={!hasText || waiting}
-            title="send"
-            onClick={send}
-          >
-            <Icon name="send" />
-          </Button>
+          </div>
         </div>
       </div>
+      <Dock />
     </div>
   );
 }

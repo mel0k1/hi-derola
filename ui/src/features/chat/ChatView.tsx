@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { Button } from "@/components/ui/button";
 import { Icon } from "@/lib/icons";
 import { DiffLines, Md } from "@/lib/md";
 import { invoke } from "@/lib/tauri";
 import { useStore, type ChatItem } from "@/store/app";
 import { cn } from "@/lib/utils";
+import { InputBar } from "@/features/chat/InputBar";
 
 const SUGGESTIONS = [
   { label: "explain this codebase", prompt: "explain this codebase: what it does and how it is structured" },
@@ -16,57 +16,60 @@ const SUGGESTIONS = [
 function Welcome() {
   const doSend = useStore((s) => s.doSend);
   return (
-    <div className="flex flex-col items-center pt-[14vh] text-center">
+    <div className="flex flex-1 flex-col items-center justify-center px-5 pb-10 text-center">
       <div className="msg-in" style={{ animationDelay: "0s" }}>
         <div className="logo-float">
-          <img
-            src="/logo.png"
-            alt="Hi!Derola"
-            width={72}
-            height={72}
-            draggable={false}
-            className="logo-mark rounded-2xl border border-border"
-          />
+          <img src="/logo.png" alt="Hi!Derola" width={68} height={68} draggable={false} className="logo-mark rounded-2xl border-[0.5px] border-hairline shadow-soft" />
         </div>
       </div>
-      <div className="msg-in mt-3 text-[26px] font-bold tracking-tight" style={{ animationDelay: "0.08s" }}>
-        Hi!<span className="text-primary">Derola</span>
+      <div className="msg-in mt-4 text-[26px] leading-8 font-semibold tracking-tight" style={{ animationDelay: "0.06s" }}>
+        Hi!Derola
       </div>
-      <div className="msg-in text-[13.5px] text-muted-foreground" style={{ animationDelay: "0.16s" }}>
+      <div className="msg-in mt-1 text-[13.5px] text-tertiary" style={{ animationDelay: "0.12s" }}>
         a fast coding assistant in pure rust
       </div>
-      <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
+      <div className="mt-7 flex flex-wrap items-center justify-center gap-2">
         {SUGGESTIONS.map((s, i) => (
-          <Button
+          <button
             key={s.label}
-            variant="outline"
-            size="sm"
-            className="msg-in h-8 border-input bg-transparent font-normal text-muted-foreground shadow-none hover:border-primary/50 hover:text-foreground dark:bg-transparent"
-            style={{ animationDelay: `${0.24 + i * 0.06}s` }}
+            className="msg-in h-8 rounded-full border-[0.5px] border-border px-3.5 text-[13px] text-muted-foreground transition-colors duration-100 hover:bg-accent hover:text-foreground active:scale-[0.97]"
+            style={{ animationDelay: `${0.18 + i * 0.05}s` }}
             onClick={() => doSend(s.prompt)}
           >
             {s.label}
-          </Button>
+          </button>
         ))}
       </div>
-      <div className="msg-in mt-7 flex flex-wrap items-center justify-center gap-1.5 text-[12px] text-muted-foreground" style={{ animationDelay: "0.5s" }}>
-        ask anything · attach files with <Icon name="paperclip" className="text-primary" /> · /help for commands
+      <div className="msg-in mt-8 flex flex-wrap items-center justify-center gap-1.5 text-[12px] text-caption" style={{ animationDelay: "0.42s" }}>
+        ask anything · attach files with <Icon name="paperclip" className="text-tertiary" /> · /help for commands
       </div>
     </div>
   );
 }
 
 function ToolRow({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
+  const hasDiff = !!item.diff && item.diff.length > 0;
+  const [open, setOpen] = useState(false);
   return (
-    <div className="msg-in my-2.5 overflow-hidden rounded-lg border border-border bg-card/60">
-      <div className="flex items-baseline gap-2 px-3 py-1.5 font-mono text-[11.5px] text-muted-foreground">
-        <span className="text-primary">▸</span>
-        <span className="font-semibold text-foreground">{item.name}</span>
-        <span className="truncate">{item.detail}</span>
+    <div className="msg-in my-1">
+      <div
+        onClick={() => hasDiff && setOpen(!open)}
+        className={cn(
+          "-mx-2 flex h-7 items-center gap-2 rounded-[10px] px-2 transition-colors duration-100",
+          hasDiff && "cursor-pointer hover:bg-accent"
+        )}
+      >
+        <Icon
+          name="chevron"
+          className={cn("flex-none text-caption transition-transform duration-100 [&>svg]:size-3.5", hasDiff ? (open ? "rotate-180" : "-rotate-90 cursor-pointer") : "-rotate-90")}
+        />
+        <span className="flex-none text-[13px] font-medium text-foreground">{item.name}</span>
+        <span className="size-1 flex-none rounded-full bg-caption/70" />
+        <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-tertiary">{item.detail}</span>
       </div>
-      {item.diff && item.diff.length > 0 && (
-        <div className="px-3 pb-2">
-          <DiffLines rows={item.diff} />
+      {hasDiff && open && (
+        <div className="animate-in fade-in slide-in-from-top-1 mt-1 mb-2 ml-3 overflow-x-auto rounded-[12px] border-[0.5px] border-hairline bg-code px-2.5 py-1.5 duration-150">
+          <DiffLines rows={item.diff!} />
         </div>
       )}
     </div>
@@ -78,9 +81,10 @@ function ToolOut({ item }: { item: Extract<ChatItem, { kind: "toolout" }> }) {
   return (
     <pre
       onClick={() => setOpen(!open)}
+      title={open ? "click to collapse" : "click to expand"}
       className={cn(
-        "msg-in my-1 ml-3.5 cursor-pointer overflow-y-auto border-l-2 border-border py-0.5 pl-2.5 font-mono text-[11px] leading-relaxed text-muted-foreground transition-[max-height,border-color,color] duration-200 ease-out hover:border-primary/50 hover:text-foreground",
-        open ? "max-h-120" : "max-h-30"
+        "msg-in my-1 ml-2 cursor-pointer overflow-y-auto overflow-x-hidden rounded-[12px] border-[0.5px] border-hairline bg-code px-3 py-1.5 font-mono text-[11px] leading-[19px] break-words whitespace-pre-wrap text-tertiary transition-colors duration-100 hover:text-muted-foreground",
+        open ? "max-h-80" : "max-h-9"
       )}
     >
       {item.text}
@@ -92,17 +96,17 @@ function ThinkBox({ item }: { item: Extract<ChatItem, { kind: "think" }> }) {
   const [open, setOpen] = useState(item.open);
   useEffect(() => setOpen(item.open), [item.open]);
   return (
-    <div className="msg-in my-2.5 overflow-hidden rounded-lg border border-border border-l-2 border-l-primary/50 bg-card/40">
+    <div className="msg-in my-1">
       <button
         onClick={() => setOpen(!open)}
-        className="flex w-full items-center gap-1.5 px-3 py-1.5 font-mono text-[11.5px] font-semibold tracking-wide text-muted-foreground select-none hover:text-foreground"
+        className="-mx-2 flex h-7 items-center gap-2 rounded-[10px] px-2 text-left transition-colors duration-100 hover:bg-accent"
       >
-        thinking
-        {item.streaming && <span className="ml-1 inline-block size-1.5 animate-pulse rounded-full bg-primary" />}
-        <Icon name="chevron" className={cn("ml-auto transition-transform", open && "rotate-180")} />
+        <Icon name="chevron" className={cn("flex-none text-caption transition-transform duration-100 [&>svg]:size-3.5", open ? "rotate-180" : "-rotate-90")} />
+        <span className={cn("text-[13px]", item.streaming ? "shimmer-text font-medium" : "text-tertiary")}>thinking</span>
+        {item.streaming && <span className="pulse-dot size-1.5 flex-none rounded-full bg-info" />}
       </button>
       {open && (
-        <div className="max-h-64 animate-in fade-in slide-in-from-top-1 overflow-y-auto px-3.5 pb-2.5 text-[12.5px] break-words whitespace-pre-wrap text-muted-foreground duration-200">
+        <div className="animate-in fade-in slide-in-from-top-1 mb-2 ml-4 max-h-64 overflow-y-auto pr-2 text-[13px] leading-[21px] break-words whitespace-pre-wrap text-tertiary duration-150">
           {item.text}
         </div>
       )}
@@ -116,19 +120,23 @@ function BgTask({ item }: { item: Extract<ChatItem, { kind: "bg" }> }) {
     if (preRef.current) preRef.current.scrollTop = preRef.current.scrollHeight;
   }, [item.output]);
   return (
-    <div className={cn("msg-in my-2.5 border-l-2 py-0.5 pl-2.5", item.ended ? "border-border" : "border-primary/60")}>
-      <div className="flex items-center justify-between gap-2 font-mono text-[11.5px] font-semibold tracking-wide">
-        <span className={item.ended ? "text-muted-foreground" : "text-primary"}>{item.bgId} output</span>
+    <div className="msg-in my-2">
+      <div className="-mx-2 flex h-7 items-center gap-2 px-2">
+        <span className={cn("size-1.5 flex-none rounded-full", item.ended ? "bg-caption/70" : "pulse-dot bg-info")} />
+        <span className={cn("font-mono text-[11.5px] font-semibold tracking-wide", item.ended ? "text-caption" : "text-info")}>{item.bgId} output</span>
         {!item.ended && (
           <button
-            className="rounded-md border border-destructive/60 px-2 py-px font-mono text-[10px] font-semibold text-destructive/90 hover:bg-destructive hover:text-white"
+            className="h-5 rounded-[8px] border-[0.5px] border-destructive/40 px-2 font-mono text-[10px] font-semibold text-destructive transition-colors duration-100 hover:bg-destructive/10"
             onClick={() => invoke("task_kill", { id: item.bgId }).catch(() => {})}
           >
             kill
           </button>
         )}
       </div>
-      <pre ref={preRef} className="mt-1 max-h-44 overflow-y-auto font-mono text-[11px] leading-relaxed break-words whitespace-pre-wrap text-muted-foreground">
+      <pre
+        ref={preRef}
+        className="mt-0.5 max-h-44 overflow-y-auto rounded-[12px] border-[0.5px] border-hairline bg-code px-3 py-2 font-mono text-[11px] leading-[19px] break-words whitespace-pre-wrap text-tertiary"
+      >
         {item.output}
       </pre>
     </div>
@@ -139,33 +147,41 @@ function Item({ item }: { item: ChatItem }) {
   switch (item.kind) {
     case "user":
       return (
-        <div className="msg-in my-4 flex flex-col items-end">
-          <div className="mb-0.5 font-mono text-[11px] tracking-wide text-muted-foreground lowercase">you</div>
-          <div className="max-w-[85%] rounded-xl rounded-br-sm border border-border bg-chat-you px-3.5 py-2 whitespace-pre-wrap break-words text-foreground">
+        <div className="msg-in my-3 flex flex-col items-end">
+          <div className="max-w-[85%] rounded-[20px] bg-bubble px-4 py-2.5 text-[14px] leading-[22px] whitespace-pre-wrap break-words text-foreground">
             {item.text}
           </div>
         </div>
       );
     case "bot":
       return (
-        <div className="msg-in my-4">
-          <div className="mb-0.5 font-mono text-[11px] tracking-wide text-muted-foreground lowercase">bot</div>
+        <div className="msg-in my-3">
           <Md text={item.text} />
         </div>
       );
     case "note":
-      return <div className="my-1.5 text-[12.5px] break-words whitespace-pre-wrap text-muted-foreground">· {item.text}</div>;
+      return (
+        <div className="my-1.5 flex items-start gap-2 text-[12.5px] leading-[18px] break-words whitespace-pre-wrap text-tertiary">
+          <span className="mt-[7px] size-1 flex-none rounded-full bg-caption/70" />
+          {item.text}
+        </div>
+      );
     case "error":
-      return <div className="shake my-1.5 text-[12.5px] break-words whitespace-pre-wrap text-destructive">· {item.text}</div>;
+      return (
+        <div className="shake my-1.5 flex items-start gap-2 text-[12.5px] leading-[18px] break-words whitespace-pre-wrap text-destructive">
+          <span className="mt-[7px] size-1 flex-none rounded-full bg-destructive/70" />
+          {item.text}
+        </div>
+      );
     case "tool":
       return <ToolRow item={item} />;
     case "toolout":
       return <ToolOut item={item} />;
     case "todo":
       return (
-        <div className="msg-in my-2.5 border-l-2 border-primary/50 pl-3">
-          <div className="mb-0.5 font-mono text-[11px] tracking-wide text-primary lowercase">todos</div>
-          <pre className="font-mono text-[12px] leading-relaxed break-words whitespace-pre-wrap">{item.text}</pre>
+        <div className="msg-in my-2 ml-1 border-l-2 border-hairline pl-3">
+          <div className="text-[10.5px] font-medium tracking-[0.08em] text-caption uppercase select-none">todos</div>
+          <pre className="mt-0.5 font-mono text-[12px] leading-[19px] break-words whitespace-pre-wrap text-muted-foreground">{item.text}</pre>
         </div>
       );
     case "think":
@@ -201,40 +217,44 @@ export function ChatView() {
     return () => el.removeEventListener("scroll", onScroll);
   }, []);
 
+  const empty = transcript.length === 0 && !streamText;
+
   return (
-    <div ref={scrollRef} className="h-full overflow-y-auto" id="chat-scroll">
-      {transcript.length === 0 && !streamText ? (
+    <div ref={scrollRef} id="chat-scroll" className="flex h-full flex-col overflow-y-auto">
+      {empty ? (
         <Welcome />
       ) : (
-        <div className="mx-auto max-w-3xl px-5 pt-4 pb-6">
+        <div className="mx-auto w-full max-w-[768px] flex-1 px-5 pt-4 pb-2">
           {transcript.map((it) => (
             <Item key={it.id} item={it} />
           ))}
           {streamText !== null && (
-            <div className="my-4">
-              <div className="mb-0.5 font-mono text-[11px] tracking-wide text-muted-foreground lowercase">bot</div>
+            <div className="my-3">
               <Md text={streamText} />
             </div>
           )}
         </div>
       )}
-      <div className="pointer-events-none sticky bottom-2 h-0">
-        <div className="pointer-events-auto mx-auto flex max-w-3xl justify-end px-5">
-          <Button
-            variant="outline"
-            size="icon"
-            className={cn(
-              "size-8 rounded-full border-border bg-card shadow-md transition-all",
-              away ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-2 opacity-0"
-            )}
+      {/* sticky composer seat with dsh gradient mask */}
+      <div
+        className="sticky bottom-0 z-10 px-5 pt-9 pb-1.5"
+        style={{ background: "linear-gradient(180deg, transparent 0px, var(--background) 40px)" }}
+      >
+        <div className="relative mx-auto w-full max-w-[800px]">
+          <button
             title="jump to latest"
             onClick={() => {
               const el = scrollRef.current;
               if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
             }}
+            className={cn(
+              "absolute -top-11 right-0 flex size-8 items-center justify-center rounded-full bg-card text-muted-foreground shadow-panel transition-all duration-150 ease-[cubic-bezier(0.4,0,0.2,1)] hover:text-foreground",
+              away ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-2 opacity-0"
+            )}
           >
-            <Icon name="down" />
-          </Button>
+            <Icon name="down" className="[&>svg]:size-4" />
+          </button>
+          <InputBar />
         </div>
       </div>
     </div>

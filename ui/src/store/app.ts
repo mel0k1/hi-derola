@@ -445,6 +445,20 @@ export const useStore = create<Store>((set, get) => ({
 
   newChat: () => {
     if (get().waiting || get().confirm?.open) return;
+    // always land on the chat view first, so any error note from the backend is visible
+    set({ view: "chat" });
+    // if the chat is already empty the backend may not emit "cleared" — reset locally
+    if (!get().sid && get().transcript.length === 0 && streamRaw === null) {
+      set({
+        sid: "",
+        ctx: { used: 0, limit: get().ctx.limit },
+        changes: {},
+        reviewExpanded: new Set(),
+        transcript: [],
+        streamText: null,
+        autoscrollFlag: get().autoscrollFlag + 1,
+      });
+    }
     invoke("new_session").catch((e) => get().note(String(e)));
   },
 

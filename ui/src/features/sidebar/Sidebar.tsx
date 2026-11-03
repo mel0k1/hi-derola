@@ -1,16 +1,14 @@
-import { Button } from "@/components/ui/button";
 import { Icon } from "@/lib/icons";
-import { fmtCost, fmtRel } from "@/lib/utils";
+import { fmtCost, fmtRel, cn } from "@/lib/utils";
 import { useStore } from "@/store/app";
 import { invoke } from "@/lib/tauri";
-import { useState } from "react";
-import { cn } from "@/lib/utils";
+import { useState, type ReactNode } from "react";
 
 const TOOLS: { id: "sandbox" | "hosts" | "skills" | "crew"; icon: string; label: string; title: string }[] = [
-  { id: "sandbox", icon: "box", label: "sandbox", title: "sandbox - local QEMU VMs for isolated agent work" },
-  { id: "hosts", icon: "server", label: "remote hosts", title: "remote hosts - run the agent on your servers over ssh" },
-  { id: "skills", icon: "skill", label: "skills", title: "skills - plugin folders with SKILL.md, toggles, git install" },
-  { id: "crew", icon: "crew", label: "crew", title: "crew - several AI agents in one session" },
+  { id: "sandbox", icon: "box", label: "sandbox", title: "sandbox — local QEMU VMs for isolated agent work" },
+  { id: "hosts", icon: "server", label: "remote hosts", title: "remote hosts — run the agent on your servers over ssh" },
+  { id: "skills", icon: "skill", label: "skills", title: "skills — plugin folders with SKILL.md, toggles, git install" },
+  { id: "crew", icon: "crew", label: "crew", title: "crew — several AI agents in one session" },
 ];
 
 function SessionRow({ id, title, count, updated, cost, active }: { id: string; title: string; count: number; updated: number; cost?: number; active: boolean }) {
@@ -24,28 +22,26 @@ function SessionRow({ id, title, count, updated, cost, active }: { id: string; t
     <div
       role="button"
       tabIndex={0}
+      title={`${count} msgs · ${fmtRel(updated)}${cost && cost > 0 ? ` · ${fmtCost(cost)}` : ""}`}
       onClick={() => openSession(id)}
       onKeyDown={(e) => e.key === "Enter" && openSession(id)}
       className={cn(
-        "group flex cursor-pointer items-center gap-1 rounded-md border border-transparent py-1.5 pr-1 pl-2.5 transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
-        "hover:bg-accent/70",
-        active && "border-border bg-secondary/70"
+        "group flex h-8 cursor-pointer items-center gap-1 rounded-[12px] pr-1 pl-3 transition-colors duration-100 outline-none",
+        "hover:bg-accent",
+        active ? "bg-accent" : "bg-transparent"
       )}
     >
-      <div className="min-w-0 flex-1">
-        <div className={cn("truncate text-[13px] leading-tight", active && "text-foreground")}>{title || "new chat"}</div>
-        <div className="font-mono text-[10.5px] text-muted-foreground">
-          {count} msgs · {fmtRel(updated)}
-          {cost && cost > 0 ? ` · ${fmtCost(cost)}` : ""}
-        </div>
-      </div>
-      <Button
-        variant="ghost"
-        size="icon-xs"
+      <span className={cn("min-w-0 flex-1 truncate text-[13px] leading-5", active ? "font-medium text-foreground" : "text-foreground/90")}>
+        {title || "new chat"}
+      </span>
+      <span className={cn("flex-none font-mono text-[10.5px] text-caption transition-opacity duration-100 group-hover:opacity-0", confirming && "opacity-0")}>
+        {fmtRel(updated)}
+      </span>
+      <button
         title="delete"
         className={cn(
-          "text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 hover:bg-transparent hover:text-destructive",
-          confirming && "text-destructive opacity-100"
+          "hidden size-6 flex-none items-center justify-center rounded-[8px] text-caption transition-colors duration-100 group-hover:flex",
+          confirming ? "text-destructive" : "hover:bg-accent hover:text-destructive"
         )}
         onClick={(e) => {
           e.stopPropagation();
@@ -63,98 +59,162 @@ function SessionRow({ id, title, count, updated, cost, active }: { id: string; t
           }
         }}
       >
-        <Icon name={confirming ? "check" : "trash"} />
-      </Button>
+        <Icon name={confirming ? "check" : "trash"} className="[&>svg]:size-3.5" />
+      </button>
     </div>
   );
 }
 
+function SectionLabel({ children, className }: { children: ReactNode; className?: string }) {
+  return <div className={cn("px-3 pt-4 pb-1 text-[11px] font-medium tracking-[0.08em] text-caption uppercase select-none", className)}>{children}</div>;
+}
+
 export function Sidebar() {
-  const hidden = useStore((s) => s.sidebarHidden);
+  const collapsed = useStore((s) => s.sidebarHidden);
   const view = useStore((s) => s.view);
   const setView = useStore((s) => s.setView);
   const sessions = useStore((s) => s.sessions);
   const sid = useStore((s) => s.sid);
   const cwd = useStore((s) => s.cwd);
   const newChat = useStore((s) => s.newChat);
+  const toggleSidebar = useStore((s) => s.toggleSidebar);
+  const theme = useStore((s) => s.theme);
+  const toggleTheme = useStore((s) => s.toggleTheme);
 
   return (
     <aside
       className={cn(
-        "z-10 flex w-68 flex-none flex-col border-r border-border bg-sidebar text-sidebar-foreground transition-[margin] duration-200 ease-out",
-        hidden && "-ml-72"
+        "relative z-10 flex-none overflow-visible bg-sidebar text-sidebar-foreground transition-[width] duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]",
+        collapsed ? "w-14" : "w-[280px]"
       )}
     >
-      <div className="flex items-center gap-2 px-4 pt-3.5 pb-1">
-        <img src="/logo.png" alt="" draggable={false} className="h-6 w-6 flex-none rounded-[6px]" />
-        <div className="text-[15px] font-bold tracking-tight">
-          Hi!<span className="font-medium">Derola</span>
+      {/* expanded content */}
+      <div
+        aria-hidden={collapsed}
+        className={cn(
+          "absolute inset-y-0 left-0 flex w-[280px] flex-col transition-opacity duration-150 ease-[cubic-bezier(0.4,0,0.2,1)]",
+          collapsed ? "pointer-events-none opacity-0" : "opacity-100"
+        )}
+      >
+        {/* logo row */}
+        <div className="flex h-[52px] flex-none items-center gap-2.5 pr-2 pl-5">
+          <img src="/logo.png" alt="" draggable={false} className="h-6 w-6 flex-none rounded-[6px]" />
+          <div className="text-[16px] font-semibold tracking-[0.02em] whitespace-nowrap">
+            Hi!<span className="font-medium">Derola</span>
+          </div>
+        </div>
+
+        {/* new chat bar */}
+        <div className="flex-none px-3 pt-1 pb-1.5">
+          <button
+            onClick={newChat}
+            className="flex h-9 w-full items-center gap-2 rounded-[12px] border-[0.5px] border-border bg-card px-3 text-[13.5px] font-medium text-foreground shadow-xs transition-colors duration-100 hover:bg-muted"
+          >
+            <Icon name="plus" className="text-tertiary" />
+            new chat
+          </button>
+        </div>
+
+        {/* tools */}
+        <SectionLabel>tools</SectionLabel>
+        <nav className="flex flex-col gap-0.5 px-3">
+          {TOOLS.map((t) => (
+            <button
+              key={t.id}
+              title={t.title}
+              onClick={() => setView(t.id)}
+              className={cn(
+                "flex h-8 items-center gap-2.5 rounded-[12px] px-2.5 text-left text-[13px] leading-5 transition-colors duration-100 outline-none",
+                view === t.id ? "bg-accent font-medium text-foreground" : "text-foreground/85 hover:bg-accent/60"
+              )}
+            >
+              <Icon name={t.icon} className={view === t.id ? "text-foreground" : "text-tertiary"} />
+              {t.label}
+            </button>
+          ))}
+        </nav>
+
+        {/* sessions */}
+        <SectionLabel>sessions</SectionLabel>
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-2">
+          {sessions.length === 0 ? (
+            <div className="px-2.5 py-1 text-[12.5px] text-caption">no history yet</div>
+          ) : (
+            <div className="flex flex-col gap-0.5">
+              {sessions.map((s) => (
+                <SessionRow key={s.id} id={s.id} title={s.title} count={s.count} updated={s.updated} cost={s.cost} active={s.id === sid} />
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* foot */}
+        <div className="flex flex-none items-center gap-0.5 border-t-[0.5px] border-hairline px-3 py-2">
+          <button
+            title="toggle theme (ctrl+shift+t)"
+            onClick={toggleTheme}
+            className="flex size-7 items-center justify-center rounded-[8px] text-tertiary transition-colors duration-100 hover:bg-accent hover:text-foreground"
+          >
+            <Icon name={theme === "light" ? "moon" : "sun"} className="[&>svg]:size-4" />
+          </button>
+          <button
+            title="settings (ctrl+,)"
+            onClick={() => useStore.setState({ settingsOpen: true })}
+            className="flex size-7 items-center justify-center rounded-[8px] text-tertiary transition-colors duration-100 hover:bg-accent hover:text-foreground"
+          >
+            <Icon name="sliders" className="[&>svg]:size-4" />
+          </button>
+          <span className="max-w-36 truncate pl-1.5 font-mono text-[10.5px] text-caption" title={cwd}>
+            {cwd}
+          </span>
         </div>
       </div>
 
-      <div className="px-3 pt-2 pb-1">
-        <Button variant="outline" onClick={newChat} className="w-full justify-start gap-2 border-input bg-transparent font-semibold shadow-none hover:border-primary/50 hover:text-foreground dark:bg-transparent">
-          <Icon name="plus" className="text-primary" />
-          new chat
-        </Button>
-      </div>
-
-      <div className="px-4 pt-4 pb-1.5 font-mono text-[10.5px] font-semibold tracking-[0.12em] text-muted-foreground uppercase">tools</div>
-      <nav className="flex flex-col gap-0.5 px-2">
-        {TOOLS.map((t) => (
-          <button
-            key={t.id}
-            title={t.title}
-            onClick={() => setView(t.id)}
-            className={cn(
-              "flex items-center gap-2.5 rounded-md px-2 py-1.5 text-left text-[13px] transition-[background-color,color,transform] duration-150 ease-out outline-none active:scale-[0.98] focus-visible:ring-2 focus-visible:ring-ring/50",
-              "text-sidebar-foreground/85 hover:bg-accent hover:text-accent-foreground",
-              view === t.id && "bg-primary/12 font-medium text-primary hover:bg-primary/15 hover:text-primary"
-            )}
-          >
-            <Icon name={t.icon} className={view === t.id ? "text-primary" : "text-muted-foreground"} />
-            {t.label}
-          </button>
-        ))}
-      </nav>
-
-      <div className="px-4 pt-4 pb-1.5 font-mono text-[10.5px] font-semibold tracking-[0.12em] text-muted-foreground uppercase">history</div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
-        {sessions.length === 0 ? (
-          <div className="px-2.5 py-1.5 text-[12.5px] text-muted-foreground">no history yet</div>
-        ) : (
-          sessions.map((s) => (
-            <SessionRow key={s.id} id={s.id} title={s.title} count={s.count} updated={s.updated} cost={s.cost} active={s.id === sid} />
-          ))
+      {/* collapsed rail (56px) */}
+      <div
+        aria-hidden={!collapsed}
+        className={cn(
+          "absolute inset-y-0 left-0 flex w-14 flex-col items-center py-3 transition-opacity duration-150 ease-[cubic-bezier(0.4,0,0.2,1)]",
+          collapsed ? "rail-in opacity-100" : "pointer-events-none opacity-0"
         )}
-      </div>
-
-      <div className="flex items-center gap-1 border-t border-border px-2.5 py-2">
-        <ThemeBtn />
-        <SettingsBtn />
+      >
+        <button title="expand sidebar" onClick={toggleSidebar} className="mb-3 flex size-9 items-center justify-center rounded-[10px] transition-colors duration-100 hover:bg-accent">
+          <img src="/logo.png" alt="" draggable={false} className="h-6 w-6 rounded-[6px]" />
+        </button>
+        <button title="new chat" onClick={newChat} className="flex size-9 items-center justify-center rounded-[12px] text-foreground transition-colors duration-100 hover:bg-accent">
+          <Icon name="plus" className="[&>svg]:size-4.5" />
+        </button>
+        <div className="mt-3 flex flex-col items-center gap-1.5">
+          {TOOLS.map((t) => (
+            <button
+              key={t.id}
+              title={t.label}
+              onClick={() => setView(t.id)}
+              className={cn(
+                "flex size-9 items-center justify-center rounded-[12px] transition-colors duration-100",
+                view === t.id ? "bg-accent text-foreground" : "text-tertiary hover:bg-accent/60 hover:text-foreground"
+              )}
+            >
+              <Icon name={t.icon} className="[&>svg]:size-4.5" />
+            </button>
+          ))}
+        </div>
         <span className="flex-1" />
-        <span className="max-w-32 truncate font-mono text-[10.5px] text-muted-foreground" title={cwd}>
-          {cwd}
-        </span>
+        <button
+          title="toggle theme"
+          onClick={toggleTheme}
+          className="flex size-9 items-center justify-center rounded-[10px] text-tertiary transition-colors duration-100 hover:bg-accent hover:text-foreground"
+        >
+          <Icon name={theme === "light" ? "moon" : "sun"} className="[&>svg]:size-4.5" />
+        </button>
+        <button
+          title="settings (ctrl+,)"
+          onClick={() => useStore.setState({ settingsOpen: true })}
+          className="mt-1 flex size-9 items-center justify-center rounded-[10px] text-tertiary transition-colors duration-100 hover:bg-accent hover:text-foreground"
+        >
+          <Icon name="sliders" className="[&>svg]:size-4.5" />
+        </button>
       </div>
     </aside>
-  );
-}
-
-function ThemeBtn() {
-  const theme = useStore((s) => s.theme);
-  const toggleTheme = useStore((s) => s.toggleTheme);
-  return (
-    <Button variant="ghost" size="icon-sm" className="text-muted-foreground" title="toggle theme (ctrl+shift+t)" onClick={toggleTheme}>
-      <Icon name={theme === "light" ? "moon" : "sun"} />
-    </Button>
-  );
-}
-
-function SettingsBtn() {
-  return (
-    <Button variant="ghost" size="icon-sm" className="text-muted-foreground" title="settings (ctrl+,)" onClick={() => useStore.setState({ settingsOpen: true })}>
-      <Icon name="sliders" />
-    </Button>
   );
 }

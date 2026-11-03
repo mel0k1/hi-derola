@@ -8,15 +8,15 @@ import type { SandboxInfo, HostInfo } from "@/lib/types";
 
 export function PanelShell({ icon, title, sub, action, msg, children }: { icon: string; title: string; sub: ReactNode; action?: ReactNode; msg?: ReactNode; children: ReactNode }) {
   return (
-    <div className="h-full animate-in fade-in slide-in-from-bottom-1 overflow-y-auto duration-200 ease-out">
-      <div className="mx-auto max-w-3xl px-5 py-6 pb-10">
-        <div className="msg-in mb-4 flex items-start justify-between gap-3">
+    <div className="h-full overflow-y-auto">
+      <div className="mx-auto max-w-3xl px-5 py-7 pb-12">
+        <div className="msg-in mb-5 flex items-start justify-between gap-3">
           <div>
-            <div className="flex items-center gap-2.5 text-[21px] font-semibold tracking-tight">
-              <Icon name={icon} className="text-primary [&>svg]:size-5" />
+            <div className="flex items-center gap-2.5 text-[19px] font-semibold tracking-tight">
+              <Icon name={icon} className="text-tertiary [&>svg]:size-5" />
               {title}
             </div>
-            <div className="mt-1 max-w-xl text-[13px] text-muted-foreground">{sub}</div>
+            <div className="mt-1 max-w-xl text-[13px] leading-[19px] text-muted-foreground">{sub}</div>
           </div>
           {action}
         </div>
@@ -32,23 +32,32 @@ export function EmptyHint({ children }: { children: ReactNode }) {
 }
 
 export function StateBadge({ state, className }: { state: string; className?: string }) {
-  const map: Record<string, string> = {
-    running: "border-success/50 text-success",
-    ready: "border-success/50 text-success",
-    done: "border-success/50 text-success",
-    downloading: "border-primary/50 text-primary",
-    failed: "border-destructive/50 text-destructive",
-    waiting: "border-warning/50 text-warning",
-    new: "border-border text-muted-foreground",
+  const dot: Record<string, string> = {
+    running: "bg-success",
+    ready: "bg-success",
+    done: "bg-success",
+    downloading: "bg-info",
+    failed: "bg-destructive",
+    waiting: "bg-warning",
+    new: "bg-caption/60",
+  };
+  const label: Record<string, string> = {
+    running: "text-success",
+    ready: "text-success",
+    done: "text-success",
+    downloading: "text-info",
+    failed: "text-destructive",
+    waiting: "text-warning",
   };
   return (
     <span
       className={cn(
-        "flex-none rounded-full border px-2.5 py-px font-mono text-[10px] font-semibold tracking-wider uppercase",
-        map[state] || "border-border text-muted-foreground",
+        "flex flex-none items-center gap-1.5 font-mono text-[11px] font-medium tracking-wide uppercase",
+        label[state] || "text-caption",
         className
       )}
     >
+      <span className={cn("size-1.5 rounded-full", dot[state] || "bg-caption/60", state === "running" && "pulse-dot", state === "downloading" && "pulse-dot")} />
       {state}
     </span>
   );
@@ -56,7 +65,7 @@ export function StateBadge({ state, className }: { state: string; className?: st
 
 export function Card({ children, title, className }: { children: ReactNode; title?: string; className?: string }) {
   return (
-    <div title={title} className={cn("msg-in rounded-xl border border-border bg-card p-3.5 transition-[border-color,box-shadow,transform] duration-150 hover:-translate-y-px hover:border-primary/40 hover:shadow-sm", className)}>
+    <div title={title} className={cn("msg-in rounded-[16px] border-[0.5px] border-border bg-card p-4 transition-[border-color,box-shadow] duration-150 hover:border-input hover:shadow-sm", className)}>
       {children}
     </div>
   );

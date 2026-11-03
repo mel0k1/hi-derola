@@ -2,8 +2,6 @@ import { useEffect } from "react";
 import { Sidebar } from "@/features/sidebar/Sidebar";
 import { Topbar } from "@/features/topbar/Topbar";
 import { ChatView } from "@/features/chat/ChatView";
-import { InputBar } from "@/features/chat/InputBar";
-import { Statusbar } from "@/features/statusbar/Statusbar";
 import { SandboxView } from "@/features/sandbox/SandboxView";
 import { HostsView } from "@/features/hosts/HostsView";
 import { SkillsView } from "@/features/skills/SkillsView";
@@ -17,7 +15,6 @@ import { PaletteDialog } from "@/features/dialogs/PaletteDialog";
 import { useStore } from "@/store/app";
 import { comboFromEvent, parseCombo, sameCombo } from "@/lib/keys";
 import { invoke } from "@/lib/tauri";
-import { cn } from "@/lib/utils";
 
 export default function App() {
   const view = useStore((s) => s.view);
@@ -26,19 +23,6 @@ export default function App() {
   useEffect(() => {
     init();
   }, [init]);
-
-  useEffect(() => {
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    for (const id of ["chat-pane", "input-bar"]) {
-      const el = document.getElementById(id);
-      if (el && !el.classList.contains("hidden")) {
-        el.animate([{ opacity: 0, transform: "translateY(5px)" }, { opacity: 1, transform: "none" }], {
-          duration: 190,
-          easing: "cubic-bezier(0.2, 0, 0, 1)",
-        });
-      }
-    }
-  }, [view]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -161,15 +145,13 @@ export default function App() {
       <Sidebar />
       <div className="flex min-w-0 flex-1 flex-col">
         <Topbar />
-        <div id="chat-pane" className={cn("relative min-h-0 flex-1", view !== "chat" && "hidden")}>
-          <ChatView />
-        </div>
-        {view === "sandbox" && <SandboxView />}
-        {view === "hosts" && <HostsView />}
-        {view === "skills" && <SkillsView />}
-        {view === "crew" && <CrewView />}
-        <InputBar />
-        <Statusbar />
+        <main key={view} className="view-in min-h-0 flex-1">
+          {view === "chat" && <ChatView />}
+          {view === "sandbox" && <SandboxView />}
+          {view === "hosts" && <HostsView />}
+          {view === "skills" && <SkillsView />}
+          {view === "crew" && <CrewView />}
+        </main>
       </div>
       <ConfirmDialog />
       <AskDialog />
