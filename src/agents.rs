@@ -50,7 +50,6 @@ fn scan_dir(dir: &PathBuf, out: &mut Vec<AgentDecl>) {
     }
 }
 
-/// Custom agents from the project dir win over global ones with the same name.
 pub fn discover() -> Vec<AgentDecl> {
     let mut out = Vec::new();
     if let Some(d) = project_dir() {
@@ -64,7 +63,6 @@ pub fn discover() -> Vec<AgentDecl> {
     out
 }
 
-/// Resolve an agent by name: custom declarations first, then built-in profiles.
 pub fn get(name: &str) -> Option<AgentDecl> {
     let name = name.trim();
     if let Some(a) = discover().into_iter().find(|a| a.name == name) {
@@ -86,7 +84,6 @@ pub fn get(name: &str) -> Option<AgentDecl> {
     }
 }
 
-/// If the text starts with @<agent> and the agent exists, return (agent, rest).
 pub fn split_mention(text: &str) -> Option<(String, String)> {
     let t = text.trim_start();
     let t = t.strip_prefix('@')?;

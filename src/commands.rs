@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use crate::chat::{Message, Role};
 
-/// Prompt for /init: inspect the project and write or improve AGENTS.md.
 pub fn init_prompt(cwd: &str) -> String {
     format!(
         "Initialize or improve the project instructions for this repository ({cwd}).\n\n\
@@ -15,7 +14,6 @@ pub fn init_prompt(cwd: &str) -> String {
     )
 }
 
-/// Render a session as markdown for /export.
 pub fn export_markdown(title: &str, msgs: &[Message]) -> String {
     let mut out = format!(
         "# {}\n",
@@ -95,7 +93,6 @@ fn scan_dir(dir: &PathBuf, out: &mut Vec<Cmd>) {
     }
 }
 
-/// Project commands win over global ones with the same name.
 pub fn discover() -> Vec<Cmd> {
     let mut out = Vec::new();
     if let Some(d) = project_dir() {
@@ -134,7 +131,6 @@ fn split(text: &str) -> (String, String) {
     (String::new(), rest.trim_start().to_string())
 }
 
-/// Replace $ARGUMENTS with the full argument string and $1..$9 with positional parts.
 pub fn render(template: &str, args: &str) -> String {
     let args = args.trim();
     let positional: Vec<&str> = args.split_whitespace().collect();

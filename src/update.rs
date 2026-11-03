@@ -1,12 +1,3 @@
-//! Self-update — `hi-derola update` / `--version` / `/update`.
-//!
-//! The release workflow (`.github/workflows/release.yml`) uploads raw
-//! binaries named `hi-derola-<target-triple>[.exe]` for every `v*` tag. The
-//! updater checks the latest release through the github api, downloads the
-//! asset for the running platform and swaps the running binary with a rename
-//! dance (renaming a running image is allowed, even on windows), so no
-//! archive/zip support is needed.
-
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 use std::cmp::Ordering;
@@ -18,8 +9,6 @@ pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// semver-ish compare of version strings / release tags ("v" prefix allowed,
-/// dot segments compared numerically, missing segments are 0)
 pub fn compare_versions(a: &str, b: &str) -> Ordering {
     let parse = |v: &str| -> Vec<u64> {
         v.trim()
@@ -88,7 +77,6 @@ pub fn parse_release(v: &serde_json::Value) -> Result<Release> {
     })
 }
 
-/// which release asset matches the running platform
 pub fn asset_for(r: &Release) -> Option<&Asset> {
     asset_for_triple(r, target_triple_name(), std::env::consts::EXE_SUFFIX)
 }
@@ -96,15 +84,13 @@ pub fn asset_for(r: &Release) -> Option<&Asset> {
 fn asset_for_triple<'a>(r: &'a Release, triple: &str, exe: &str) -> Option<&'a Asset> {
     let exact = format!("hi-derola-{triple}{exe}");
     r.assets.iter().find(|a| a.name == exact).or_else(|| {
-        // fallback is suffix-aware so a future `hi-derola-<triple>.tar.gz`
-        // style asset is never downloaded as a raw binary
+        let suffix = format!("-{triple}{exe}");
         r.assets
             .iter()
-            .find(|a| a.name.contains(triple) && a.name.ends_with(exe))
+            .find(|a| a.name.ends_with(&suffix) && a.name.len() > suffix.len())
     })
 }
 
-/// triple used in release asset names (mirrors the release workflow matrix)
 pub fn target_triple_name() -> &'static str {
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("windows", "x86_64") => "x86_64-pc-windows-msvc",
@@ -117,8 +103,7 @@ pub fn target_triple_name() -> &'static str {
 
 fn client() -> Result<reqwest::Client> {
     let mut headers = reqwest::header::HeaderMap::new();
-    // unauthenticated github api allows 60 req/h per ip; any of these tokens
-    // bumps the limit to 5000/h
+
     let token = std::env::var("HI_DEROLA_GITHUB_TOKEN")
         .or_else(|_| std::env::var("GITHUB_TOKEN"))
         .or_else(|_| std::env::var("GH_TOKEN"))
@@ -136,7 +121,6 @@ fn client() -> Result<reqwest::Client> {
         .context("http client")
 }
 
-/// latest github release; Ok(None) when the repo has no releases yet
 pub async fn latest() -> Result<Option<Release>> {
     let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
     let resp = client()?
@@ -160,8 +144,7 @@ pub async fn latest() -> Result<Option<Release>> {
 async fn download(url: &str) -> Result<Vec<u8>> {
     let resp = client()?.get(url).send().await?.error_for_status()?;
     let bytes = resp.bytes().await?;
-    // a real hi-derola binary is way past this; a truncated/corrupt download
-    // should never reach the swap step
+
     if bytes.len() < 1024 * 1024 {
         bail!(
             "downloaded asset is suspiciously small ({} bytes), aborting",
@@ -171,9 +154,6 @@ async fn download(url: &str) -> Result<Vec<u8>> {
     Ok(bytes.to_vec())
 }
 
-/// replace the running binary: write `<exe>.download`, rename the current
-/// image to `<exe>.old` (legal while it runs, even on windows), move the new
-/// one into place; on failure the old image is restored
 pub fn apply(bytes: &[u8]) -> Result<PathBuf> {
     let exe = std::env::current_exe()?
         .canonicalize()
@@ -196,13 +176,11 @@ pub fn apply(bytes: &[u8]) -> Result<PathBuf> {
             return Err(e).context("place the new binary");
         }
     }
-    // best effort: on windows the running image keeps the file mapped and the
-    // delete fails — the leftover .old disappears on the next update attempt
+
     let _ = std::fs::remove_file(&old);
     Ok(exe)
 }
 
-/// full flow with step logging; returns the final message for the chat
 pub async fn run(mut log: impl FnMut(&str)) -> Result<String> {
     log(&format!(
         "checking github releases (current {})...",
@@ -308,10 +286,10 @@ mod tests {
                 .name,
             "hi-derola-x86_64-unknown-linux-gnu"
         );
-        // wrong platform never matches
+
         assert!(asset_for_triple(&lin, "x86_64-pc-windows-msvc", ".exe").is_none());
         assert!(asset_for_triple(&win, "x86_64-unknown-linux-gnu", "").is_none());
-        // the suffix must match too: a windows client never takes a tarball
+
         let tar = rel(&["hi-derola-x86_64-pc-windows-msvc.tar.gz"]);
         assert!(asset_for_triple(&tar, "x86_64-pc-windows-msvc", ".exe").is_none());
         let both_win = rel(&[
@@ -324,8 +302,7 @@ mod tests {
                 .name,
             "hi-derola-x86_64-pc-windows-msvc.exe"
         );
-        // exact name first, suffix-aware contains() as the fallback (e.g. a
-        // version-prefixed asset name)
+
         let loose = rel(&["hi-derola-v0.2.0-x86_64-pc-windows-msvc.exe"]);
         assert_eq!(
             asset_for_triple(&loose, "x86_64-pc-windows-msvc", ".exe")

@@ -1,12 +1,3 @@
-//! Session usage ledger — one [`UsageRow`] per api request, aggregated per
-//! model for `/usage`.
-//!
-//! Rows live with the session (`StoredSession.usage`), so the breakdown
-//! survives a resume. Cost per row is the same `models::cost_cached` math the
-//! status bars use (cached tokens at the provider's cache discount), recorded
-//! at request time with the model that actually served it — switching models
-//! mid-session keeps each request priced correctly.
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -27,7 +18,6 @@ pub struct ModelTotals {
     pub cost: f64,
 }
 
-/// per-model totals in first-seen order
 pub fn aggregate(rows: &[UsageRow]) -> Vec<ModelTotals> {
     let mut out: Vec<ModelTotals> = Vec::new();
     for r in rows {
@@ -52,7 +42,6 @@ pub fn aggregate(rows: &[UsageRow]) -> Vec<ModelTotals> {
     out
 }
 
-/// (requests, tokens in, tokens out, tokens cached, cost) over all rows
 pub fn totals(rows: &[UsageRow]) -> (usize, u64, u64, u64, f64) {
     let mut t = (0usize, 0u64, 0u64, 0u64, 0.0f64);
     for r in rows {
@@ -65,7 +54,6 @@ pub fn totals(rows: &[UsageRow]) -> (usize, u64, u64, u64, f64) {
     t
 }
 
-/// context window used by the last request (prompt + completion)
 pub fn last_ctx_used(rows: &[UsageRow]) -> u64 {
     rows.last().map(|r| r.input + r.output).unwrap_or(0)
 }
@@ -86,10 +74,6 @@ pub fn fmt_cost(c: f64) -> String {
     }
 }
 
-/// The `/usage` report shared by the TUI and the GUI.
-///
-/// `ctx_limit` is the effective context window (config override or the model
-/// catalog window); 0 hides the context line.
 pub fn render(rows: &[UsageRow], model: &str, kind: &str, ctx_limit: u64) -> String {
     let (reqs, tin, tout, tcached, cost) = totals(rows);
     if reqs == 0 {
@@ -214,7 +198,7 @@ mod tests {
         assert!(s.contains("gpt-5"));
         assert!(s.contains("prices (gpt-5): $1.25/M in · $10.00/M out · cached reads 50%"));
         assert!(s.contains("context: last request 51.0k / 400.0k tokens (13%)"));
-        // anthropic discount is 10%
+
         let s2 = render(&rows, "claude-sonnet-4-5", "anthropic", 200_000);
         assert!(s2.contains("cached reads 10%"));
     }

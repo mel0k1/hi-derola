@@ -1,7 +1,3 @@
-//! codesearch: code & docs search through the free Exa MCP endpoint,
-//! the same backend opencode uses for its websearch/codesearch tools.
-//! A plain JSON-RPC tools/call over HTTP, the answer comes back as SSE.
-
 use anyhow::{bail, Result};
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -11,17 +7,12 @@ const USER_AGENT: &str = "hi-derola/0.1";
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 const MAX_TOKENS: u64 = 50_000;
 
-/// get_code_context_exa returns a ready-to-use context string (code
-/// examples + docs); no results decode to this fallback
 const NO_RESULTS: &str = "No code snippets or documentation found. Please try a different query, be more specific about the library or programming concept, or check the spelling of framework names.";
 
-/// search code examples and docs through Exa; tokens_num is the requested
-/// context budget (1000..50000)
 pub async fn codesearch(query: &str, tokens_num: u64, timeout: u64) -> Result<String> {
     codesearch_at(EXA_MCP_URL, query, tokens_num, timeout).await
 }
 
-/// same call against an explicit endpoint; tests point this at a fake server
 async fn codesearch_at(url: &str, query: &str, tokens_num: u64, timeout: u64) -> Result<String> {
     let tokens = tokens_num.clamp(1_000, MAX_TOKENS);
     let timeout = timeout.clamp(1, 120);
@@ -34,12 +25,11 @@ async fn codesearch_at(url: &str, query: &str, tokens_num: u64, timeout: u64) ->
     Ok(text.to_string())
 }
 
-/// JSON-RPC tools/call against an MCP-over-HTTP endpoint; the response is
-/// either SSE (data: lines) or a bare JSON-RPC reply — both decode the same
 pub async fn mcp_call(url: &str, tool: &str, args: &Value, timeout: u64) -> Result<String> {
     let http = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(timeout.clamp(1, 120)))
         .build()?;
     let payload = json!({
         "jsonrpc": "2.0",
@@ -87,8 +77,6 @@ async fn read_body(mut resp: reqwest::Response) -> Result<String> {
     Ok(String::from_utf8_lossy(&body).to_string())
 }
 
-/// take the first data: line whose JSON carries result.content[0].text;
-/// a JSON-RPC error inside SSE is a real failure and propagates
 fn parse_sse(body: &str) -> Result<String> {
     for line in body.lines() {
         let Some(data) = line.strip_prefix("data:") else {
@@ -101,19 +89,19 @@ fn parse_sse(body: &str) -> Result<String> {
         let Ok(v) = serde_json::from_str::<Value>(data) else {
             continue;
         };
+        if v.get("error").is_none() && v.get("result").is_none() {
+            continue;
+        }
         return text_from_rpc(&v);
     }
     bail!("codesearch: no result in exa response");
 }
 
-/// a bare JSON-RPC reply (no SSE framing) decodes the same way
 fn parse_jsonrpc(body: &str) -> Result<String> {
     let v: Value = serde_json::from_str(body.trim())?;
     text_from_rpc(&v)
 }
 
-/// extract result.content[0].text; map JSON-RPC errors and "no content" to
-/// friendly errors, an explicitly empty payload to the no-results hint
 fn text_from_rpc(v: &Value) -> Result<String> {
     if let Some(err) = v.get("error") {
         let msg = err["message"]
@@ -150,8 +138,6 @@ mod tests {
     use std::io::{Read, Write};
     use std::sync::{Arc, Mutex};
 
-    /// routes: path -> (status, content-type, body); captures "path :: body"
-    /// per request; the routes closure receives the real bound port
     fn spawn_fake_http(
         routes: impl FnOnce(u16) -> BTreeMap<String, (u16, String, String)>,
     ) -> (u16, Arc<Mutex<Vec<String>>>) {

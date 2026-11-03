@@ -1,11 +1,3 @@
-//! remote hosts: ssh targets that are not local qemu sandboxes.
-//!
-//! one json file per host under `<data>/hi-derola/hosts/<id>.json`, an ssh
-//! key pair per host under `<data>/hi-derola/hosts/<id>/`. the agent's bash
-//! and file tools reach an attached host through the same shell route the
-//! sandboxes use, so once a host answers over ssh everything downstream
-//! (guest file tools, background bash) works unchanged.
-
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -25,7 +17,7 @@ pub struct RemoteHost {
 #[derive(Debug, Clone, Serialize)]
 pub struct HostStatus {
     pub host: RemoteHost,
-    /// ready = last check answered, failed = refused/timed out, new = never checked
+
     pub state: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -67,7 +59,6 @@ impl HostManager {
         serde_json::from_str(&raw).ok()
     }
 
-    /// every stored host with its persisted state (ready/failed + last error)
     pub fn list(&self) -> Vec<HostStatus> {
         let mut out = Vec::new();
         let Ok(rd) = std::fs::read_dir(&self.dir) else {
@@ -125,8 +116,7 @@ impl HostManager {
         let tmp = self.host_file(&id).with_extension("tmp");
         std::fs::write(&tmp, raw)?;
         std::fs::rename(&tmp, self.host_file(&id))?;
-        // no agent probe here: the host has no key installed yet, the ssh
-        // probe would just block for its full timeout
+
         Ok(self.status_of_impl(&id, false))
     }
 
@@ -141,8 +131,6 @@ impl HostManager {
         Ok(())
     }
 
-    /// generate the per-host key pair lazily (ssh-keygen, unencrypted
-    /// ed25519); add() stays instant even without an ssh client installed
     fn ensure_key(&self, id: &str) -> Result<PathBuf> {
         let dir = self.key_dir(id);
         std::fs::create_dir_all(&dir)?;
@@ -164,7 +152,6 @@ impl HostManager {
         Ok(key)
     }
 
-    /// the public key to install into the host's authorized_keys
     pub fn pubkey(&self, id: &str) -> Result<String> {
         self.ensure_key(id)?;
         std::fs::read_to_string(self.key_dir(id).join("id_ed25519.pub"))
@@ -200,7 +187,6 @@ impl HostManager {
         Ok(out.code == 0 && out.stdout.contains("yes"))
     }
 
-    /// connectivity check: `true` over ssh, state persisted for the ui
     pub fn check(&self, id: &str) -> HostStatus {
         let st = self.do_check(id);
         self.save_state(id, &st);
@@ -249,7 +235,6 @@ impl HostManager {
         }
     }
 
-    /// probe=false skips the (blocking) ssh agent check
     fn status_of_impl(&self, id: &str, probe: bool) -> HostStatus {
         let h = self.read_one(id).unwrap_or(RemoteHost {
             id: id.to_string(),
@@ -274,7 +259,6 @@ impl HostManager {
         }
     }
 
-    /// run one command on the host (gui ssh console + connectivity internals)
     pub fn exec(
         &self,
         id: &str,
@@ -295,8 +279,6 @@ impl HostManager {
         .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
-    /// pipe stdin bytes into a remote command (`cat > file` style writes);
-    /// returns (exit code, tail of the remote output for error messages)
     pub fn stream(
         &self,
         id: &str,
@@ -330,7 +312,6 @@ impl HostManager {
         Ok((code, tail.join("\n")))
     }
 
-    /// open a terminal window into the host (plain shell or the agent tui)
     pub fn open_terminal(&self, id: &str, agent: bool) -> Result<()> {
         let t = self.target(id)?;
         let bin =
@@ -339,8 +320,6 @@ impl HostManager {
         crate::sshx::spawn_terminal(&bin, &args).map_err(|e| anyhow::anyhow!("{e}"))
     }
 
-    /// wait for ssh with a deadline (used right after add, when the key is
-    /// not installed yet this fails fast with the pubkey hint)
     pub fn wait_ready_secs(&self, id: &str, secs: u64) -> Result<u64, String> {
         let t = self.target(id).map_err(|e| format!("{e:#}"))?;
         let bin = crate::sshx::find_ssh().ok_or_else(|| "no ssh client on the host".to_string())?;

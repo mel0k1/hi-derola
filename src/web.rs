@@ -25,6 +25,7 @@ pub async fn fetch(url: &str, timeout: u64) -> Result<(String, String)> {
     let http = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(timeout))
         .build()?;
     let resp = tokio::time::timeout(
         Duration::from_secs(timeout),
@@ -81,12 +82,12 @@ pub async fn fetch_markdown(url: &str, format: &str, timeout: u64) -> Result<Str
     }
 }
 
-/// Web search via the DuckDuckGo HTML endpoint (no API key).
 pub async fn websearch(query: &str, timeout: u64) -> Result<String> {
     let timeout = timeout.clamp(1, MAX_TIMEOUT);
     let http = reqwest::Client::builder()
         .user_agent(USER_AGENT)
         .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(timeout))
         .build()?;
     let resp = tokio::time::timeout(
         Duration::from_secs(timeout),
@@ -182,7 +183,10 @@ fn urldecode(s: &str) -> String {
     while i < bytes.len() {
         match bytes[i] {
             b'%' if i + 2 < bytes.len() => {
-                if let Ok(b) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3])
+                    .ok()
+                    .and_then(|h| u8::from_str_radix(h, 16).ok());
+                if let Some(b) = hex {
                     out.push(b);
                     i += 3;
                     continue;
@@ -373,7 +377,7 @@ fn tag_name(raw: &str) -> String {
 }
 
 fn attr(attrs: &str, key: &str) -> String {
-    let low = attrs.to_lowercase();
+    let low = attrs.to_ascii_lowercase();
     for pat in [format!("{key}=\""), format!("{key}='")] {
         if let Some(p) = low.find(&pat) {
             let quote = pat.chars().last().unwrap();

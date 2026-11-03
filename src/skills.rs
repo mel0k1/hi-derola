@@ -1,12 +1,3 @@
-//! skills: drop a folder with a SKILL.md into `.hi-derola/skills/` (project)
-//! or `~/.config/hi-derola/skills/` (global) and the agent can load it.
-//!
-//! discovery walks both roots recursively (skips .git/node_modules/target,
-//! caps the walk), so a whole skill collection cloned from github registers
-//! at once: `skills install <git-url>` does the clone. every skill can be
-//! toggled off — the set of disabled names persists in skills.json next to
-//! the global root and the disabled ones vanish from the tool spec.
-
 use anyhow::{bail, Context as _, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -37,8 +28,6 @@ fn toggles_file() -> Option<PathBuf> {
     Some(dirs::config_dir()?.join("hi-derola").join("skills.json"))
 }
 
-/// the disabled set lives on disk (survives restarts) and in a process-wide
-/// mutex (set_enabled keeps both in sync, so toggles act immediately)
 fn disabled() -> &'static Mutex<Vec<String>> {
     static D: Mutex<Vec<String>> = Mutex::new(Vec::new());
     static LOADED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
@@ -92,8 +81,6 @@ fn ignored_dir(name: &str) -> bool {
     )
 }
 
-/// recursive SKILL.md discovery under one root (depth-capped, ignores
-/// vendored dirs, so symlink loops and huge trees cannot wedge the scan)
 fn scan_dir(root: &Path, out: &mut Vec<Skill>, depth: usize) {
     if depth > MAX_WALK_DEPTH || out.len() >= MAX_SKILLS {
         return;
@@ -141,8 +128,6 @@ fn scan_dir(root: &Path, out: &mut Vec<Skill>, depth: usize) {
     }
 }
 
-/// every discovered skill (enabled and disabled), project wins over global
-/// on a name clash
 pub fn discover_all() -> Vec<Skill> {
     let mut out = Vec::new();
     if let Some(d) = project_dir() {
@@ -156,7 +141,6 @@ pub fn discover_all() -> Vec<Skill> {
     out
 }
 
-/// the enabled set only — what the agent sees
 pub fn discover() -> Vec<Skill> {
     discover_all()
         .into_iter()
@@ -181,9 +165,6 @@ fn parse(text: &str) -> Option<(String, String, String)> {
     Some((name, description, body.to_string()))
 }
 
-/// load a skill body; `$SKILL_DIR` / `${SKILL_DIR}` expand to the skill's
-/// folder (so bundled scripts are runnable via bash), and a short file
-/// listing of the folder is appended so the agent can see what's there
 pub fn load(name: &str) -> Result<String> {
     if !is_enabled(name) {
         bail!("skill \"{name}\" is disabled — /skills toggle {name}");
@@ -221,7 +202,6 @@ pub fn load(name: &str) -> Result<String> {
     Ok(body)
 }
 
-/// shallow listing of a skill folder (files only, relative paths + sizes)
 fn list_files(dir: &Path) -> Option<String> {
     let mut out = Vec::new();
     let mut stack = vec![(dir.to_path_buf(), 0usize)];
@@ -266,9 +246,6 @@ fn list_files(dir: &Path) -> Option<String> {
     ))
 }
 
-/// shallow-clone a skill collection into the global root; a re-install of
-/// the same repo fast-forwards it. any repo layout works — every SKILL.md
-/// below the clone is picked up by discovery
 pub fn install_from_git(url: &str) -> Result<String> {
     let url = url.trim().trim_end_matches('/');
     if url.is_empty() {
@@ -414,7 +391,7 @@ mod tests {
             "nested",
             "Deep one",
         );
-        // a skill inside an ignored dir is not discovered
+
         write_skill(
             &dir,
             ".hi-derola/skills/collection/node_modules/x",
@@ -434,7 +411,6 @@ mod tests {
         assert!(load("review").unwrap().contains("Body"));
         assert!(load("commit").is_ok());
 
-        // toggle off hides it from discovery and blocks load, back on restores
         set_enabled("commit", false).unwrap();
         assert!(!is_enabled("commit"));
         assert!(!discover().iter().any(|s| s.name == "commit"));
@@ -509,7 +485,7 @@ mod tests {
         let msg = install_from_git(repo.to_str().unwrap()).unwrap();
         assert!(msg.contains("2 skills"), "{msg}");
         assert!(gdir.join("repo/alpha/SKILL.md").exists());
-        // reinstall fast-forwards instead of failing
+
         let msg2 = install_from_git(repo.to_str().unwrap()).unwrap();
         assert!(msg2.contains("2 skills"));
         std::env::remove_var("XDG_CONFIG_HOME");

@@ -137,6 +137,12 @@ impl Provider for OpenAi {
                 let Ok(v) = serde_json::from_str::<Value>(data) else {
                     return Ok(());
                 };
+                if v.get("error").is_some_and(|e| e.is_object()) {
+                    let msg = v["error"]["message"]
+                        .as_str()
+                        .unwrap_or("provider error event");
+                    return Err(anyhow::anyhow!("openai: {msg}"));
+                }
                 let d = &v["choices"][0]["delta"];
                 if let Some(fr) = v["choices"][0]["finish_reason"].as_str() {
                     if !fr.is_empty() {
@@ -161,7 +167,22 @@ impl Provider for OpenAi {
                 }
                 if let Some(tcs) = d["tool_calls"].as_array() {
                     for tc in tcs {
-                        let idx = tc["index"].as_u64().unwrap_or(0) as usize;
+                        let idx = match tc["index"].as_u64() {
+                            Some(i) => i as usize,
+                            None => match tc["id"].as_str().filter(|s| !s.is_empty()) {
+                                Some(id) => {
+                                    match pending.iter().position(|p| p["id"].as_str() == Some(id))
+                                    {
+                                        Some(i) => i,
+                                        None => {
+                                            pending.push(json!({"id": "", "name": "", "args": ""}));
+                                            pending.len() - 1
+                                        }
+                                    }
+                                }
+                                None => 0,
+                            },
+                        };
                         while pending.len() <= idx {
                             pending.push(json!({"id": "", "name": "", "args": ""}));
                         }

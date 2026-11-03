@@ -3,9 +3,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 const BUF_CAP: usize = 256 * 1024;
 const LIVE_TAIL: usize = 1200;
 
-/// custom kill for jobs that are not a host process — sandbox VM background
-/// tasks register a hook that kills the remote process group over ssh;
-/// receives the task id
 pub type KillHook = Arc<dyn Fn(&str) -> String + Send + Sync>;
 
 #[derive(Clone)]

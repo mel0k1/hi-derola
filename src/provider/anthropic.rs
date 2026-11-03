@@ -70,7 +70,6 @@ fn conv_msgs(messages: &[Message]) -> Vec<Value> {
         }
     }
     if let Some((_, last)) = out.last_mut() {
-        // mark the tail of the conversation for prompt caching
         if let Some(a) = last["content"].as_array_mut() {
             if let Some(b) = a.last_mut() {
                 b["cache_control"] = json!({"type": "ephemeral"});
@@ -136,6 +135,14 @@ impl Provider for Anthropic {
                 let Ok(v) = serde_json::from_str::<Value>(data) else {
                     return Ok(());
                 };
+                if v["type"].as_str() == Some("error")
+                    || v.get("error").is_some_and(|e| e.is_object())
+                {
+                    let msg = v["error"]["message"]
+                        .as_str()
+                        .unwrap_or("provider error event");
+                    return Err(anyhow::anyhow!("anthropic: {msg}"));
+                }
                 match v["type"].as_str() {
                     Some("content_block_start") => {
                         let b = &v["content_block"];

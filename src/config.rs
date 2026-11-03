@@ -22,9 +22,7 @@ pub struct Config {
     pub formatters: Toggle,
     #[serde(default)]
     pub permissions: crate::perm::PermCfg,
-    /// named provider presets: [profiles.<name>] tables in config.toml;
-    /// /profile <name> switches at runtime, profile fields override the
-    /// base [provider] section when present, the rest is inherited
+
     #[serde(default)]
     pub profiles: BTreeMap<String, ProfileConfig>,
 }
@@ -53,13 +51,10 @@ pub struct AgentConfig {
     pub subagent_depth: usize,
     #[serde(default)]
     pub compaction: CompactionCfg,
-    /// shell used by the bash tool: program name or full path
-    /// (cmd / powershell / pwsh get their own flag, everything else gets -c)
+
     #[serde(default)]
     pub shell: Option<String>,
-    /// mcp_timeout = <seconds>: global default tools/call deadline for every
-    /// mcp server that does not set its own execution_timeout (or the legacy
-    /// timeout blanket); mirrors opencode's experimental.mcp_timeout
+
     #[serde(default)]
     pub mcp_timeout: Option<u64>,
 }
@@ -78,27 +73,23 @@ impl Default for AgentConfig {
     }
 }
 
-/// context compaction tuning: [agent.compaction] in config.toml
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompactionCfg {
-    /// proactive compaction when the conversation approaches the context window;
-    /// overflow recovery and manual /compact work regardless of this switch
     #[serde(default = "default_true")]
     pub auto: bool,
-    /// headroom kept from the context window before proactive compaction
-    /// triggers, in tokens; 0 = a quarter of the context window
+
     #[serde(default)]
     pub buffer: usize,
-    /// tokens of the most recent messages kept verbatim when compacting
+
     #[serde(default = "default_keep_tokens")]
     pub keep: usize,
-    /// prune stale tool outputs between turns to keep the context lean
+
     #[serde(default = "default_true")]
     pub prune: bool,
-    /// recent tool-output tokens protected from pruning
+
     #[serde(default = "default_prune_protect")]
     pub prune_protect: usize,
-    /// pruning applies only when it frees at least this many tokens
+
     #[serde(default = "default_prune_min")]
     pub prune_min: usize,
 }
@@ -180,15 +171,11 @@ pub struct ProviderConfig {
     pub temperature: Option<f64>,
     #[serde(default)]
     pub top_p: Option<f64>,
-    /// name of the currently active [profiles.<name>] preset; set by
-    /// /profile, an unknown name silently falls back to the base section
+
     #[serde(default)]
     pub active: Option<String>,
 }
 
-/// a named provider preset: every field is optional and overrides the
-/// base [provider] section only when present, so a profile can be as
-/// small as a model override or as complete as a whole second provider
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProfileConfig {
     #[serde(rename = "type", default)]
@@ -223,8 +210,7 @@ pub struct McpOAuthCfg {
     pub scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect_uri: Option<String>,
-    /// pin the authorization server metadata url directly — the RFC 9728
-    /// probe (401 + protected-resource discovery) is skipped entirely
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_server_metadata_url: Option<String>,
 }
@@ -253,49 +239,37 @@ pub struct McpConfig {
     pub headers: BTreeMap<String, String>,
     #[serde(default)]
     pub oauth: Option<McpOAuthOpt>,
-    /// sampling = false refuses sampling/createMessage from this server
+
     #[serde(default)]
     pub sampling: Option<bool>,
-    /// elicitation = false declines elicitation/create from this server
+
     #[serde(default)]
     pub elicitation: Option<bool>,
-    /// logging = false drops notifications/message log entries from this server
+
     #[serde(default)]
     pub logging: Option<bool>,
-    /// keepalive = <seconds>: ping the server on an interval, note
-    /// alive/unresponsive transitions in the chat (absent or 0 = off)
+
     #[serde(default)]
     pub keepalive: Option<u64>,
-    /// timeout = <seconds>: legacy blanket override — applies to every phase
-    /// (requests, discovery, tool calls, connect) unless the per-phase
-    /// startup_timeout/catalog_timeout/execution_timeout fields are set
+
     #[serde(default)]
     pub timeout: Option<u64>,
-    /// startup_timeout = <seconds>: connect + initialize window (default 30)
+
     #[serde(default)]
     pub startup_timeout: Option<u64>,
-    /// catalog_timeout = <seconds>: tools/resources/prompts discovery and
-    /// re-lists plus resource reads and prompt fetches (default 30)
+
     #[serde(default)]
     pub catalog_timeout: Option<u64>,
-    /// execution_timeout = <seconds>: tools/call deadline (default 3600;
-    /// a call reporting progress keeps sliding via resetTimeoutOnProgress,
-    /// a silent one hits the deadline)
+
     #[serde(default)]
     pub execution_timeout: Option<u64>,
-    /// enabled = false skips this server at startup; /mcpconnect refuses it
-    /// until it is re-enabled (absent = enabled)
+
     #[serde(default)]
     pub enabled: Option<bool>,
-    /// working directory for a local (stdio) server
+
     #[serde(default)]
     pub cwd: Option<String>,
-    /// protocol version negotiation: "legacy" (default) keeps the classic
-    /// per-transport handshake (2024-11-05 stdio / 2025-03-26 http, roots
-    /// advertised, server answer trusted); "auto" asks for the newest
-    /// revision this client speaks (2026-07-28: roots capability dropped,
-    /// server answer validated); any other value pins exactly that version
-    /// (roots are dropped when the pin is 2026-07-28 or newer)
+
     #[serde(default)]
     pub protocol_version: Option<String>,
 }
@@ -354,7 +328,7 @@ mod tests {
         assert_eq!(cfg.agent.mcp_timeout, Some(120));
         let cfg: Config = toml::from_str(MINIMAL).unwrap();
         assert_eq!(cfg.agent.mcp_timeout, None, "absent keeps the default");
-        // round-trips through save/load without losing the value
+
         let cfg: Config = toml::from_str(&format!("{MINIMAL}[agent]\nmcp_timeout = 45\n")).unwrap();
         let raw = toml::to_string_pretty(&cfg).unwrap();
         let back: Config = toml::from_str(&raw).unwrap();
@@ -374,7 +348,7 @@ mod tests {
         assert!(!c.prune);
         assert_eq!(c.prune_protect, 10_000);
         assert_eq!(c.prune_min, 5_000);
-        // round-trips through save/load without losing the section
+
         let raw = toml::to_string_pretty(&cfg).unwrap();
         let back: Config = toml::from_str(&raw).unwrap();
         assert!(!back.agent.compaction.auto);
@@ -444,7 +418,7 @@ mod tests {
             cfg.mcp[1].startup_timeout, None,
             "absent keeps the defaults"
         );
-        // round-trip keeps the fields
+
         let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
         assert_eq!(back.mcp[0].execution_timeout, Some(7200));
     }
@@ -459,7 +433,7 @@ mod tests {
         assert_eq!(cfg.mcp[0].cwd.as_deref(), Some("/tmp/ws"));
         assert_eq!(cfg.mcp[1].enabled, None, "absent keeps the server enabled");
         assert_eq!(cfg.mcp[1].cwd, None);
-        // round-trip keeps both fields
+
         let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
         assert_eq!(back.mcp[0].enabled, Some(false));
         assert_eq!(back.mcp[0].cwd.as_deref(), Some("/tmp/ws"));
@@ -477,7 +451,7 @@ mod tests {
             cfg.mcp[2].protocol_version, None,
             "absent = legacy handshake"
         );
-        // round-trip keeps the field
+
         let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
         assert_eq!(back.mcp[0].protocol_version.as_deref(), Some("auto"));
         assert_eq!(back.mcp[1].protocol_version.as_deref(), Some("2025-06-18"));
@@ -499,7 +473,7 @@ mod tests {
         assert_eq!(c.client_id.as_deref(), Some("cid"));
         assert_eq!(c.scope.as_deref(), Some("read write"));
         assert_eq!(c.client_secret, None);
-        // oauth = true -> defaults, round-trip keeps the shape
+
         let raw2 = format!(
             "{MINIMAL}[[mcp]]\nname = \"b\"\ntype = \"remote\"\nurl = \"u\"\noauth = true\n"
         );
@@ -519,7 +493,7 @@ mod tests {
             c.auth_server_metadata_url.as_deref(),
             Some("https://as.example.com/.well-known/oauth-authorization-server")
         );
-        // round-trip keeps the field
+
         let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
         assert_eq!(
             back.mcp[0].oauth_cfg().unwrap().auth_server_metadata_url,
@@ -538,14 +512,12 @@ mod tests {
         let cfg: Config = toml::from_str(PROFILED).unwrap();
         assert_eq!(cfg.profiles.len(), 2);
 
-        // no active profile: the base section as-is
         let eff = cfg.effective_provider();
         assert_eq!(eff.kind, "openai");
         assert_eq!(eff.model, "base-model");
         assert_eq!(eff.api_key.as_deref(), Some("base-key"));
         assert_eq!(eff.temperature, Some(0.5));
 
-        // a partial profile only overrides what it sets, the rest is inherited
         let mut cfg: Config = toml::from_str(PROFILED).unwrap();
         cfg.provider.active = Some("cheap".into());
         let eff = cfg.effective_provider();
@@ -554,7 +526,6 @@ mod tests {
         assert_eq!(eff.api_key.as_deref(), Some("base-key"), "key inherited");
         assert_eq!(eff.temperature, Some(0.5), "sampling inherited");
 
-        // a complete profile overrides every field it carries
         cfg.provider.active = Some("local".into());
         let eff = cfg.effective_provider();
         assert_eq!(eff.kind, "anthropic");
@@ -574,7 +545,7 @@ mod tests {
         let eff = cfg.effective_provider();
         assert_eq!(eff.kind, "openai");
         assert_eq!(eff.model, "base-model");
-        // the summary points it out instead of failing silently
+
         let s = cfg.profiles_summary();
         assert!(s.contains("not defined"), "summary: {s}");
         assert!(!s.contains("<- active"), "no profile is marked active: {s}");
@@ -586,7 +557,7 @@ mod tests {
         assert_eq!(cfg.api_key().as_deref(), Some("base-key"));
         cfg.provider.active = Some("local".into());
         assert_eq!(cfg.api_key().as_deref(), Some("local-key"));
-        // empty profile key falls back to the base one
+
         cfg.profiles.get_mut("cheap").unwrap().api_key = Some("  ".into());
         cfg.provider.active = Some("cheap".into());
         assert_eq!(cfg.api_key().as_deref(), Some("base-key"));
@@ -619,7 +590,7 @@ mod tests {
         cfg.set_model("switched-2");
         assert_eq!(cfg.provider.model, "switched", "base section untouched");
         assert_eq!(cfg.profiles["cheap"].model.as_deref(), Some("switched-2"));
-        // and the effective view agrees
+
         assert_eq!(cfg.effective_provider().model, "switched-2");
     }
 
@@ -671,14 +642,13 @@ impl Config {
 
     pub fn save(&self) -> Result<()> {
         let raw = toml::to_string_pretty(self).context("serialize config")?;
-        // atomic: a crash mid-write must not corrupt the live config
+
         let tmp = config_path().with_extension("toml.tmp");
         std::fs::write(&tmp, raw)?;
         std::fs::rename(&tmp, config_path())?;
         Ok(())
     }
 
-    /// persist an "always allow" permission rule into config.toml
     pub fn append_perm_rule(rule: crate::perm::PermRule) -> Result<()> {
         let (mut cfg, created) = Self::load_or_default()?;
         if created {
@@ -729,7 +699,6 @@ impl Config {
         }
     }
 
-    /// overlay a single profile on the base [provider] section
     fn merged(&self, prof: &ProfileConfig) -> ProviderConfig {
         let mut p = self.provider.clone();
         if let Some(v) = &prof.kind {
@@ -741,8 +710,7 @@ impl Config {
         if let Some(v) = &prof.base_url {
             p.base_url = Some(v.clone());
         }
-        // an empty key in a profile means "not set" — inherit the base one
-        // (mirrors api_key()'s own trim handling of the base section)
+
         if let Some(v) = prof
             .api_key
             .as_deref()
@@ -766,9 +734,6 @@ impl Config {
         p
     }
 
-    /// the provider section actually in use: the base [provider] with the
-    /// active profile's fields merged over it; no active profile or an
-    /// unknown name falls back to the base section as-is
     pub fn effective_provider(&self) -> ProviderConfig {
         match self
             .provider
@@ -781,11 +746,6 @@ impl Config {
         }
     }
 
-    /// resolve the provider config for a named profile with an optional
-    /// model override — crew members and subagents use this to mix apis:
-    /// profile None means the base [provider], an unknown name falls back
-    /// to it too (the api key of the base is inherited unless the profile
-    /// carries its own)
     pub fn provider_for(&self, profile: Option<&str>, model: Option<&str>) -> ProviderConfig {
         let mut p = match profile {
             Some(name) => self
@@ -801,9 +761,6 @@ impl Config {
         p
     }
 
-    /// persist a model switch: into the active profile when one is set
-    /// (so /model is not shadowed by the profile on the next load), into
-    /// the base section otherwise
     pub fn set_model(&mut self, model: &str) {
         match self
             .provider
@@ -816,8 +773,6 @@ impl Config {
         }
     }
 
-    /// one-line-per-profile listing shared by /profile in the TUI and the
-    /// GUI: resolved type + model per profile, active marker, hint line
     pub fn profiles_summary(&self) -> String {
         if self.profiles.is_empty() {
             return "profiles: none — define [profiles.<name>] tables in config.toml".into();

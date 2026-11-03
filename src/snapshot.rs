@@ -1,10 +1,3 @@
-//! turn snapshots backing /undo and /redo.
-//!
-//! primary backend: a shadow git repo in the user's data dir, keyed by the
-//! working directory — survives restarts, respects the project's .gitignore,
-//! and never touches the user's own .git. fallback: the old in-memory store
-//! when git is not available on PATH.
-
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -12,19 +5,13 @@ use std::sync::{Mutex, OnceLock};
 
 use anyhow::{bail, Result};
 
-// memory-fallback caps
 const MAX_TURNS: usize = 20;
 const MAX_FILES: usize = 4000;
 const MAX_FILE_BYTES: u64 = 1_000_000;
 
-/// cap for the routed-target undo store: files larger than this are not
-/// captured (undo skips them with a note)
 pub const VM_SNAPSHOT_FILE_CAP: u64 = 2 * 1024 * 1024;
-/// extra excludes for trees without a .gitignore, so a stray node_modules
-/// does not balloon the shadow repo (they union with the project .gitignore)
-const EXTRA_EXCLUDES: &str = "node_modules/\ntarget/\ndist/\nbuild/\nout/\n.git/\n";
 
-// ---------- public API over the process working directory ----------
+const EXTRA_EXCLUDES: &str = "node_modules/\ntarget/\ndist/\nbuild/\nout/\n.git/\n";
 
 pub fn begin_turn() {
     vm_begin_turn();
@@ -51,8 +38,6 @@ pub fn redo() -> Option<String> {
     }
     redo_in(&root())
 }
-
-// ---------- routed-target (VM / remote host) undo ----------
 
 struct VmEdit {
     path: String,
@@ -83,9 +68,6 @@ fn vm_store() -> &'static Mutex<VmStore> {
     })
 }
 
-/// capture the pre-edit state of one routed file; called by every remote
-/// write path before the bytes land (first capture per path wins, so undo
-/// always restores the turn-start state)
 pub fn vm_record(path: &str, before: Option<Vec<u8>>) {
     let mut s = vm_store().lock().unwrap();
     if s.pending.len() >= VM_MAX_EDITS {
@@ -101,7 +83,6 @@ pub fn vm_record(path: &str, before: Option<Vec<u8>>) {
     });
 }
 
-/// a route switch invalidates the store (edits belong to one machine)
 fn vm_sync_route(s: &mut VmStore) {
     let cur = crate::sandbox::shell_route();
     if s.route != cur {
@@ -231,8 +212,6 @@ fn root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-// ---------- backend choice ----------
-
 fn git_available() -> bool {
     static OK: OnceLock<bool> = OnceLock::new();
     *OK.get_or_init(|| {
@@ -255,7 +234,6 @@ fn snapshots_base() -> PathBuf {
         })
 }
 
-/// one shadow repo per working directory, hex-hashed into the data dir
 fn git_dir_for(root: &Path) -> PathBuf {
     let mut h = DefaultHasher::new();
     root.display().to_string().hash(&mut h);
@@ -301,7 +279,7 @@ fn ensure_git_repo(root: &Path) -> Result<()> {
             String::from_utf8_lossy(&out.stderr).trim()
         );
     }
-    // self-contained identity: commits must work without a global git config
+
     let excludes = dir.join("excludes");
     let excludes_str = excludes.to_string_lossy().to_string();
     let cfg: [(&str, &str); 4] = [
@@ -322,7 +300,6 @@ fn ensure_git_repo(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// stage everything and commit; returns true when a commit was made
 fn git_commit(root: &Path, msg: &str) -> Result<bool> {
     ensure_git_repo(root)?;
     git(root, &["add", "-A"])?;
@@ -331,7 +308,7 @@ fn git_commit(root: &Path, msg: &str) -> Result<bool> {
         return Ok(false);
     }
     git(root, &["commit", "--quiet", "-m", msg])?;
-    // a fresh turn invalidates the redo stack
+
     let _ = std::fs::write(redo_file(root), "");
     Ok(true)
 }
@@ -342,15 +319,13 @@ fn changed_files(root: &Path, from: &str, to: &str) -> usize {
         .unwrap_or(0)
 }
 
-// ---------- git backend ----------
-
 fn begin_turn_in(root: &Path) {
     if !git_available() {
         let mut s = store().lock().unwrap();
         s.pending = Some(capture_in(root));
         return;
     }
-    // a baseline commit makes the very first turn undoable
+
     if git(root, &["rev-parse", "--verify", "HEAD"]).is_err() {
         let _ = git_commit(root, "hi-derola baseline");
     }
@@ -422,12 +397,10 @@ fn redo_in(root: &Path) -> Option<String> {
     Some(format!("redo: reapplied {n} files"))
 }
 
-// ---------- in-memory fallback ----------
-
 struct Snap {
     files: Vec<(String, Option<Vec<u8>>)>,
     hash: u64,
-    /// the walk hit MAX_FILES: the list is incomplete, restore must not delete
+
     truncated: bool,
 }
 
@@ -505,8 +478,7 @@ fn restore_in(root: &Path, snap: &Snap) {
         }
         let _ = std::fs::write(&p, content);
     }
-    // a truncated capture only knows part of the tree — restore files but
-    // never delete what was not listed
+
     if snap.truncated {
         return;
     }
@@ -568,7 +540,6 @@ mod tests {
         let w = |rel: &str, data: &str| std::fs::write(tmp.join(rel), data).unwrap();
         let r = |rel: &str| std::fs::read_to_string(tmp.join(rel)).unwrap();
 
-        // baseline turn: begin commits the pre-agent state
         w("a.txt", "one\n");
         begin_turn_in(&tmp);
         w("a.txt", "two\n");
@@ -577,23 +548,19 @@ mod tests {
         assert_eq!(r("a.txt"), "two\n");
         assert!(tmp.join("b.txt").exists());
 
-        // undo reverts both the edit and the new file
         let note = undo_in(&tmp).unwrap();
         assert!(note.contains("restored"), "{note}");
         assert_eq!(r("a.txt"), "one\n");
         assert!(!tmp.join("b.txt").exists());
 
-        // redo reapplies
         redo_in(&tmp).unwrap();
         assert_eq!(r("a.txt"), "two\n");
         assert!(tmp.join("b.txt").exists());
 
-        // an unchanged turn does not clear the redo stack (nothing committed)
         end_turn_in(&tmp);
         assert!(undo_in(&tmp).is_some());
         assert!(redo_in(&tmp).is_some());
 
-        // turn 2, then walk back to the baseline and exhaust the stack
         w("c.txt", "third\n");
         end_turn_in(&tmp);
         assert!(undo_in(&tmp).is_some());
@@ -604,7 +571,6 @@ mod tests {
         assert!(undo_in(&tmp).is_none());
         assert!(redo_in(&tmp).is_some());
 
-        // the shadow repo lives in the sandboxed base, not the project
         assert!(!tmp.join(".git").exists());
         assert!(git_dir_for(&tmp).join("HEAD").exists());
 
@@ -633,7 +599,7 @@ mod tests {
 
         set_vm_route_for_tests(Some("sbx:vm-1"));
         vm_begin_turn();
-        // a.txt exists and gets edited; c.txt is created; b.txt is untouched
+
         let old_a = remote.borrow().get("a.txt").cloned().unwrap();
         vm_record("a.txt", Some(old_a));
         vm_record("c.txt", None);
@@ -653,7 +619,6 @@ mod tests {
         assert_eq!(remote.borrow()["a.txt"], b"new");
         assert_eq!(remote.borrow()["c.txt"], b"created");
 
-        // a route switch wipes the store
         set_vm_route_for_tests(Some("host:web"));
         assert!(vm_undo_with(&mut fetch, &mut restore).is_none());
         set_vm_route_for_tests(None);

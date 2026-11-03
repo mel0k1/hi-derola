@@ -1,49 +1,3 @@
-//! crew: one goal, several ai participants talking in a single session.
-//!
-//! a crew is a stored transcript (json per crew under the sessions dir
-//! sibling `crew/`) plus a tiny round-based runner: every round each member
-//! gets the transcript and answers with its role in mind; @Name steers who
-//! speaks next, a "DONE:" line ends the crew, "RENAME:" lets a placeholder
-//! pick its own callsign. members ride any configured provider profile, so
-//! one crew can mix apis and models. replies stream live to the frontends
-//! (CrewChunk), tool-enabled members ("tools" flag) may run bash/file tools
-//! inside their rounds under the permission config, and per-member token
-//! limits ("limit=N") auto-stop members (and the crew once all are spent).
-//! usage rows are recorded per member — the `/crew usage` report splits
-//! tokens and cost by participants.
-//!
-//! background workers: members flagged "bg" run their turn in parallel
-//! with the rest of the round instead of blocking it — they are spawned as
-//! soon as their turn comes, stream live, and their report is merged into
-//! the transcript as soon as it lands. bg workers cannot raise interactive
-//! permission prompts; tools that would ask are denied (allow them in the
-//! perm config instead).
-//!
-//! preflight: before any paid call the runner checks every member's
-//! profile/model/api-key and fails up front with the full list of problems
-//! instead of dying mid-round.
-//!
-//! money: a crew-wide dollar budget ("budget=5") auto-stops everything once
-//! the summed cost of all members crosses it — token limits are per member,
-//! the budget is what actually burns cash.
-//!
-//! peer review: members flagged "review" gate DONE — a done claim only ends
-//! the crew after every asked reviewer answers with an "APPROVE:" line;
-//! "CHANGES:" (or no approval) sends the crew back to work.
-//!
-//! broadcasts: "@all" in a reply addresses every member at once; the mention
-//! graph records it as edges to each member.
-//!
-//! long transcripts: only the last TRANSCRIPT_WINDOW messages ride in every
-//! prompt; everything older is compressed once into a cached llm summary
-//! that is injected ahead of the recent messages, so long sessions keep
-//! their context without growing the prompt without bounds.
-//!
-//! long-term memory: a crew keeps a small memo list that survives sessions.
-//! members record facts with a "MEMO:" line, the user with /crew memo; every
-//! entry is injected back into the system prompt on the next run, so a resumed
-//! (or later re-opened) crew picks up where it left off.
-
 use crate::chat::Message;
 use crate::provider::{ApiEvent, ChatRequest};
 use crate::usage::UsageRow;
@@ -59,28 +13,27 @@ use tokio::sync::mpsc::UnboundedSender;
 pub struct Member {
     pub name: String,
     pub role: String,
-    /// [profiles.<name>] preset; None = the base [provider] section
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// token budget (input+output) for this member; auto-stops them when hit
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<u64>,
-    /// member may use file/shell tools inside its rounds (under permissions)
+
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub tools: bool,
-    /// reviewer: DONE claims need this member's "APPROVE:" to end the crew
+
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub review: bool,
-    /// background worker: runs its turn in parallel, not blocking the round
+
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub bg: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Memo {
-    /// member name, "you", or "crew" for automatic entries
     pub author: String,
     pub content: String,
     pub ts: u64,
@@ -88,9 +41,8 @@ pub struct Memo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrewMsg {
-    /// member name, "you" for the user, "crew" for system notes
     pub author: String,
-    /// "user" | "agent" | "system"
+
     pub kind: String,
     pub content: String,
     pub ts: u64,
@@ -100,19 +52,19 @@ pub struct CrewMsg {
 pub struct Crew {
     pub id: String,
     pub goal: String,
-    /// idle | running | done
+
     pub status: String,
     pub members: Vec<Member>,
     pub messages: Vec<CrewMsg>,
     #[serde(default)]
     pub usage: BTreeMap<String, Vec<UsageRow>>,
-    /// long-term memory that survives sessions; oldest first
+
     #[serde(default)]
     pub memory: Vec<Memo>,
-    /// crew-wide cost budget in usd; auto-stops the whole crew when spent
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget: Option<f64>,
-    /// cached summary of messages[0..summary_upto] (long-transcript squeeze)
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
     #[serde(default, skip_serializing_if = "summary_upto_is_zero")]
@@ -130,7 +82,6 @@ static RUNNING: AtomicBool = AtomicBool::new(false);
 static CANCEL: AtomicBool = AtomicBool::new(false);
 static BG_RUNNING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// how many background-worker turns are in flight right now (status lines)
 pub fn bg_running() -> usize {
     BG_RUNNING.load(Ordering::Relaxed)
 }
@@ -217,7 +168,6 @@ pub fn delete(id: &str) -> Result<()> {
     }
 }
 
-/// a saved crew shape: goal + members + budget, spawnable as a fresh crew
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrewPreset {
     pub name: String,
@@ -236,7 +186,6 @@ fn preset_file(name: &str) -> PathBuf {
     preset_dir().join(format!("{name}.json"))
 }
 
-/// save a crew's shape (goal, members, budget) as a named preset
 pub fn preset_save(crew_id: &str, name: &str) -> Result<CrewPreset> {
     let name = name.trim();
     if !safe_id(name) {
@@ -291,8 +240,6 @@ pub fn preset_delete(name: &str) -> Result<()> {
     }
 }
 
-/// spawn a fresh crew from a preset: same members and budget, empty
-/// transcript, usage and memory; the goal can be overridden for a new mission
 pub fn preset_apply(name: &str, goal: Option<&str>) -> Result<Crew> {
     if !safe_id(name) {
         bail!("bad preset name");
@@ -340,7 +287,7 @@ pub struct CrewMeta {
     pub members: usize,
     pub messages: usize,
     pub updated: u64,
-    /// top mention edges author→target (the resume-list mini graph)
+
     pub mentions: Vec<(String, String, usize)>,
 }
 
@@ -375,9 +322,6 @@ pub fn list() -> Vec<CrewMeta> {
     out
 }
 
-/// "Name|role[|profile|model[|flags]]" — a leading "|role" makes a placeholder
-/// name; flags (any order): "tools" gives the member file/shell tools,
-/// "limit=<n>" caps its tokens (20k / 1.5m suffixes work, "off"/0 clears)
 pub fn parse_member(spec: &str, taken: &[Member]) -> Result<Member> {
     let parts: Vec<&str> = spec.split('|').map(str::trim).collect();
     if parts.is_empty() || parts.iter().all(|p| p.is_empty()) {
@@ -407,7 +351,6 @@ pub fn parse_member(spec: &str, taken: &[Member]) -> Result<Member> {
         } else if let Some(v) = lower.strip_prefix("limit=") {
             limit = parse_limit(v)?;
         } else if let Some(v) = lower.strip_prefix("budget=") {
-            // per-member budgets make no sense; accepted and ignored to keep specs forgiving
             let _ = parse_budget(v)?;
         } else if !lower.is_empty() {
             positional.push(Some(part.to_string()));
@@ -446,7 +389,6 @@ pub fn parse_member(spec: &str, taken: &[Member]) -> Result<Member> {
     })
 }
 
-/// "20k" / "1.5m" / "500000"; "off" or 0 clears the limit
 pub fn parse_limit_opt(v: &str) -> Option<u64> {
     parse_limit(v).ok().flatten()
 }
@@ -471,9 +413,8 @@ fn parse_limit(v: &str) -> Result<Option<u64>> {
     Ok(Some((n * mult as f64) as u64))
 }
 
-/// change a member's token budget; None clears it
 pub fn set_limit(crew_id: &str, name: &str, limit: Option<u64>) -> Result<Crew> {
-    let mut crew = load(crew_id)?; // a running step holds the whole crew in memory and would clobber this
+    let mut crew = load(crew_id)?;
     if is_running() {
         bail!("crew is running — stop it first");
     }
@@ -488,9 +429,8 @@ pub fn set_limit(crew_id: &str, name: &str, limit: Option<u64>) -> Result<Crew> 
     Ok(crew)
 }
 
-/// toggle a member's reviewer flag; reviewers gate DONE with "APPROVE:"
 pub fn set_review(crew_id: &str, name: &str, review: bool) -> Result<Crew> {
-    let mut crew = load(crew_id)?; // a running step holds the whole crew in memory and would clobber this
+    let mut crew = load(crew_id)?;
     if is_running() {
         bail!("crew is running — stop it first");
     }
@@ -506,7 +446,6 @@ pub fn set_review(crew_id: &str, name: &str, review: bool) -> Result<Crew> {
     Ok(crew)
 }
 
-/// "5" / "$2.50" / "3 usd"; "off", "", "0" or junk → None
 pub fn parse_budget_opt(v: &str) -> Option<f64> {
     parse_budget(v).ok().flatten()
 }
@@ -528,9 +467,8 @@ fn parse_budget(v: &str) -> Result<Option<f64>> {
     Ok(Some(n))
 }
 
-/// set the crew-wide dollar budget; None clears it
 pub fn set_budget(crew_id: &str, budget: Option<f64>) -> Result<Crew> {
-    let mut crew = load(crew_id)?; // a running step holds the whole crew in memory and would clobber this
+    let mut crew = load(crew_id)?;
     if is_running() {
         bail!("crew is running — stop it first");
     }
@@ -541,9 +479,6 @@ pub fn set_budget(crew_id: &str, budget: Option<f64>) -> Result<Crew> {
     Ok(crew)
 }
 
-/// preflight: every member must resolve to a usable provider config before
-/// the crew starts paying — missing keys, empty models or unknown provider
-/// kinds are reported all at once instead of failing mid-round
 pub fn preflight(crew: &Crew, cfg: &crate::config::Config) -> Result<()> {
     let mut errs: Vec<String> = Vec::new();
     for m in &crew.members {
@@ -579,13 +514,11 @@ pub fn preflight(crew: &Crew, cfg: &crate::config::Config) -> Result<()> {
     }
 }
 
-/// preflight by crew id (the gui calls this before spawning the runner)
 pub fn preflight_id(crew_id: &str, cfg: &crate::config::Config) -> Result<()> {
     let crew = load(crew_id)?;
     preflight(&crew, cfg)
 }
 
-/// total cost burned by the whole crew so far (all members + auto-summary)
 pub fn crew_spent(crew: &Crew) -> f64 {
     crew.usage
         .values()
@@ -598,13 +531,12 @@ const MEMORY_CAP: usize = 100;
 const MEMORY_PROMPT_ENTRIES: usize = 30;
 const MEMORY_PROMPT_CHARS: usize = 4000;
 
-/// add a memory entry; the oldest ones fall off past the cap
 pub fn memo_add(crew_id: &str, author: &str, text: &str) -> Result<Crew> {
     let text = text.trim();
     if text.is_empty() {
         bail!("empty memo");
     }
-    let mut crew = load(crew_id)?; // a running step holds the whole crew in memory and would clobber this
+    let mut crew = load(crew_id)?;
     if is_running() {
         bail!("crew is running — stop it first");
     }
@@ -622,9 +554,8 @@ pub fn memo_add(crew_id: &str, author: &str, text: &str) -> Result<Crew> {
     Ok(crew)
 }
 
-/// forget entry n (1-based, oldest first); n=0 clears everything
 pub fn memo_forget(crew_id: &str, n: usize) -> Result<Crew> {
-    let mut crew = load(crew_id)?; // a running step holds the whole crew in memory and would clobber this
+    let mut crew = load(crew_id)?;
     if is_running() {
         bail!("crew is running — stop it first");
     }
@@ -644,7 +575,6 @@ pub fn memo_forget(crew_id: &str, n: usize) -> Result<Crew> {
     Ok(crew)
 }
 
-/// every "MEMO:" line in one reply
 fn extract_lines(text: &str, prefix: &str) -> Vec<String> {
     text.lines()
         .filter_map(|l| l.trim().strip_prefix(prefix))
@@ -653,7 +583,6 @@ fn extract_lines(text: &str, prefix: &str) -> Vec<String> {
         .collect()
 }
 
-/// total tokens a member has burned so far (input + output, cached included)
 pub fn member_used(crew: &Crew, name: &str) -> u64 {
     crew.usage
         .get(name)
@@ -802,18 +731,12 @@ fn transcript_messages(crew: &Crew, max: usize) -> Vec<Message> {
         .collect()
 }
 
-/// messages beyond the window ride as one cached summary instead of being lost
 const TRANSCRIPT_WINDOW: usize = 40;
 const SUMMARIZE_MIN_DROPPED: usize = 6;
 const SUMMARY_MAX_CHARS: usize = 1500;
 
 const SUMMARY_REFRESH_SLACK: usize = 10;
 
-/// what to inject for this step and whether a fresh summary must be generated.
-/// a stale summary is served until it lags the dropped prefix by SLACK
-/// messages, so long sessions pay for compression once per ~10 messages
-/// instead of every step; an empty cached summary is a "tried and failed"
-/// marker that quiets retries until the lag grows past MIN_DROPPED again.
 fn summary_plan(crew: &Crew, drop: usize) -> (Option<String>, bool) {
     if drop == 0 || crew.summary_upto > drop {
         return (None, false);
@@ -831,7 +754,6 @@ fn summary_plan(crew: &Crew, drop: usize) -> (Option<String>, bool) {
     (have, need)
 }
 
-/// plain-text digest of crew.messages[0..drop] for the summarizer
 fn digest_for_summary(crew: &Crew, drop: usize) -> String {
     const MAX_MSGS: usize = 60;
     const MSG_CHARS: usize = 400;
@@ -851,8 +773,6 @@ fn digest_for_summary(crew: &Crew, drop: usize) -> String {
     out
 }
 
-/// one non-streamed call for the tail summary; usage rows land in the
-/// "crew" bucket so the cost is visible but not charged to any member
 async fn summarizer_call(
     provider: &dyn crate::provider::Provider,
     req: &ChatRequest,
@@ -893,8 +813,6 @@ async fn summarizer_call(
     Ok((reply.text, taken))
 }
 
-/// make sure the dropped-tail summary is up to date before a step runs;
-/// None = nothing dropped yet or compression unavailable (plain truncation)
 async fn ensure_summary(
     crew: &mut Crew,
     cfg: &crate::config::Config,
@@ -940,8 +858,7 @@ async fn ensure_summary(
     match summarizer_call(provider.as_ref(), &req, &pc.model, &pc.kind).await {
         Ok((text, rows)) => {
             let fresh: String = text.trim().chars().take(900).collect();
-            // the fresh digest covers the newest dropped messages; the previous
-            // summary still stands for everything before it — keep both
+
             let merged = match crew.summary.as_deref().filter(|s| !s.is_empty()) {
                 Some(prev) => format!("{}\n{}", trunc(prev, 600), fresh),
                 None => fresh,
@@ -958,10 +875,9 @@ async fn ensure_summary(
         }
         Err(_) => {
             if have.is_some() {
-                // keep serving the previous (slightly stale) summary, retry later
                 return have;
             }
-            // mark as covered so a failing summarizer is not retried every step
+
             crew.summary = Some(String::new());
             crew.summary_upto = drop;
             crew.updated = now();
@@ -974,7 +890,6 @@ async fn ensure_summary(
     }
 }
 
-/// transcript for a member prompt: optional summary header + the recent tail
 fn build_transcript(crew: &Crew, max: usize, summary: Option<&str>) -> Vec<Message> {
     let mut msgs = transcript_messages(crew, max);
     if let Some(s) = summary {
@@ -996,9 +911,6 @@ fn cost_of(kind: &str, model: &str, input: u64, output: u64, cached: u64) -> f64
     crate::models::cost_cached(model, input, output, cached, disc)
 }
 
-/// run `rounds` rounds of the crew: each round every member answers once;
-/// a reply containing a DONE line finishes the whole crew early. Usage is
-/// attributed to the member whose provider call produced it.
 pub async fn step(
     crew_id: &str,
     rounds: usize,
@@ -1008,8 +920,6 @@ pub async fn step(
     step_locked(crew_id, rounds, cfg, tx, true).await
 }
 
-/// the runner core; reset_cancel=false keeps a stop pressed between auto
-/// rounds alive instead of wiping it at the next step boundary
 async fn step_locked(
     crew_id: &str,
     rounds: usize,
@@ -1038,7 +948,7 @@ async fn step_inner(
     if crew.status == "done" {
         bail!("crew is already done — /crew new to start another");
     }
-    // budget already spent: stop before paying for anything, even the summary
+
     if let Some(b) = crew.budget.filter(|b| *b > 0.0) {
         let spent = crew_spent(&crew);
         if spent >= b {
@@ -1059,7 +969,7 @@ async fn step_inner(
             ));
         }
     }
-    // preflight: fail up front, never mid-round after money was spent
+
     preflight(&crew, cfg)?;
     crew.status = "running".into();
     crew.updated = now();
@@ -1069,7 +979,7 @@ async fn step_inner(
     let mut note = String::new();
     let mut done = false;
     let mut stopped = false;
-    // background workers: spawned tasks + a registry their results land in
+
     let results: std::sync::Arc<Mutex<Vec<WorkerOut>>> = Default::default();
     let mut workers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     'rounds: for _ in 0..rounds.max(1) {
@@ -1080,7 +990,7 @@ async fn step_inner(
             if CANCEL.load(Ordering::Relaxed) {
                 break 'rounds;
             }
-            // crew-wide dollar budget: once the summed cost crosses it, stop
+
             if let Some(b) = crew.budget.filter(|b| *b > 0.0) {
                 let spent = crew_spent(&crew);
                 if spent >= b {
@@ -1102,7 +1012,7 @@ async fn step_inner(
             let Some(member) = crew.members.iter().find(|m| m.name == name).cloned() else {
                 continue;
             };
-            // token budget auto-stop: over-limit members sit the round out
+
             let used = member_used(&crew, &name);
             if let Some(limit) = member.limit {
                 if limit > 0 && used >= limit {
@@ -1117,7 +1027,7 @@ async fn step_inner(
                     continue;
                 }
             }
-            // background worker: spawn the turn and keep the round moving
+
             if member.bg {
                 skipped_all = false;
                 match member_request(&crew, &member, cfg, summary.as_deref()) {
@@ -1133,7 +1043,7 @@ async fn step_inner(
                                 provider, req, &cid, &pc, &wmember, &wcfg, &wtx, false,
                             )
                             .await;
-                            // publish as soon as it is ready, not when the round ends
+
                             if let Ok(text) = &res {
                                 let _ = wtx.send(ApiEvent::Crew {
                                     id: cid,
@@ -1198,8 +1108,6 @@ async fn step_inner(
                     text
                 }
                 Err(e) => {
-                    // even a failed call may have streamed usage: bank it, the
-                    // budget must see what was actually spent
                     if !spent_rows.is_empty() {
                         crew.usage
                             .entry(member.name.clone())
@@ -1217,7 +1125,7 @@ async fn step_inner(
                     continue;
                 }
             };
-            // self-naming for placeholder members
+
             let renamed: Option<String> = extract_line(&reply, "RENAME:")
                 .and_then(|raw| try_rename(&mut crew, &member.name, &raw, tx));
             let author = renamed.unwrap_or_else(|| member.name.clone());
@@ -1253,14 +1161,14 @@ async fn step_inner(
                 }
                 continue;
             }
-            // @mention steering: the named member speaks next
+
             if let Some(target) = first_mention(&reply) {
                 if let Some(pos) = queue.iter().position(|n| n.eq_ignore_ascii_case(&target)) {
                     let picked = queue.remove(pos);
                     queue.insert(0, picked);
                 }
             }
-            // merge whatever background workers finished while we waited
+
             if drain_workers(
                 &mut crew,
                 &results,
@@ -1276,7 +1184,7 @@ async fn step_inner(
                 break 'rounds;
             }
         }
-        // background workers get to finish their round before a new one starts
+
         for h in workers.drain(..) {
             let _ = h.await;
         }
@@ -1294,7 +1202,7 @@ async fn step_inner(
             done = true;
             break 'rounds;
         }
-        // every member is over its budget — stop the crew instead of spinning
+
         if skipped_all {
             note.push_str(" (all members hit their token limits)");
             crew.status = "stopped".into();
@@ -1302,9 +1210,7 @@ async fn step_inner(
             break;
         }
     }
-    // never lose paid work: whatever bg workers were still running when the
-    // step ended is awaited and recorded here (a DONE claim from them only
-    // counts if the crew has not finished yet)
+
     for h in workers.drain(..) {
         let _ = h.await;
     }
@@ -1336,17 +1242,12 @@ async fn step_inner(
     ))
 }
 
-/// a finished background worker's turn: the member it ran for, the outcome
-/// and the usage rows (banked even when the call errored — the budget must
-/// see what was actually spent)
 struct WorkerOut {
     member: Member,
     res: Result<String>,
     rows: Vec<UsageRow>,
 }
 
-/// peer review gate: a DONE claim only ends the crew after every askable
-/// reviewer answers with "APPROVE:"; returns true when the crew finished
 async fn review_done(
     crew: &mut Crew,
     author: &str,
@@ -1399,7 +1300,7 @@ async fn review_done(
         if CANCEL.load(Ordering::Relaxed) {
             break;
         }
-        // reviewers burn money too: the budget gates them as well
+
         if let Some(b) = crew.budget.filter(|b| *b > 0.0) {
             if crew_spent(crew) >= b {
                 rejected.push(format!(
@@ -1426,7 +1327,7 @@ async fn review_done(
                         .or_default()
                         .extend(std::mem::take(&mut spent_rows));
                 }
-                // a placeholder reviewer may pick its callsign here too
+
                 let r_author = extract_line(&text, "RENAME:")
                     .and_then(|raw| try_rename(crew, &r.name, &raw, tx))
                     .unwrap_or_else(|| r.name.clone());
@@ -1473,14 +1374,13 @@ async fn review_done(
             }
         }
     }
-    // cancelled mid-review: persist and let the caller unwind
+
     if CANCEL.load(Ordering::Relaxed) {
         save(crew)?;
         return Ok(false);
     }
     save(crew)?;
     if asked == 0 {
-        // nobody could review (limits spent) — accept the claim
         let msg = "peer review unavailable — DONE accepted".to_string();
         crew.messages.push(CrewMsg {
             author: "crew".into(),
@@ -1515,11 +1415,6 @@ async fn review_done(
     Ok(false)
 }
 
-/// merge finished background workers into the transcript; returns true when
-/// one of them claimed DONE and the review gate accepted it. the worker's
-/// own Crew event already went out live, so nothing is re-broadcast here;
-/// allow_done=false records the reply but ignores its DONE claim (the crew
-/// already finished)
 async fn drain_workers(
     crew: &mut Crew,
     results: &std::sync::Arc<Mutex<Vec<WorkerOut>>>,
@@ -1559,7 +1454,6 @@ async fn drain_workers(
                 text
             }
             Err(e) => {
-                // a failed worker call may still have streamed usage: bank it
                 if !out.rows.is_empty() {
                     crew.usage
                         .entry(member.name.clone())
@@ -1600,18 +1494,17 @@ async fn drain_workers(
         });
         crew.updated = now();
         save(crew)?;
-        // a worker's handoff steers the rest of the round
+
         if let Some(target) = first_mention(&text) {
             if let Some(pos) = queue.iter().position(|n| n.eq_ignore_ascii_case(&target)) {
                 let picked = queue.remove(pos);
                 queue.insert(0, picked);
             }
         }
-        if allow_done {
+        if allow_done && !ended {
             if let Some(done_line) = extract_line(&text, "DONE:") {
                 if review_done(crew, &author, &done_line, cfg, tx, summary).await? {
                     ended = true;
-                    break;
                 }
             }
         }
@@ -1619,8 +1512,6 @@ async fn drain_workers(
     Ok(ended)
 }
 
-/// restart grant: a limit-stopped member gets one fresh limit-worth of
-/// allowance, so a retry actually revives them for the rounds to come
 fn grant_restart_limit(member: &mut Member, used: u64) -> Option<u64> {
     let limit = member.limit?;
     if limit == 0 || used < limit {
@@ -1631,10 +1522,6 @@ fn grant_restart_limit(member: &mut Member, used: u64) -> Option<u64> {
     Some(fresh)
 }
 
-/// manually re-run one member's turn outside a round: revives an errored or
-/// limit-stopped member on demand. the reply lands in the transcript like any
-/// inline turn (MEMO/RENAME apply, a DONE line runs the review gate); a
-/// member stopped by its token limit also gets one fresh allowance
 pub async fn retry_member(
     crew_id: &str,
     name: &str,
@@ -1665,7 +1552,7 @@ async fn retry_inner(
     else {
         bail!("no member named \"{name}\" — /crew status lists them");
     };
-    // the retry is an explicit user action: over budget it proceeds with a note
+
     if let Some(b) = crew.budget.filter(|b| *b > 0.0) {
         let spent = crew_spent(&crew);
         if spent >= b {
@@ -1767,9 +1654,6 @@ async fn retry_inner(
     ))
 }
 
-/// the tool subset a tool-enabled crew member may call; the skill tool
-/// rides along whenever any skill is discovered, so a tools member can load
-/// skill instructions (and run bundled scripts via bash) mid-round
 pub fn crew_tool_specs() -> Vec<crate::provider::ToolSpec> {
     crate::tools::specs()
         .into_iter()
@@ -1827,8 +1711,6 @@ fn member_request(
     Ok((provider, req, pc))
 }
 
-/// one provider turn for one member: streams deltas out as CrewChunk
-/// events, returns the reply text, tool calls and usage rows
 async fn member_call(
     provider: &dyn crate::provider::Provider,
     req: &ChatRequest,
@@ -1883,11 +1765,6 @@ async fn member_call(
     (reply.map(|r| (r.text, r.calls)), taken)
 }
 
-/// one member's turn: tool-less members stream a single call, tool-enabled
-/// ones run a short agentic loop where every call goes through the
-/// permission config (Confirm events ride the same channel); background
-/// workers run with interactive=false — tools that would ask the user are
-/// denied with an explanation instead of raising a prompt nobody may see
 #[allow(clippy::too_many_arguments)]
 async fn run_member_turn(
     provider: std::sync::Arc<dyn crate::provider::Provider>,
@@ -1948,7 +1825,7 @@ async fn run_member_turn(
                 diff: crate::tools::preview(&call.name, &call.args),
                 paths: crate::tools::paths(&call.name, &call.args),
             });
-            // bash routed into an attached VM is gated as the "sandbox" perm
+
             let perm_tool = if call.name == "bash" && crate::sandbox::shell_route().is_some() {
                 "sandbox"
             } else {
@@ -2009,7 +1886,6 @@ async fn run_member_turn(
     (Ok(text), spent)
 }
 
-/// one inline member's turn (blocking, may raise confirm prompts)
 async fn ask_member(
     crew: &Crew,
     member: &Member,
@@ -2036,8 +1912,6 @@ fn name_reserved(name: &str) -> bool {
     RESERVED_NAMES.iter().any(|r| name.eq_ignore_ascii_case(r))
 }
 
-/// apply a "RENAME:" request from a reply: migrate usage, rename the member,
-/// note the crew; None when the name is taken/reserved/a no-op
 fn try_rename(
     crew: &mut Crew,
     old_name: &str,
@@ -2104,7 +1978,6 @@ fn first_mention(text: &str) -> Option<String> {
     }
 }
 
-/// every @mention in one message, resolved against member names (+ "you")
 fn mentions_in(text: &str, known: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = text;
@@ -2124,7 +1997,6 @@ fn mentions_in(text: &str, known: &[String]) -> Vec<String> {
     out
 }
 
-/// "@all" anywhere in the text (case-insensitive) — a broadcast
 fn mentions_all(text: &str) -> bool {
     let mut rest = text;
     while let Some(at) = rest.find('@') {
@@ -2140,7 +2012,6 @@ fn mentions_all(text: &str) -> bool {
     false
 }
 
-/// author→target mention edge counts for the graph view; "you" is the user
 pub fn mention_graph(crew: &Crew) -> Vec<(String, String, usize)> {
     let mut known: Vec<String> = crew.members.iter().map(|m| m.name.clone()).collect();
     known.push("you".into());
@@ -2155,7 +2026,7 @@ pub fn mention_graph(crew: &Crew) -> Vec<(String, String, usize)> {
             }
             *edges.entry((m.author.clone(), target)).or_default() += 1;
         }
-        // "@all" reaches every member at once
+
         if mentions_all(&m.content) {
             for t in &crew.members {
                 if t.name != m.author {
@@ -2171,7 +2042,7 @@ pub fn mention_graph(crew: &Crew) -> Vec<(String, String, usize)> {
 }
 
 pub fn send(crew_id: &str, text: &str) -> Result<()> {
-    let mut crew = load(crew_id)?; // a running step holds the whole crew in memory and would clobber this
+    let mut crew = load(crew_id)?;
     if is_running() {
         bail!("crew is running — stop it first");
     }
@@ -2192,7 +2063,7 @@ pub fn send(crew_id: &str, text: &str) -> Result<()> {
 }
 
 pub fn add_member(crew_id: &str, spec: &str) -> Result<Crew> {
-    let mut crew = load(crew_id)?; // a running step holds the whole crew in memory and would clobber this
+    let mut crew = load(crew_id)?;
     if is_running() {
         bail!("crew is running — stop it first");
     }
@@ -2204,7 +2075,7 @@ pub fn add_member(crew_id: &str, spec: &str) -> Result<Crew> {
 }
 
 pub fn remove_member(crew_id: &str, name: &str) -> Result<Crew> {
-    let mut crew = load(crew_id)?; // a running step holds the whole crew in memory and would clobber this
+    let mut crew = load(crew_id)?;
     if is_running() {
         bail!("crew is running — stop it first");
     }
@@ -2218,7 +2089,6 @@ pub fn remove_member(crew_id: &str, name: &str) -> Result<Crew> {
     Ok(crew)
 }
 
-/// per-member token/cost summary — the "who burned what" report
 pub fn usage_report(crew_id: &str) -> Result<String> {
     let crew = load(crew_id)?;
     let mut out = String::new();
@@ -2283,7 +2153,6 @@ pub fn usage_report(crew_id: &str) -> Result<String> {
     Ok(out)
 }
 
-/// struct shape the gui crew panel renders for the usage split
 pub fn usage_json(crew_id: &str) -> Result<serde_json::Value> {
     let crew = load(crew_id)?;
     let mut rows = Vec::new();
@@ -2318,7 +2187,6 @@ pub fn usage_json(crew_id: &str) -> Result<serde_json::Value> {
     }))
 }
 
-/// full state for the gui crew panel
 pub fn state_json(crew_id: &str) -> Result<serde_json::Value> {
     let crew = load(crew_id)?;
     let graph: Vec<serde_json::Value> = mention_graph(&crew)
@@ -2358,8 +2226,6 @@ pub fn state_json(crew_id: &str) -> Result<serde_json::Value> {
     }))
 }
 
-/// auto mode: rounds until DONE, cancel or the cap; the returned string is
-/// a short final summary for the chat log
 pub fn run_auto(
     crew_id: &str,
     max_rounds: usize,
@@ -2388,7 +2254,7 @@ pub fn run_auto(
             let st = load(&crew_id)
                 .map(|c| c.status)
                 .unwrap_or_else(|_| "done".into());
-            // done = goal reached; stopped = budget/limits exhausted — both end auto
+
             if st != "idle" {
                 break;
             }
@@ -2437,14 +2303,14 @@ mod tests {
         assert!(memo_forget(&id, 9).is_err());
         let c = memo_forget(&id, 0).unwrap();
         assert!(c.memory.is_empty());
-        // cap: oldest entries fall off
+
         for i in 0..MEMORY_CAP + 10 {
             memo_add(&id, "rex", &format!("fact {i}")).unwrap();
         }
         let c = load(&id).unwrap();
         assert_eq!(c.memory.len(), MEMORY_CAP);
         assert_eq!(c.memory[0].content, "fact 10");
-        // extract_lines for MEMO protocol
+
         let lines = extract_lines("a\nMEMO: one\nMEMO: two\nMEMO:\nplain", "MEMO:");
         assert_eq!(lines, vec!["one".to_string(), "two".to_string()]);
         delete(&id).unwrap();
@@ -2610,7 +2476,7 @@ mod tests {
         let msgs = transcript_messages(&crew, 40);
         assert_eq!(msgs.len(), 3);
         assert!(msgs[2].content.contains("rex: @Nora check the plan"));
-        // transcript cap keeps only the tail
+
         for i in 0..50 {
             crew.messages.push(CrewMsg {
                 author: "rex".into(),
@@ -2750,7 +2616,7 @@ mod tests {
         assert!(g.contains(&("rex".into(), "nora".into(), 1)), "{g:?}");
         assert!(g.contains(&("you".into(), "rex".into(), 1)), "{g:?}");
         assert!(g.contains(&("you".into(), "nora".into(), 1)), "{g:?}");
-        // no self edges, and the email mention did not create edges
+
         assert!(!g.iter().any(|(a, b, _)| a == b), "{g:?}");
         assert!(!g.iter().any(|(a, b, _)| a == "nora"), "{g:?}");
     }
@@ -2781,40 +2647,39 @@ mod tests {
         }
         let drop = crew.messages.len() - TRANSCRIPT_WINDOW;
         assert_eq!(drop, 10);
-        // nothing cached: below the slack the plan asks to generate
+
         let (have, need) = summary_plan(&crew, drop);
         assert!(have.is_none() && need);
-        // digest covers the dropped range only
+
         let d = digest_for_summary(&crew, drop);
         assert!(d.contains("msg 9"), "{d}");
         assert!(!d.contains("msg 49"), "recent tail must not be summarized");
         assert!(!d.contains("msg 50"));
-        // fresh cache is served as-is, no regeneration
+
         crew.summary = Some("earlier work done".into());
         crew.summary_upto = drop;
         let (have, need) = summary_plan(&crew, drop);
         assert_eq!(have.as_deref(), Some("earlier work done"));
         assert!(!need);
-        // a slightly stale summary is still served (paid once per ~slack msgs)
+
         let (have, need) = summary_plan(&crew, drop + SUMMARY_REFRESH_SLACK - 1);
         assert_eq!(have.as_deref(), Some("earlier work done"));
         assert!(!need, "below the slack no refresh is paid for");
         let (have, need) = summary_plan(&crew, drop + SUMMARY_REFRESH_SLACK);
         assert!(need, "lag >= slack must refresh");
-        // empty summary means "tried and failed": nothing injected, and a
-        // retry only comes once the lag grows past MIN_DROPPED again
+
         crew.summary = Some(String::new());
         let (have, need) = summary_plan(&crew, drop);
         assert!(have.is_none() && !need);
         let (_, need2) = summary_plan(&crew, drop + SUMMARIZE_MIN_DROPPED);
         assert!(need2);
-        // the summary rides ahead of the recent tail
+
         crew.summary = Some("earlier work done".into());
         let msgs = build_transcript(&crew, TRANSCRIPT_WINDOW, Some("earlier work done"));
         assert_eq!(msgs.len(), TRANSCRIPT_WINDOW + 1);
         assert!(msgs[0].content.contains("summary of the earlier messages"));
         assert!(msgs[0].content.contains("earlier work done"));
-        // short transcripts never get a header
+
         let msgs = build_transcript(&crew, TRANSCRIPT_WINDOW, None);
         assert_eq!(msgs.len(), TRANSCRIPT_WINDOW);
     }
@@ -2879,7 +2744,7 @@ mod tests {
         assert_eq!(c.budget, Some(2.5));
         let report = usage_report(&crew.id).unwrap();
         assert!(report.contains("budget: $1.05 spent of $2.50"), "{report}");
-        // clearing, and junk is rejected by the setter
+
         let c = set_budget(&crew.id, None).unwrap();
         assert!(c.budget.is_none());
         let j = usage_json(&crew.id).unwrap();
@@ -2906,24 +2771,24 @@ mod tests {
             created: 0,
             updated: 0,
         };
-        // no key anywhere: both members are reported in one message
+
         let cfg: crate::config::Config =
             toml::from_str("[provider]\ntype = \"openai\"\nmodel = \"m\"\n").unwrap();
         let err = preflight(&crew, &cfg).unwrap_err().to_string();
         assert!(err.contains("rex"), "{err}");
         assert!(err.contains("nora"), "{err}");
         assert!(err.contains("preflight failed"), "{err}");
-        // a key on the base provider fixes both
+
         let cfg: crate::config::Config =
             toml::from_str("[provider]\ntype = \"openai\"\nmodel = \"m\"\napi_key = \"sk-test\"\n")
                 .unwrap();
         preflight(&crew, &cfg).unwrap();
-        // an unknown provider kind is surfaced as a preflight failure too
+
         let cfg: crate::config::Config =
             toml::from_str("[provider]\ntype = \"nope\"\nmodel = \"m\"\napi_key = \"sk-test\"\n")
                 .unwrap();
         assert!(preflight(&crew, &cfg).is_err());
-        // an empty model is a failure even with a key
+
         let cfg: crate::config::Config =
             toml::from_str("[provider]\ntype = \"openai\"\nmodel = \"\"\napi_key = \"sk-test\"\n")
                 .unwrap();
@@ -2949,7 +2814,7 @@ mod tests {
         assert_eq!(p.budget, Some(3.0));
         assert!(preset_save(&id, "bad name!").is_err());
         assert_eq!(preset_list().len(), 1);
-        // the spawned crew keeps the shape, drops the history
+
         let c2 = preset_apply("ship-team", None).unwrap();
         assert_ne!(c2.id, id);
         assert_eq!(c2.goal, "ship the thing");
@@ -2962,7 +2827,7 @@ mod tests {
         assert!(c2.usage.is_empty());
         assert_eq!(c2.status, "idle");
         assert_eq!(active().as_deref(), Some(c2.id.as_str()));
-        // the goal can be overridden for a new mission
+
         let c3 = preset_apply("ship-team", Some("  new mission  ")).unwrap();
         assert_eq!(c3.goal, "new mission");
         preset_delete("ship-team").unwrap();

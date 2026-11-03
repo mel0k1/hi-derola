@@ -1,12 +1,3 @@
-//! code-mode: a confined JavaScript sandbox for orchestrating MCP tools.
-//!
-//! The model writes a small JS program; the sandbox (boa_engine, pure Rust,
-//! no filesystem/network/process authority) exposes every connected MCP tool
-//! as `mcp.<server>.<tool>(input)`. The program can sequence, transform,
-//! branch and loop over results in one turn instead of one tool call per
-//! round trip. Each child MCP call goes through the same permission checks
-//! (and the same confirm UI) as a direct `mcp__server__tool` call.
-
 use boa_engine::{
     builtins::promise::PromiseState, js_string, native_function::NativeFunction,
     object::builtins::JsPromise, object::JsObject, property::Attribute, Context, JsError,
@@ -24,7 +15,7 @@ use crate::perm::{Perm, PermCfg, PermRule};
 use crate::provider::{ConfirmReply, ToolSpec};
 
 const MAX_CODE_BYTES: usize = 256 * 1024;
-/// runaway protection for the interpreter itself
+
 const MAX_LOOP_ITERATIONS: u64 = 5_000_000;
 const MAX_RECURSION: usize = 96;
 const MAX_TOOL_CALLS: usize = 200;
@@ -32,8 +23,6 @@ const MAX_LOGS: usize = 200;
 const MAX_LOG_LINE: usize = 2_000;
 const CATALOG_BUDGET: usize = 6_000;
 
-/// wall-clock budget for one script; child MCP calls have their own timeouts
-/// too, so a script always finishes close to this
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
 
 pub type CallFuture =
@@ -43,7 +32,7 @@ pub type Caller = Arc<dyn Fn(Value) -> CallFuture + Send + Sync>;
 pub struct Target {
     pub server: String,
     pub tool: String,
-    /// the permission subject, e.g. "mcp__github__search_repo"
+
     pub perm_key: String,
     pub description: String,
     pub call: Caller,
@@ -53,7 +42,7 @@ pub type ConfirmFn = Arc<dyn Fn(&str, &str) -> ConfirmReply + Send + Sync>;
 
 pub struct RunCfg {
     pub targets: Vec<Target>,
-    /// snapshot of the session permissions; child calls are checked against it
+
     pub perm: PermCfg,
     pub allow_all: Arc<AtomicBool>,
     pub timeout: Duration,
@@ -66,7 +55,7 @@ pub struct Outcome {
     pub output: Result<String, String>,
     pub logs: Vec<String>,
     pub calls: usize,
-    /// allow-rules created by "always allow" confirms during the run
+
     pub new_rules: Vec<PermRule>,
 }
 
@@ -98,8 +87,6 @@ fn tool_native(
     args: &[JsValue],
     ctx: &mut Context,
 ) -> JsResult<JsValue> {
-    // phase 1: validate, count the call, clone what we need, release the
-    // borrow before any long host IO
     let target = RUN.with(|r| {
         let mut g = r.borrow_mut();
         let st = g.as_mut().ok_or_else(|| {
@@ -142,7 +129,6 @@ fn tool_native(
     };
     let arg_str = arg.to_string();
 
-    // phase 2: permission — the same rules as a direct mcp__server__tool call
     let decision: Decision = RUN.with(|r| {
         let mut g = r.borrow_mut();
         let Some(st) = g.as_mut() else {
@@ -179,12 +165,10 @@ fn tool_native(
     });
 
     let Decision::Deny(msg) = &decision else {
-        // allowed: run the host call
         let fut = (target.call)(arg);
         let res = RUN.with(|r| {
             let mut g = r.borrow_mut();
-            // no JS runs on this thread while we block, so holding the borrow
-            // across block_on is safe (the interpreter is strictly sequential)
+
             let st = g.as_mut().ok_or_else(|| {
                 JsError::from(JsNativeError::error().with_message("code: no run state"))
             })?;
@@ -325,7 +309,6 @@ fn run_in_thread(code: &str, cfg: RunCfg, handle: tokio::runtime::Handle) -> Out
         match setup {
             Err(e) => Err(e.to_string()),
             Ok(()) => {
-                // wrap in an async IIFE so `await` works at the top level
                 let wrapped = format!("(async () => {{\n{code}\n}})()");
                 match ctx.eval(Source::from_bytes(wrapped.as_bytes())) {
                     Ok(promise) => {
@@ -367,7 +350,6 @@ fn run_in_thread(code: &str, cfg: RunCfg, handle: tokio::runtime::Handle) -> Out
     outcome
 }
 
-/// drain microtasks and render the settled state of the script's promise
 fn settle_text(promise: JsValue, ctx: &mut Context) -> Result<String, String> {
     let is_promise = promise
         .as_object()
@@ -410,8 +392,7 @@ pub async fn run(code: String, cfg: RunCfg) -> Outcome {
     let handle = tokio::runtime::Handle::current();
     let timeout = cfg.timeout;
     let work = tokio::task::spawn_blocking(move || run_in_thread(&code, cfg, handle));
-    // the in-interpreter deadline already bounds every call, so this outer
-    // guard only matters if the interpreter itself wedges
+
     match tokio::time::timeout(timeout + Duration::from_secs(2), work).await {
         Ok(Ok(outcome)) => outcome,
         Ok(Err(e)) => Outcome {
@@ -462,8 +443,6 @@ fn js_ident(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-/// exact call signature for the catalog: dot notation when both segments are
-/// plain identifiers, bracket notation otherwise
 fn signature(server_js: &str, tool_js: &str) -> String {
     if js_ident(server_js) && js_ident(tool_js) {
         format!("mcp.{server_js}.{tool_js}({{...}})")
@@ -472,7 +451,6 @@ fn signature(server_js: &str, tool_js: &str) -> String {
     }
 }
 
-/// build the MCP call targets from the connected client and its tool specs
 pub fn mcp_targets(client: Arc<McpClient>, specs: &[ToolSpec]) -> Vec<Target> {
     specs
         .iter()
@@ -502,8 +480,6 @@ pub fn mcp_targets(client: Arc<McpClient>, specs: &[ToolSpec]) -> Vec<Target> {
         .collect()
 }
 
-/// MCP results arrive as plain text; hand the program real JSON when the
-/// text parses, so `result.items` works instead of string surgery
 fn parse_mcp_text(text: String) -> Value {
     let t = text.trim();
     if (t.starts_with('{') && t.ends_with('}')) || (t.starts_with('[') && t.ends_with(']')) {
@@ -514,7 +490,6 @@ fn parse_mcp_text(text: String) -> Value {
     Value::String(text)
 }
 
-/// the compact tool catalog embedded into the `code` tool description
 pub fn catalog_from_mcp_specs(specs: &[ToolSpec]) -> String {
     let mut groups: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
     for s in specs {
@@ -581,7 +556,6 @@ fn short_desc(desc: &str) -> String {
     s
 }
 
-/// the `code` tool spec; `catalog` is the output of catalog_from_mcp_specs
 pub fn code_spec(catalog: &str) -> ToolSpec {
     let description = format!(
         "Run a confined JavaScript program with access to the connected MCP servers. \
@@ -635,8 +609,6 @@ mod tests {
         }
     }
 
-    /// mirrors the production path: the interpreter runs on a blocking
-    /// thread, so Handle::block_on inside tool calls is legal
     async fn run_code(code: &str, cfg: RunCfg) -> Outcome {
         let code = code.to_string();
         let handle = tokio::runtime::Handle::current();
@@ -684,7 +656,7 @@ mod tests {
         let asks2 = asks.clone();
         let mut cfg = cfg_with(
             vec![echo_target("srv", "tool", "mcp__srv__tool")],
-            PermCfg::default(), // mcp defaults to ask
+            PermCfg::default(),
         );
         cfg.confirm = Arc::new(move |_, _| {
             asks2.fetch_add(1, Ordering::Relaxed);
@@ -704,7 +676,7 @@ mod tests {
         )
         .await;
         assert_eq!(out.output.unwrap().trim(), "4");
-        // the first call asks; the always-rule covers the second
+
         assert_eq!(asks.load(Ordering::Relaxed), 1);
         assert_eq!(out.new_rules.len(), 1);
         assert_eq!(out.new_rules[0].tool, "mcp");
@@ -779,13 +751,13 @@ mod tests {
             signature("github", "search_repo"),
             "mcp.github.search_repo({...})"
         );
-        // sanitized names are always valid identifiers
+
         assert_eq!(
             signature("my_server", "my_tool"),
             "mcp.my_server.my_tool({...})"
         );
         assert_eq!(signature("_9lives", "t2"), "mcp._9lives.t2({...})");
-        // raw names with dashes/leading digits would need bracket notation
+
         assert_eq!(
             signature("my-server", "get-data"),
             "mcp[\"my-server\"][\"get-data\"]({...})"
@@ -866,9 +838,6 @@ mod tests {
 
     #[tokio::test]
     async fn run_timeout_returns_error() {
-        // a child call that outlives the outer guard; the guard must return
-        // "timed out" to the caller regardless (the thread itself is bounded
-        // by the sleep so the test runtime can still shut down cleanly)
         let cfg = cfg_with(
             vec![Target {
                 server: "slow".into(),

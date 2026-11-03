@@ -26,7 +26,6 @@ const QUIET: Duration = Duration::from_millis(400);
 const MAX_DIAGS: usize = 20;
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 
-/// (binaries to try, supported extensions, extra args)
 const REGISTRY: &[(&str, &[&str], &[&str])] = &[
     ("rust-analyzer", &["rs"], &[]),
     ("pyright-langserver", &["py", "pyi"], &["--stdio"]),
@@ -47,8 +46,7 @@ struct Server {
     pending: Mutex<HashMap<i64, oneshot::Sender<Value>>>,
     diags: Mutex<HashMap<String, (Instant, Vec<Value>)>>,
     open_docs: Mutex<HashSet<String>>,
-    /// when this server was spawned; empty nav results from a freshly
-    /// spawned server are retried while it is still analyzing
+
     born: Instant,
 }
 
@@ -71,8 +69,6 @@ pub fn server_name_for(path: &str) -> Option<&'static str> {
         .map(|(name, _, _)| *name)
 }
 
-/// unique candidate server binary names in registry order (doctor lists
-/// them and checks which are installed)
 pub fn server_names() -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
     for (name, _, _) in REGISTRY {
@@ -101,8 +97,6 @@ fn path_to_uri(path: &str) -> String {
     format!("file://{encoded}")
 }
 
-/// byte-correct %XX decoding: multi-byte UTF-8 must reassemble from bytes,
-/// not be pushed as one char per byte
 fn uri_to_path(uri: &str) -> String {
     let rest = uri.strip_prefix("file://").unwrap_or(uri);
     let mut raw: Vec<u8> = Vec::with_capacity(rest.len());
@@ -122,7 +116,6 @@ fn uri_to_path(uri: &str) -> String {
     String::from_utf8_lossy(&raw).to_string()
 }
 
-/// Parse one LSP frame from the buffer. Returns (bytes consumed, message).
 pub fn parse_frame(buf: &[u8]) -> Option<(usize, Value)> {
     let sep = find_subslice(buf, b"\r\n\r\n")?;
     let head = std::str::from_utf8(&buf[..sep]).ok()?;
@@ -176,7 +169,6 @@ async fn get_server(name: &'static str, args: &[&str], root: &str) -> Option<Arc
         born: Instant::now(),
     });
 
-    // reader: resolve pending requests, track publishDiagnostics
     let r = srv.clone();
     tokio::spawn(async move {
         let mut buf: Vec<u8> = Vec::with_capacity(64 * 1024);
@@ -209,7 +201,6 @@ async fn get_server(name: &'static str, args: &[&str], root: &str) -> Option<Arc
                         .unwrap_or_default();
                     r.diags.lock().unwrap().insert(uri, (Instant::now(), diags));
                 } else if let (Some(id), true) = (id, !method.is_empty()) {
-                    // server -> client request: answer with an empty result
                     let resp =
                         serde_json::json!({"jsonrpc": "2.0", "id": id, "result": Value::Null});
                     let mut g = r.stdin.lock().await;
@@ -229,9 +220,6 @@ async fn get_server(name: &'static str, args: &[&str], root: &str) -> Option<Arc
             g.remove(name);
         }
     });
-
-    // server-to-client requests we ignore; answer them to keep some servers happy
-    // (handled implicitly: requests without a handler time out on the server side)
 
     let root_uri = path_to_uri(root);
     let init_result = request(
@@ -312,7 +300,6 @@ fn language_id(path: &str) -> &'static str {
     }
 }
 
-/// Ensure the document is open/updated in the server with the given text.
 async fn sync_doc(srv: &Server, uri: &str, path: &str, text: &str) {
     let was_open = {
         let mut open = srv.open_docs.lock().unwrap();
@@ -352,7 +339,6 @@ async fn sync_doc(srv: &Server, uri: &str, path: &str, text: &str) {
     }
 }
 
-/// Run diagnostics for a file after an edit. Returns None when nothing useful was collected.
 pub async fn diagnose(path: &str) -> Option<String> {
     if !enabled() {
         return None;
@@ -427,32 +413,23 @@ pub async fn diagnose(path: &str) -> Option<String> {
     ))
 }
 
-// --- navigation (hover / definition / references / symbols) ---
-
 const NAV_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_NAV_RESULTS: usize = 200;
-/// a freshly spawned server may not have analyzed the workspace yet: empty
-/// navigation answers are retried until either a result shows up, the server
-/// is considered warm, or this budget runs out
+
 const NAV_WARMUP: Duration = Duration::from_secs(10);
 const WARM_SERVER_AFTER: Duration = Duration::from_secs(90);
 
-/// `request()` resolves with the full JSON-RPC message; look at `result`
-/// when present, otherwise at the value itself (bare arrays/objects)
 fn nav_result_empty(v: &Value) -> bool {
     let r = v.get("result").unwrap_or(v);
     match r {
         Value::Null => true,
         Value::Array(a) => a.is_empty(),
-        // hover answers "no hover" as {"contents": null}
+
         Value::Object(o) => o.get("contents").map(Value::is_null).unwrap_or(false),
         _ => false,
     }
 }
 
-/// send a request; while the server is still cold, retry empty answers and
-/// "content modified" style errors (the server is still indexing); returns
-/// the bare `result` value
 async fn request_warm(
     srv: &Server,
     method: &str,
@@ -484,7 +461,6 @@ async fn request_warm(
     }
 }
 
-/// 0-based line, 0-based character in UTF-16 code units (the LSP wire format)
 fn to_lsp_position(text: &str, line1: u32, col1: u32) -> Value {
     let line1 = line1.max(1);
     let col1 = col1.max(1);
@@ -498,7 +474,6 @@ fn to_lsp_position(text: &str, line1: u32, col1: u32) -> Value {
     serde_json::json!({"line": line0, "character": units})
 }
 
-/// UTF-16 code units on a line -> 1-based character index (what the model passes)
 fn from_lsp_units(line_text: &str, units: i64) -> usize {
     let units = units.max(0) as u32;
     let mut seen = 0u32;
@@ -543,7 +518,6 @@ async fn prepare(path: &str) -> anyhow::Result<Prepared> {
     Ok(Prepared { srv, uri, text })
 }
 
-/// run a position-based LSP request and format the response as compact text
 async fn position_nav(
     path: &str,
     line: u32,
@@ -577,7 +551,6 @@ async fn position_nav(
     Ok(out)
 }
 
-/// project-relative display path when the file lives under `base`, else as-is
 fn display_path(abs: &str, base: &str) -> String {
     let p = std::path::Path::new(abs);
     let b = std::path::Path::new(base);
@@ -593,7 +566,6 @@ fn relative_root() -> String {
         .unwrap_or_default()
 }
 
-/// hover -> the rendered markup, or an empty string
 fn fmt_hover(v: &Value) -> String {
     let content = &v["contents"];
     let mut parts: Vec<String> = Vec::new();
@@ -632,9 +604,6 @@ fn hover_part(c: &Value) -> String {
     }
 }
 
-/// Location | Location[] | LocationLink[] | null -> "path:line:col" lines;
-/// the column is converted from UTF-16 units back to 1-based characters using
-/// the referenced file's text when it can be read
 fn fmt_locations(v: &Value, base: &str, cache: &mut HashMap<String, String>) -> Vec<String> {
     let mut out = Vec::new();
     let items: Vec<&Value> = match v {
@@ -647,7 +616,7 @@ fn fmt_locations(v: &Value, base: &str, cache: &mut HashMap<String, String>) -> 
         let Some(uri) = it["uri"].as_str().or_else(|| it["targetUri"].as_str()) else {
             continue;
         };
-        // LocationLink uses targetSelectionRange for what was actually pointed at
+
         let range = if it["targetSelectionRange"].is_object() {
             &it["targetSelectionRange"]
         } else {
@@ -717,7 +686,6 @@ fn symbol_kind(k: i64) -> &'static str {
         .unwrap_or("symbol")
 }
 
-/// DocumentSymbol[] (hierarchical) or SymbolInformation[] -> flat labeled lines
 fn fmt_symbols(v: &Value, base: &str, cache: &mut HashMap<String, String>) -> Vec<String> {
     let mut out = Vec::new();
     if let Some(items) = v.as_array() {
@@ -786,7 +754,6 @@ fn walk_symbol(s: &Value, depth: usize, out: &mut Vec<String>) {
     }
 }
 
-/// LSP hover for a 1-based line/column
 pub async fn hover(path: &str, line: u32, col: u32) -> anyhow::Result<String> {
     let p = prepare(path).await?;
     let params = serde_json::json!({
@@ -870,7 +837,7 @@ pub async fn workspace_symbols(query: &str) -> anyhow::Result<String> {
     }
     let root = std::env::current_dir().context("no working directory")?;
     let root_s = root.display().to_string();
-    // any language server can answer; prefer rust-analyzer when present
+
     let mut chosen: Option<(&'static str, Vec<&str>)> = None;
     for (name, _, args) in REGISTRY {
         if crate::fmt::find_on_path(name).is_some() {
@@ -899,9 +866,6 @@ pub async fn workspace_symbols(query: &str) -> anyhow::Result<String> {
     Ok(out)
 }
 
-// ---------- call hierarchy ----------
-
-/// incoming = "who calls this", outgoing = "what this calls"
 #[derive(Clone, Copy)]
 enum CallDir {
     Incoming,
@@ -915,7 +879,7 @@ impl CallDir {
             CallDir::Outgoing => "callHierarchy/outgoingCalls",
         }
     }
-    /// "from" (incoming) / "to" (outgoing) key on result entries
+
     fn item_key(self) -> &'static str {
         match self {
             CallDir::Incoming => "from",
@@ -930,7 +894,6 @@ impl CallDir {
     }
 }
 
-/// resolve the call-hierarchy item under the cursor
 async fn prepare_item(p: &Prepared, line: u32, col: u32) -> anyhow::Result<Option<Value>> {
     let params = json!({
         "textDocument": {"uri": p.uri},
@@ -946,7 +909,6 @@ async fn prepare_item(p: &Prepared, line: u32, col: u32) -> anyhow::Result<Optio
     Ok(res.as_array().and_then(|a| a.first().cloned()))
 }
 
-/// CallHierarchyItem -> "kind name path:line:col"
 fn fmt_call_item(item: &Value, base: &str, cache: &mut HashMap<String, String>) -> Option<String> {
     let name = item["name"].as_str()?;
     let kind = symbol_kind(item["kind"].as_i64().unwrap_or(0));
@@ -970,7 +932,6 @@ fn fmt_call_item(item: &Value, base: &str, cache: &mut HashMap<String, String>) 
     ))
 }
 
-/// call-site ranges (UTF-16 positions inside `uri`) -> one "  sites: ..." line
 fn fmt_call_sites(
     ranges: &Value,
     uri: &str,
@@ -1037,7 +998,7 @@ async fn call_hierarchy_dir(
             break;
         }
         lines.push(main);
-        // sites live in the caller's file (incoming) or in ours (outgoing)
+
         let sites_uri = match dir {
             CallDir::Incoming => c[key]["uri"].as_str().map(str::to_string),
             CallDir::Outgoing => Some(p.uri.clone()),
@@ -1120,14 +1081,13 @@ mod tests {
 
     #[test]
     fn position_conversion_roundtrip() {
-        // BMP unicode before the column still counts 1 UTF-16 unit per char
         let text = "日本語abc\ndef";
         let pos = to_lsp_position(text, 1, 4);
         assert_eq!(pos["line"], 0);
         assert_eq!(pos["character"], 3);
         let line = line_text_of(text, 0).unwrap();
         assert_eq!(from_lsp_units(&line, pos["character"].as_i64().unwrap()), 4);
-        // non-BMP chars (emoji) take 2 UTF-16 units each; col 6 points at 'x'
+
         let crab = "let 🦀x = 1;";
         let pos = to_lsp_position(crab, 1, 6);
         assert_eq!(
@@ -1136,15 +1096,15 @@ mod tests {
         );
         let line = line_text_of(crab, 0).unwrap();
         assert_eq!(from_lsp_units(&line, pos["character"].as_i64().unwrap()), 6);
-        // plain ascii
+
         let pos = to_lsp_position("hello\nworld", 2, 3);
         assert_eq!(pos["line"], 1);
         assert_eq!(pos["character"], 2);
-        // out-of-range line clamps to the last line
+
         let pos = to_lsp_position("one\ntwo", 99, 1);
         assert_eq!(pos["line"], 1);
         assert_eq!(pos["character"], 0);
-        // 1-based always: line 0 / col 0 behave as 1/1
+
         let pos = to_lsp_position("hello", 0, 0);
         assert_eq!(pos["line"], 0);
         assert_eq!(pos["character"], 0);
@@ -1171,13 +1131,10 @@ mod tests {
         let base = dir.display().to_string();
         let mut cache = HashMap::new();
 
-        // single Location
         let one = serde_json::json!({"uri": path_to_uri(&f.display().to_string()), "range": {"start": {"line": 0, "character": 3}}});
         let lines = fmt_locations(&one, &base, &mut cache);
         assert_eq!(lines, vec!["t.rs:1:4"]);
 
-        // LocationLink (targetSelectionRange wins) + array + dedup + null;
-        // the crab emoji takes 2 UTF-16 units: unit offset 6 lands on char 6
         let link = serde_json::json!({"targetUri": path_to_uri(&f.display().to_string()), "targetSelectionRange": {"start": {"line": 1, "character": 6}}, "targetRange": {"start": {"line": 1, "character": 0}}});
         let lines = fmt_locations(&serde_json::json!([link, one, one]), &base, &mut cache);
         assert_eq!(lines, vec!["t.rs:2:6", "t.rs:1:4"]);
@@ -1210,7 +1167,7 @@ mod tests {
         ]);
         let lines = fmt_symbols(&flat, &base, &mut cache);
         assert_eq!(lines[0], "function go t.rs:2:4");
-        // line 9 does not exist -> no conversion, raw units+1
+
         assert_eq!(lines[1], "variable go::Д t.rs:10:7");
 
         assert!(fmt_symbols(&serde_json::json!(null), &base, &mut cache).is_empty());
@@ -1244,10 +1201,9 @@ mod tests {
         });
         let s = fmt_call_item(&item, &base, &mut cache).unwrap();
         assert!(s.starts_with("function beta "), "{s}");
-        assert!(s.ends_with(":2:4"), "{s}"); // UTF-16 units 3 -> char 4
+        assert!(s.ends_with(":2:4"), "{s}");
         assert!(!s.contains('\u{1f980}'), "{s}");
 
-        // missing name / uri -> None, no panic
         assert!(fmt_call_item(&json!({"kind": 12}), &base, &mut cache).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1269,20 +1225,16 @@ mod tests {
         assert!(s.contains("sites: "), "{s}");
         assert!(s.contains(":2:13") && s.contains(":2:19"), "{s}");
 
-        // more than 6 sites -> "+N more" tail
         let many: Vec<Value> = (0..9)
             .map(|i| json!({"start": {"line": 1, "character": i * 2}, "end": {"line": 1, "character": i * 2}}))
             .collect();
         let s2 = fmt_call_sites(&json!(many), &path_to_uri(&abs), &base, &mut cache).unwrap();
         assert!(s2.contains("+3 more"), "{s2}");
 
-        // empty ranges -> None
         assert!(fmt_call_sites(&json!([]), &path_to_uri(&abs), &base, &mut cache).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// end-to-end navigation against the real workspace; skipped silently
-    /// when rust-analyzer is not installed
     #[tokio::test]
     async fn nav_smoke_with_rust_analyzer() {
         if crate::fmt::find_on_path("rust-analyzer").is_none() {
@@ -1293,12 +1245,9 @@ mod tests {
         let app = repo.join("src").join("app.rs");
         let snap = repo.join("src").join("snapshot.rs");
 
-        // locate `crate::snapshot::begin_turn();` in app.rs and point at the
-        // function name (a module-path segment may not resolve)
         let app_text = std::fs::read_to_string(&app).unwrap();
         let (line, col) = find(&app_text, "begin_turn();").expect("call site");
         let Ok(def) = definition(&app.display().to_string(), line, col).await else {
-            // the PATH probe may hit a rustup shim without the component
             eprintln!("rust-analyzer failed to start, skipping");
             return;
         };
@@ -1312,7 +1261,6 @@ mod tests {
         eprintln!("hover -> {hover_text}");
         assert!(hover_text.contains("fn begin_turn"), "{hover_text}");
 
-        // references from the definition site in snapshot.rs (line 25, col 13)
         let refs = references(&snap.display().to_string(), 25, 13, false)
             .await
             .unwrap();
@@ -1323,7 +1271,6 @@ mod tests {
         eprintln!("document_symbols -> {syms}");
         assert!(syms.contains("function begin_turn"), "{syms}");
 
-        // call hierarchy on the same site (snapshot.rs:25:13 = begin_turn)
         let prep = prepare_call_hierarchy(&snap.display().to_string(), 25, 13)
             .await
             .unwrap();
@@ -1346,7 +1293,6 @@ mod tests {
         );
     }
 
-    /// 1-based line/column of the first occurrence of `needle`
     fn find(text: &str, needle: &str) -> Option<(u32, u32)> {
         let idx = text.find(needle)?;
         let line = text[..idx].matches('\n').count() + 1;

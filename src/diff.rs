@@ -1,5 +1,5 @@
 pub struct Row {
-    pub tag: u8, // 0 ctx, 1 add, 2 del
+    pub tag: u8,
     pub text: String,
 }
 

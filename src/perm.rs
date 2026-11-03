@@ -23,8 +23,7 @@ pub struct PermCfg {
     pub write_file: Option<String>,
     #[serde(default)]
     pub bash: Option<String>,
-    /// bash inside an attached VM sandbox (routed over ssh) — separate from
-    /// the host `bash` permission so the sandbox can be loosened alone
+
     #[serde(default)]
     pub sandbox: Option<String>,
     #[serde(default)]
@@ -49,7 +48,7 @@ impl PermCfg {
         if let Some(p) = self.rules_perm(&key, &subject) {
             return p;
         }
-        // builtin protections: explicit user rules above can override these
+
         if matches!(
             key.as_str(),
             "read_file" | "list_files" | "glob" | "grep" | "edit" | "write_file"
@@ -57,21 +56,17 @@ impl PermCfg {
             if key == "read_file" && env_protected(&subject) {
                 return Perm::Ask;
             }
-            // our own spilled tool outputs are always readable: they live
-            // outside the project by design and exist to be read back
+
             if key == "read_file"
                 && crate::tools::truncation_dir()
                     .map(|d| crate::tools::path_in_dir(&d, &subject))
                     .unwrap_or(false)
             {
-                // fall through to the configured/default permission
             } else if external_dir(&subject).is_some() {
                 return Perm::Ask;
             }
         }
-        // an external bash workdir is the same escape as an external file path
-        // ("sandbox" is exempt: the command runs inside the VM, where host
-        // paths do not exist and a workdir arg is ignored anyway)
+
         if key == "bash" {
             let v: serde_json::Value =
                 serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
@@ -103,8 +98,6 @@ impl PermCfg {
         }
     }
 
-    /// apply_patch touches every path of the patch at once: user rules are
-    /// matched against the first path, builtin protections scan all of them
     fn check_patch(&self, args: &str) -> Perm {
         let v: serde_json::Value = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
         let paths = v["patch"]
@@ -184,7 +177,6 @@ fn default_perm(key: &str) -> Perm {
     }
 }
 
-/// secrets files (.env, .env.local, prod.env, ...); examples stay readable
 fn env_protected(path: &str) -> bool {
     let name = std::path::Path::new(path.trim())
         .file_name()
@@ -199,10 +191,6 @@ fn env_protected(path: &str) -> bool {
     name == ".env" || name.starts_with(".env.") || name.ends_with(".env")
 }
 
-/// returns Some(resolved path) when the target lies outside the working
-/// directory; both sides are canonicalized, otherwise the Windows extended
-/// path prefix (\\?\C:\...) never matches the plain cwd and every internal
-/// path would look external
 fn external_dir(path: &str) -> Option<String> {
     let p = path.trim();
     if p.is_empty() {
@@ -231,8 +219,6 @@ fn external_dir(path: &str) -> Option<String> {
     }
 }
 
-/// lexical absolute path: no fs access, no symlink resolution — used for
-/// rule patterns so they match the raw path spelling of later tool calls
 fn lexical_abs(p: &str) -> std::path::PathBuf {
     let path = std::path::Path::new(p.trim());
     if path.is_absolute() {
@@ -242,9 +228,6 @@ fn lexical_abs(p: &str) -> std::path::PathBuf {
     }
 }
 
-/// the directory a rule for `path` should grant: the file's parent for
-/// external targets (access to that directory, not a global extension
-/// wildcard), nothing special for internal ones
 fn dir_pattern(path: &str) -> Option<String> {
     if external_dir(path).is_none() {
         return None;
@@ -265,9 +248,6 @@ fn parse(s: &str) -> Perm {
     }
 }
 
-/// build an allow-rule to persist when the user answers "always allow";
-/// bash -> "<first words> *", internal files -> "*.<ext>", external paths ->
-/// "<directory>/**" (scoped to the granted directory), urls -> "scheme://host/*"
 pub fn derive_rule(tool: &str, args: &str) -> Option<PermRule> {
     let v: serde_json::Value = serde_json::from_str(args).unwrap_or(serde_json::Value::Null);
     let (key, pattern) = match tool {
@@ -282,8 +262,6 @@ pub fn derive_rule(tool: &str, args: &str) -> Option<PermRule> {
         "edit" | "write_file" | "read_file" | "list_files" | "glob" | "grep" => {
             let path = v["path"].as_str().unwrap_or("");
             if let Some(dir) = dir_pattern(path) {
-                // external path: grant the containing directory instead of a
-                // global extension or catch-all wildcard
                 (tool.to_string(), dir)
             } else if matches!(tool, "edit" | "write_file") {
                 let ext = std::path::Path::new(path)
@@ -306,7 +284,6 @@ pub fn derive_rule(tool: &str, args: &str) -> Option<PermRule> {
                 .cloned()
                 .unwrap_or_default();
             if let Some(dir) = dir_pattern(&path) {
-                // external path: grant the containing directory
                 ("apply_patch".to_string(), dir)
             } else {
                 let ext = std::path::Path::new(&path)
@@ -346,7 +323,6 @@ pub fn derive_rule(tool: &str, args: &str) -> Option<PermRule> {
     })
 }
 
-/// wildcard match: * = any run, ? = any single char
 pub fn wc(pattern: &str, text: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let t: Vec<char> = text.chars().collect();
@@ -399,8 +375,6 @@ mod tests {
 
     #[test]
     fn sandbox_bash_perm_is_independent() {
-        // "sandbox" (bash routed into an attached VM) has its own permission,
-        // independent of the host bash rule; default is ask
         let mut sbx = PermCfg::default();
         sbx.bash = Some("allow".into());
         assert_eq!(sbx.check("sandbox", r#"{"command":"ls"}"#), Perm::Ask);
@@ -416,7 +390,7 @@ mod tests {
             Perm::Allow
         );
         assert_eq!(loose_vm.check("bash", r#"{"command":"ls"}"#), Perm::Ask);
-        // "always allow" on a routed bash call persists a sandbox rule
+
         let r = derive_rule("sandbox", r#"{"command":"git push origin main"}"#).unwrap();
         assert_eq!(r.tool, "sandbox");
         assert_eq!(r.pattern.as_deref(), Some("git push *"));
@@ -561,7 +535,6 @@ mod tests {
             Perm::Allow
         );
 
-        // an explicit user rule overrides the builtin
         let allow_env = PermCfg {
             rules: vec![PermRule {
                 tool: "read_file".into(),
@@ -575,7 +548,6 @@ mod tests {
             Perm::Allow
         );
 
-        // outside the working directory -> ask, even for allowed tools
         let ext = std::env::temp_dir().join("hi-derola-perm-test.txt");
         let ext_json = format!(r#"{{"path":"{}"}}"#, ext.display());
         assert_eq!(cfg.check("read_file", &ext_json), Perm::Ask);
@@ -586,12 +558,12 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(allowed_edit.check("edit", &edit_json), Perm::Ask);
-        // internal paths stay allowed
+
         assert_eq!(
             allowed_edit.check("edit", r#"{"path":"src/lib.rs"}"#),
             Perm::Allow
         );
-        // relative reads stay internal
+
         assert_eq!(cfg.check("list_files", r#"{"path":"."}"#), Perm::Allow);
     }
 
@@ -612,7 +584,7 @@ mod tests {
             .trim()
             .to_string();
         let cfg = PermCfg::default();
-        // reading our own spilled output needs no approval, editing it does
+
         assert_eq!(
             cfg.check("read_file", &format!(r#"{{"path":"{path}"}}"#)),
             Perm::Allow
@@ -621,7 +593,7 @@ mod tests {
             cfg.check("edit", &format!(r#"{{"path":"{path}"}}"#)),
             Perm::Ask
         );
-        // a deny rule from the user still wins
+
         let deny = PermCfg {
             rules: vec![PermRule {
                 tool: "read_file".into(),
@@ -642,7 +614,6 @@ mod tests {
     fn external_dir_scoping_and_bash_workdir() {
         let tmp = std::env::temp_dir();
 
-        // external bash workdir asks even when bash itself is allowed
         let allow_bash = PermCfg {
             bash: Some("allow".into()),
             ..Default::default()
@@ -653,11 +624,9 @@ mod tests {
             allow_bash.check("bash", r#"{"command":"ls","workdir":"."}"#),
             Perm::Allow
         );
-        // no workdir at all keeps the configured permission
+
         assert_eq!(allow_bash.check("bash", r#"{"command":"ls"}"#), Perm::Allow);
 
-        // always-allow on an external file grants that directory, not a
-        // global extension wildcard
         let a = tmp.join("hi-derola-scope-a.txt");
         let r = derive_rule("edit", &format!(r#"{{"path":"{}"}}"#, a.display())).unwrap();
         assert_ne!(r.pattern.as_deref(), Some("*.txt"), "{:?}", r.pattern);
@@ -670,16 +639,15 @@ mod tests {
             rules: vec![r],
             ..Default::default()
         };
-        // a sibling file in the same external directory is covered
+
         let b = tmp.join("hi-derola-scope-b.txt");
         assert_eq!(
             cfg.check("edit", &format!(r#"{{"path":"{}"}}"#, b.display())),
             Perm::Allow
         );
-        // files outside that directory are not
+
         assert_eq!(cfg.check("edit", r#"{"path":"src/x.rs"}"#), Perm::Ask);
 
-        // external read_file gets a directory rule too, internal stays "*"
         let r = derive_rule("read_file", &format!(r#"{{"path":"{}"}}"#, a.display())).unwrap();
         assert!(
             r.pattern.as_deref().unwrap_or("").ends_with("/**"),
@@ -689,7 +657,6 @@ mod tests {
         let r = derive_rule("read_file", r#"{"path":"src/main.rs"}"#).unwrap();
         assert_eq!(r.pattern.as_deref(), Some("*"));
 
-        // apply_patch: the first external path scopes the rule
         let patch = format!(
             "*** Begin Patch\n*** Update File: {}\n@@\n-x\n+y\n",
             a.display()

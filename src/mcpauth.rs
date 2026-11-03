@@ -53,11 +53,10 @@ pub struct Entry {
     pub server_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_endpoint: Option<String>,
-    /// redirect_uri pinned when the flow started so the exchange matches
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect_uri: Option<String>,
-    /// RFC 8707 resource indicator pinned at flow start; rides the authorize
-    /// url, the token exchange and every refresh
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
 }
@@ -76,8 +75,6 @@ fn now_secs() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
-
-// ---- store: <data>/hi-derola/mcp-auth.json ----
 
 pub fn set_store_file(p: Option<PathBuf>) {
     *STORE_OVERRIDE.lock().unwrap() = p;
@@ -108,6 +105,7 @@ fn save_all(map: &BTreeMap<String, Entry>) -> Result<()> {
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p)?;
     }
+    let tmp = path.with_extension("json.tmp");
     let mut f = std::fs::OpenOptions::new();
     f.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -115,8 +113,10 @@ fn save_all(map: &BTreeMap<String, Entry>) -> Result<()> {
         use std::os::unix::fs::OpenOptionsExt;
         f.mode(0o600);
     }
-    let mut file = f.open(&path)?;
+    let mut file = f.open(&tmp)?;
     file.write_all(serde_json::to_string_pretty(map)?.as_bytes())?;
+    drop(file);
+    std::fs::rename(&tmp, &path)?;
     Ok(())
 }
 
@@ -148,9 +148,6 @@ pub fn remove(name: &str) {
     let _ = save_all(&all);
 }
 
-/// drop the stored tokens for one server (client_info and a pending pkce
-/// flow stay); returns true when there were tokens to clear — the next
-/// request hits 401 and the normal authorize flow starts over
 pub fn logout(name: &str) -> bool {
     let had = get(name).map(|e| e.tokens.is_some()).unwrap_or(false);
     if had {
@@ -163,8 +160,6 @@ pub fn is_expired(name: &str) -> Option<bool> {
     let t = get(name)?.tokens?;
     Some(t.expires_at.map(|e| e < now_secs()).unwrap_or(false))
 }
-
-// ---- pkce / state ----
 
 fn rand_bytes(n: usize) -> Vec<u8> {
     let mut b = vec![0u8; n];
@@ -184,8 +179,6 @@ pub fn pkce_pair() -> (String, String) {
 pub fn gen_state() -> String {
     rand_bytes(16).iter().map(|b| format!("{b:02x}")).collect()
 }
-
-// ---- urls ----
 
 pub fn parse_redirect(uri: Option<&str>) -> (u16, String) {
     let Some(u) = uri.and_then(|s| Url::parse(s).ok()) else {
@@ -254,8 +247,6 @@ fn extract_resource_metadata(www_auth: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-// ---- discovery ----
-
 async fn get_json(http: &Client, url: &str) -> Result<Value> {
     let resp = http
         .get(url)
@@ -297,9 +288,6 @@ async fn discover(
     server_url: &str,
     oauth: Option<&McpOAuthCfg>,
 ) -> Result<AuthEndpoints> {
-    // a pinned authorization server metadata url skips every RFC 9728 probe
-    // (no 401 initialize, no protected-resource fetch); the resource is
-    // pinned to the mcp server url itself
     if let Some(pinned) = oauth.and_then(|o| o.auth_server_metadata_url.as_deref()) {
         let meta = get_json(http, pinned).await?;
         let (authorization_endpoint, token_endpoint, registration_endpoint, scope) =
@@ -315,7 +303,6 @@ async fn discover(
 
     let mut resource_meta: Option<Value> = None;
 
-    // probe: unauthenticated initialize -> 401 + WWW-Authenticate
     let probe = json!({
         "jsonrpc": "2.0", "id": 0, "method": "initialize",
         "params": {
@@ -385,7 +372,6 @@ async fn discover(
     })
 }
 
-/// the four fields we care about from an authorization server metadata doc
 fn endpoints_from_meta(meta: &Value) -> Result<(String, String, Option<String>, Option<String>)> {
     let scopes = meta["scopes_supported"]
         .as_array()
@@ -410,8 +396,6 @@ fn endpoints_from_meta(meta: &Value) -> Result<(String, String, Option<String>, 
     ))
 }
 
-// ---- registration / tokens ----
-
 async fn register_client(
     http: &Client,
     ep: &str,
@@ -419,7 +403,6 @@ async fn register_client(
     secret: bool,
     scope: Option<&str>,
 ) -> Result<ClientInfo> {
-    // RFC 7591 client metadata document
     let mut body = json!({
         "client_name": "Hi!Derola",
         "client_uri": "https://github.com/mel0k1/hi-derola",
@@ -516,8 +499,6 @@ pub fn build_auth_url(
     }
     Ok(u.to_string())
 }
-
-// ---- callback server + browser ----
 
 fn respond(stream: &mut std::net::TcpStream, status: &str, html: &str) {
     let body = format!(
@@ -637,15 +618,17 @@ pub fn open_browser(url: &str) -> Result<()> {
         c.arg(url);
         c
     };
-    cmd.stdin(std::process::Stdio::null())
+    let mut child = cmd
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .context("failed to open browser")?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
     Ok(())
 }
-
-// ---- bearer for the transport ----
 
 fn client_id_for(name: &str, oauth: Option<&McpOAuthCfg>) -> Option<String> {
     if let Some(o) = oauth {
@@ -681,7 +664,7 @@ async fn do_refresh(
         Some(e) => e,
         None => discover(http, server_url, oauth).await?.token_endpoint,
     };
-    // the resource indicator pinned at flow start must ride every refresh
+
     let resource = get(name).and_then(|e| e.resource);
     let mut form: Vec<(&str, &str)> = vec![
         ("grant_type", "refresh_token"),
@@ -712,8 +695,15 @@ async fn do_refresh(
             Ok(access)
         }
         Err(e) => {
-            mutate(name, Some(server_url), |e| e.tokens = None).ok();
-            bail!("mcp {name}: refresh failed ({e:#}) — run /mcpauth {name}")
+            let msg = format!("{e:#}");
+            let auth_failed = msg.contains("invalid_grant")
+                || msg.contains("unauthorized_client")
+                || msg.contains("token endpoint: 400")
+                || msg.contains("token endpoint: 401");
+            if auth_failed {
+                mutate(name, Some(server_url), |e| e.tokens = None).ok();
+            }
+            bail!("mcp {name}: refresh failed ({msg}) — run /mcpauth {name}")
         }
     }
 }
@@ -747,20 +737,13 @@ pub async fn bearer(
     }
 }
 
-// ---- interactive flow ----
-
-/// everything the caller needs between the two oauth phases
 pub struct AuthStart {
     pub url: String,
     pub state: String,
-    /// (port, path) of the local callback server
+
     pub callback: (u16, String),
 }
 
-/// phase 1: discover endpoints, register the client, persist the pkce pair
-/// (code_verifier + oauth_state + token_endpoint + redirect_uri) and return
-/// the authorization url. the flow is resumable from here at any time —
-/// even after a restart, the verifier lives in the auth store
 pub async fn start_auth(name: &str, cfgs: &[McpConfig]) -> Result<AuthStart> {
     let cfg = cfgs
         .iter()
@@ -838,9 +821,6 @@ pub async fn start_auth(name: &str, cfgs: &[McpConfig]) -> Result<AuthStart> {
     })
 }
 
-/// phase 2: exchange an authorization code (from the local callback server
-/// or pasted manually as /mcpauth <name> <code>) using the persisted pkce
-/// pair; clears the pending flow on success
 pub async fn finish_auth(name: &str, cfgs: &[McpConfig], code: &str) -> Result<String> {
     let code = code.trim();
     if code.is_empty() {
@@ -880,8 +860,7 @@ pub async fn finish_auth(name: &str, cfgs: &[McpConfig], code: &str) -> Result<S
             .as_ref()
             .and_then(|c| c.client_secret.clone())
     });
-    // RFC 8707: the same resource indicator pinned at flow start rides the
-    // token exchange
+
     let resource = entry.resource.clone();
 
     let http = Client::builder().user_agent("hi-derola").build()?;
@@ -914,9 +893,6 @@ pub async fn finish_auth(name: &str, cfgs: &[McpConfig], code: &str) -> Result<S
     Ok(format!("mcp {name}: authorized{scope_note}"))
 }
 
-/// one-shot browser flow: start_auth, open the browser, wait for the local
-/// callback, then finish_auth. every failure carries the url and the manual
-/// resume hint — the verifier is already persisted
 pub async fn authorize_flow(name: &str, cfgs: &[McpConfig]) -> Result<String> {
     let start = start_auth(name, cfgs).await?;
     if open_browser(&start.url).is_err() {
@@ -958,8 +934,6 @@ pub fn status_line(cfg: &McpConfig) -> String {
 mod tests {
     use super::*;
 
-    /// set_store_file is a process-global override: store tests take this
-    /// lock so parallel test threads do not race on it
     static STORE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn free_port() -> u16 {
@@ -969,8 +943,6 @@ mod tests {
         port
     }
 
-    // routes: path -> (status, extra headers, body); captures "METHOD path :: body" per request
-    // routes(port) is built after bind, so test urls can reference the real port
     fn spawn_fake_http(
         routes: impl FnOnce(u16) -> BTreeMap<String, (u16, String, String)>,
     ) -> (u16, std::sync::Arc<Mutex<Vec<String>>>) {
@@ -1064,7 +1036,7 @@ mod tests {
         ] {
             assert!(u.contains(part), "missing {part} in {u}");
         }
-        // empty scope omitted
+
         let u2 = build_auth_url("https://a/e", "c", "http://x/cb", None, "s", "ch", None).unwrap();
         assert!(!u2.contains("scope"));
     }
@@ -1122,7 +1094,6 @@ mod tests {
         assert!(resp.contains("200 OK"), "got: {resp}");
         assert_eq!(h.join().unwrap().unwrap(), "abc+d");
 
-        // wrong state -> rejected
         let port2 = free_port();
         let h2 = std::thread::spawn(move || {
             wait_for_callback(port2, "/cb", "good", Duration::from_secs(10))
@@ -1136,7 +1107,6 @@ mod tests {
         assert!(resp2.contains("400 Bad Request"), "got: {resp2}");
         assert!(h2.join().unwrap().is_err());
 
-        // error param -> rejected with description
         let port3 = free_port();
         let h3 = std::thread::spawn(move || {
             wait_for_callback(port3, "/cb", "st", Duration::from_secs(10))
@@ -1217,7 +1187,7 @@ mod tests {
         assert_eq!(ep.registration_endpoint, Some(format!("{base}/register")));
         assert_eq!(ep.scope.as_deref(), Some("read write"));
         assert_eq!(ep.resource.as_deref(), Some(format!("{base}/mcp").as_str()));
-        // probe POST /mcp really happened
+
         assert!(log
             .lock()
             .unwrap()
@@ -1282,8 +1252,6 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         set_store_file(Some(dir.join("mcp-auth.json")));
 
-        // pinned metadata: endpoints come straight from the configured url,
-        // no 401 probe and no well-known fetches happen
         let (_p, log) = spawn_fake_http(|port| {
             let base = format!("http://127.0.0.1:{port}");
             let mut routes = BTreeMap::new();
@@ -1337,7 +1305,7 @@ mod tests {
         assert_eq!(ep.authorization_endpoint, format!("{base}/as/authorize"));
         assert_eq!(ep.token_endpoint, format!("{base}/as/token"));
         assert_eq!(ep.scope.as_deref(), Some("read write"));
-        // the resource pins to the mcp server url
+
         assert_eq!(ep.resource.as_deref(), Some(format!("{base}/mcp").as_str()));
         let reqs = log.lock().unwrap();
         assert!(
@@ -1350,7 +1318,6 @@ mod tests {
         );
         drop(reqs);
 
-        // RFC 8707: a stored resource indicator rides every refresh
         mutate("t", Some(&format!("{base}/mcp")), |e| {
             e.tokens = Some(Tokens {
                 access_token: "old".into(),
@@ -1490,7 +1457,6 @@ mod tests {
             assert!(body.contains(part), "{part} missing in {body}");
         }
 
-        // refresh keeps old refresh token when response omits it
         let tokens = tokens_from_json(&json!({"access_token": "at2", "expires_in": 60})).unwrap();
         assert_eq!(tokens.access_token, "at2");
         assert_eq!(tokens.refresh_token, None);
@@ -1534,7 +1500,6 @@ mod tests {
         assert_eq!(is_expired("srv"), Some(true));
         assert_eq!(is_expired("ghost"), None);
 
-        // reload from disk survives (fresh read)
         let loaded = load_all();
         assert_eq!(loaded["srv"].client_info.as_ref().unwrap().client_id, "cid");
 
@@ -1689,8 +1654,6 @@ mod tests {
             .build()
             .unwrap();
 
-        // phase 1: start the flow — the pkce pair, token endpoint and
-        // redirect persist, so the flow is resumable after a restart
         let start = rt.block_on(start_auth("srv", &cfgs)).unwrap();
         let entry = get("srv").unwrap();
         assert!(entry.code_verifier.is_some(), "verifier persisted");
@@ -1706,8 +1669,6 @@ mod tests {
         assert!(start.url.contains("client_id=dyn-cid"), "{}", start.url);
         assert!(start.url.contains(&format!("state={}", start.state)));
 
-        // phase 2 (simulated restart + pasted code): the persisted verifier
-        // completes the exchange
         let msg = rt
             .block_on(finish_auth("srv", &cfgs, " manual-code "))
             .unwrap();
@@ -1733,7 +1694,6 @@ mod tests {
             assert!(body.contains(part), "{part} missing in {body}");
         }
 
-        // no pending flow anymore -> a second resume fails cleanly
         let err = rt
             .block_on(finish_auth("srv", &cfgs, "again"))
             .unwrap_err()

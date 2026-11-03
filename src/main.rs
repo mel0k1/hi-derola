@@ -3,7 +3,7 @@ use hi_derola::{app, config, fmt, lsp, provider, tools};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    // headless subcommands that must not require a config/api key
+
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("hi-derola {}", hi_derola::update::current_version());
         return Ok(());

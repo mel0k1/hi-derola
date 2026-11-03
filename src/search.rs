@@ -114,7 +114,7 @@ fn match_chars(p: &[char], n: &[char]) -> bool {
             let Some(&c) = n.first() else {
                 return false;
             };
-            let hit = p[i..k].contains(&c);
+            let hit = class_match(&p[i..k], c);
             if hit != neg {
                 match_chars(&p[k + 1..], &n[1..])
             } else {
@@ -123,6 +123,24 @@ fn match_chars(p: &[char], n: &[char]) -> bool {
         }
         Some(&c) => !n.is_empty() && n[0] == c && match_chars(&p[1..], &n[1..]),
     }
+}
+
+fn class_match(set: &[char], c: char) -> bool {
+    let mut i = 0;
+    while i < set.len() {
+        if i + 2 < set.len() && set[i + 1] == '-' && set[i + 2] != ']' {
+            if set[i] <= c && c <= set[i + 2] {
+                return true;
+            }
+            i += 3;
+        } else {
+            if set[i] == c {
+                return true;
+            }
+            i += 1;
+        }
+    }
+    false
 }
 
 pub struct GrepHit {

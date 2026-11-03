@@ -40,8 +40,6 @@ mod winjob;
 
 const MAX_AGENTS_MD: usize = 16 * 1024;
 
-/// AGENTS.md/CLAUDE.md discovered in the directory chain of a read file
-/// (up to the working directory), injected once per file per session
 pub fn instructions_for_file(path: &str) -> Option<(String, String)> {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
@@ -56,7 +54,6 @@ pub fn instructions_for_file(path: &str) -> Option<(String, String)> {
     };
     let mut dir = abs.parent()?.to_path_buf();
     for _ in 0..6 {
-        // strictly below the working directory: cwd-level AGENTS.md is already in the system prompt
         if !dir.starts_with(&cwd) || dir == cwd {
             break;
         }
@@ -95,21 +92,19 @@ pub fn agents_md() -> String {
     agents_md_in(&cwd)
 }
 
-/// days since the unix epoch -> (year, month, day); Howard Hinnant's civil_from_days
 pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
-    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32; // [1, 12]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// today's date as YYYY-MM-DD (UTC)
 pub fn today_iso() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -119,8 +114,6 @@ pub fn today_iso() -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-/// true if base or any of its ancestors contains a .git entry
-/// (a repository directory or a worktree file)
 pub fn is_git_repo_in(base: &std::path::Path) -> bool {
     let mut dir = Some(base.to_path_buf());
     for _ in 0..32 {
@@ -133,8 +126,6 @@ pub fn is_git_repo_in(base: &std::path::Path) -> bool {
     false
 }
 
-/// the shared system prompt for both frontends; venue is
-/// "in the user's terminal" (TUI) or "on the user's machine" (GUI)
 pub fn base_prompt_in(base: &std::path::Path, venue: &str, model: &str) -> String {
     let repo = if is_git_repo_in(base) { "yes" } else { "no" };
     let mut system = format!(
@@ -173,8 +164,6 @@ pub fn base_prompt(venue: &str, model: &str) -> String {
     base_prompt_in(&cwd, venue, model)
 }
 
-/// which tuned prompt variant applies to this model id (same families as
-/// opencode: beast/gpt/codex/gemini/anthropic/kimi, else default)
 pub fn prompt_family(model: &str) -> &'static str {
     let m = model.to_lowercase();
     if m.contains("gpt-4") || m.contains("o1") || m.contains("o3") {
@@ -194,8 +183,6 @@ pub fn prompt_family(model: &str) -> &'static str {
     }
 }
 
-/// per-family behavior addendum appended to the system prompt; the exact
-/// emphases follow what each model family tends to get wrong
 pub fn family_addendum(model: &str) -> &'static str {
     match prompt_family(model) {
         "beast" => {
@@ -300,10 +287,10 @@ mod tests {
     #[test]
     fn civil_date_anchors() {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
-        // 1970 is not a leap year: day 59 is Mar 1, day 60 is Mar 2
+
         assert_eq!(civil_from_days(59), (1970, 3, 1));
         assert_eq!(civil_from_days(60), (1970, 3, 2));
-        // 2000 IS a leap year: Feb 29 exists
+
         assert_eq!(civil_from_days(11_016), (2000, 2, 29));
         assert_eq!(civil_from_days(20_454), (2026, 1, 1));
         assert_eq!(civil_from_days(20_729), (2026, 10, 3));
@@ -326,7 +313,7 @@ mod tests {
         assert!(p.contains("Today's date: 2"));
         assert!(p.contains("<env>"));
         assert!(!p.contains("Project instructions"));
-        // a worktree-style .git file counts as a repo too
+
         std::fs::write(dir.join(".git"), "gitdir: /elsewhere\n").unwrap();
         assert!(is_git_repo_in(&dir));
         let p = base_prompt_in(&dir, "on the user's machine", "deepseek-chat");

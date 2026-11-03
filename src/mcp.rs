@@ -21,11 +21,8 @@ const EXECUTION_TIMEOUT: Duration = Duration::from_secs(3600);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_SAMPLING_TOKENS: u32 = 4096;
 
-/// newest protocol revision this client speaks (the 2026-07-28 bundle:
-/// url-mode elicitation, deprecated roots, explicit version negotiation)
 pub const LATEST_PROTOCOL_VERSION: &str = "2026-07-28";
-/// every revision the client can negotiate (versions are release dates, so
-/// lexicographic order = chronological order)
+
 const KNOWN_PROTOCOL_VERSIONS: [&str; 5] = [
     "2024-11-05",
     "2025-03-26",
@@ -34,18 +31,11 @@ const KNOWN_PROTOCOL_VERSIONS: [&str; 5] = [
     "2026-07-28",
 ];
 
-/// how the initialize handshake picks the protocolVersion it offers
 enum ProtoMode {
-    /// classic per-transport handshake (2024-11-05 stdio / 2025-03-26 http),
-    /// roots capability advertised, the server's answer trusted as-is —
-    /// today's behavior and the default
     Legacy,
-    /// offer the newest known revision (2026-07-28), drop the deprecated
-    /// roots capability, validate the server's answer against the known list
+
     Auto,
-    /// offer exactly this version; the roots capability is dropped when the
-    /// pin is 2026-07-28 or newer (roots are deprecated there); the answer
-    /// must match the pin or land in the known list
+
     Pin(String),
 }
 
@@ -62,8 +52,6 @@ fn proto_mode(cfg: &McpConfig) -> ProtoMode {
     }
 }
 
-/// the version string offered in the initialize request for one transport
-/// ("http" covers streamable and the legacy sse fallback)
 fn requested_version(mode: &ProtoMode, transport: &str) -> String {
     match mode {
         ProtoMode::Legacy => match transport {
@@ -75,10 +63,6 @@ fn requested_version(mode: &ProtoMode, transport: &str) -> String {
     }
 }
 
-/// roots are deprecated in the 2026-07-28 revision: the capability is not
-/// advertised when the offered protocol speaks that revision or newer
-/// (lexicographic compare works because versions are YYYY-MM-DD dates);
-/// roots/list requests are still answered for back-compat
 fn roots_advertised(mode: &ProtoMode) -> bool {
     match mode {
         ProtoMode::Legacy => true,
@@ -87,9 +71,6 @@ fn roots_advertised(mode: &ProtoMode) -> bool {
     }
 }
 
-/// validate the server's initialize answer and return the negotiated
-/// version: legacy trusts the answer unchanged (old servers may omit or
-/// bend the field), auto/pin require a known revision (or the exact pin)
 fn negotiated_version(mode: &ProtoMode, requested: &str, reply: &Value) -> Result<String> {
     let got = reply["protocolVersion"].as_str().unwrap_or("").trim();
     match mode {
@@ -123,10 +104,8 @@ fn negotiated_version(mode: &ProtoMode, requested: &str, reply: &Value) -> Resul
     }
 }
 
-/// hard cap on one jsonrpc frame / http body — a runaway server must not
-/// balloon client memory
 const FRAME_CAP: usize = 16 * 1024 * 1024;
-/// stderr kept for crash diagnostics
+
 const STDERR_TAIL_CHARS: usize = 1000;
 
 struct McpTool {
@@ -142,8 +121,6 @@ struct McpResource {
     mime: Option<String>,
 }
 
-/// a resource template: a uri scheme with placeholders the caller fills in
-/// (resources/templates/list)
 struct McpTemplate {
     uri_template: String,
     name: String,
@@ -168,10 +145,6 @@ fn has_cap(caps: &Value, key: &str) -> bool {
     c.is_object() || c.as_bool() == Some(true)
 }
 
-/// a tool schema the providers can work with: some servers ship a null or
-/// non-object inputSchema (and outputSchema with unresolvable $refs) — coerce
-/// the input schema to a valid object schema; outputSchema is ignored here,
-/// structured results are handled at call time
 fn sane_schema(v: &Value) -> Value {
     if v.is_object() {
         v.clone()
@@ -287,13 +260,10 @@ fn plural(n: usize, word: &str) -> String {
     }
 }
 
-// ---------- client hooks: roots + sampling ----------
-
-/// one sampling/createMessage request from a server
 pub struct SampleReq {
     pub server: String,
     pub system: Option<String>,
-    /// (role, text) pairs; only text content is forwarded
+
     pub messages: Vec<(String, String)>,
     pub max_tokens: u32,
 }
@@ -306,17 +276,14 @@ pub struct SampleOut {
 pub type SampleFut = Pin<Box<dyn Future<Output = Result<SampleOut>> + Send>>;
 pub type Sampler = Arc<dyn Fn(SampleReq) -> SampleFut + Send + Sync>;
 
-/// one elicitation/create request from a server: it wants structured input
-/// from the user, described by a flat schema (primitive or enum properties)
 pub struct ElicitReq {
     pub server: String,
     pub message: String,
-    /// requestedSchema from the server
+
     pub schema: Value,
 }
 
 pub struct ElicitOut {
-    /// accept | decline | cancel
     pub action: String,
     pub content: Value,
 }
@@ -324,7 +291,6 @@ pub struct ElicitOut {
 pub type ElicitFut = Pin<Box<dyn Future<Output = Result<ElicitOut>> + Send>>;
 pub type Eliciter = Arc<dyn Fn(ElicitReq) -> ElicitFut + Send + Sync>;
 
-/// one notifications/message entry from an mcp server
 #[derive(Clone, Debug)]
 pub struct McpLogEntry {
     pub server: String,
@@ -333,33 +299,25 @@ pub struct McpLogEntry {
     pub data: String,
 }
 
-/// ring buffer size for mcp log messages across all servers
 pub const MAX_LOGS: usize = 500;
 
 pub type McpLogBuf = Arc<std::sync::Mutex<VecDeque<McpLogEntry>>>;
 
-/// one notifications/resources/updated subscriber set lives on Shared; this is
-/// the note sink shared with every connected server (resource updates land in
-/// the chat)
 #[derive(Clone, Default)]
 pub struct McpHooks {
     pub roots: Arc<RwLock<Vec<String>>>,
     pub sampler: Option<Sampler>,
     pub eliciter: Option<Eliciter>,
     pub notes: Option<tokio::sync::mpsc::UnboundedSender<crate::provider::ApiEvent>>,
-    /// notifications/message ring buffer shared by every server
+
     pub logs: McpLogBuf,
-    /// the live chat session id, stamped into tools/call _meta as
-    /// "ai.hi-derola/sessionID" so servers can correlate calls; shared with
-    /// the frontend so a /resume or /clear updates every live server
+
     pub session: Arc<RwLock<String>>,
-    /// global default tools/call deadline in seconds (agent.mcp_timeout);
-    /// a server's own execution_timeout or legacy timeout wins over it
+
     pub mcp_timeout: Option<u64>,
 }
 
 impl McpHooks {
-    /// expose one workspace dir (defaults to cwd) as a root
     pub fn workspace(dir: Option<std::path::PathBuf>) -> Self {
         let dir = dir
             .or_else(|| std::env::current_dir().ok())
@@ -381,13 +339,11 @@ impl McpHooks {
         self
     }
 
-    /// set the global default tools/call deadline (agent.mcp_timeout)
     pub fn with_mcp_timeout(mut self, secs: Option<u64>) -> Self {
         self.mcp_timeout = secs;
         self
     }
 
-    /// current chat session id for _meta passthrough (empty = not stamped)
     pub fn session_id(&self) -> String {
         self.session.read().map(|g| g.clone()).unwrap_or_default()
     }
@@ -411,8 +367,6 @@ impl McpHooks {
     }
 }
 
-/// default sampler: one-shot completion on hi-derola's own provider, with a
-/// Note in the chat so the user sees what the server asked for
 pub fn default_sampler(
     provider: Arc<dyn crate::provider::Provider>,
     model: String,
@@ -474,9 +428,6 @@ pub fn default_sampler(
     })
 }
 
-/// match one answer value against an enum's choices: 1-based index, exact or
-/// case-insensitive text match on the value or the enumNames display label;
-/// non-text values pass through when they are literally one of the choices
 fn enum_pick(choices: &[Value], names: Option<&Vec<Value>>, val: &Value) -> Option<Value> {
     let Some(t) = val.as_str().map(|s| s.trim().to_string()) else {
         return if choices.contains(val) {
@@ -514,10 +465,6 @@ fn enum_pick(choices: &[Value], names: Option<&Vec<Value>>, val: &Value) -> Opti
     None
 }
 
-/// coerce one user-provided value to the schema property's type: enums work
-/// by 1-based index, exact or case-insensitive text match (values and
-/// enumNames labels); arrays are multiselects fed as a json array or a
-/// comma-separated list, each item mapped through the items enum
 fn coerce_prop(def: &Value, val: &Value) -> Value {
     let s = val.as_str().map(|s| s.trim().to_string());
     match def["type"].as_str().unwrap_or("") {
@@ -573,9 +520,6 @@ fn coerce_prop(def: &Value, val: &Value) -> Value {
     }
 }
 
-/// build the accept content from a free-text answer, guided by the requested
-/// schema: a JSON object wins, one-property schemas take the raw text coerced
-/// to the property type, anything else cancels
 pub fn elicit_content(schema: &Value, answer: &str) -> Option<Value> {
     let answer = answer.trim();
     if answer.is_empty() {
@@ -600,8 +544,6 @@ pub fn elicit_content(schema: &Value, answer: &str) -> Option<Value> {
     None
 }
 
-/// enum option labels for the ask flow: enumNames display names win over the
-/// raw values
 fn enum_option_labels(choices: &[Value], names: Option<&Vec<Value>>) -> Vec<String> {
     choices
         .iter()
@@ -620,10 +562,6 @@ fn enum_option_labels(choices: &[Value], names: Option<&Vec<Value>>) -> Vec<Stri
         .collect()
 }
 
-/// format an elicitation request as a question-tool payload: returns the
-/// question text, option buttons (only for one-property schemas) and a
-/// multiple flag for array multiselects; hints carry the rich schema details
-/// (title, format, bounds, allowed values)
 fn elicit_question(message: &str, schema: &Value) -> (String, Vec<Value>, bool) {
     let mut hints = Vec::new();
     let mut opts = Vec::new();
@@ -695,9 +633,6 @@ fn elicit_question(message: &str, schema: &Value) -> (String, Vec<Value>, bool) 
     (q, opts, multiple)
 }
 
-/// default eliciter: surface the server's request through the ask flow (TUI
-/// question prompt / GUI dialog), build the reply from the schema; empty
-/// answer cancels
 pub fn default_eliciter(
     notes: tokio::sync::mpsc::UnboundedSender<crate::provider::ApiEvent>,
 ) -> Eliciter {
@@ -709,12 +644,10 @@ pub fn default_eliciter(
                 "header": format!("mcp {}", req.server),
                 "question": question,
                 "options": opts,
-                // raw requestedSchema: the gui renders it as a form, the
-                // tui ignores it and keeps the free-text answer
+
                 "schema": req.schema,
             });
             if multiple {
-                // gui: option buttons toggle instead of single-pick
                 q["multiple"] = json!(true);
             }
             let args = json!({"questions": [q]}).to_string();
@@ -750,9 +683,6 @@ fn file_uri(dir: &str) -> String {
     }
 }
 
-/// url-mode anti-phishing check (spec: the elicitation url must live on the
-/// server's own dns domain): remote servers accept their exact host or a
-/// subdomain of it; stdio servers have no origin, so they must use https
 fn url_mode_origin_ok(origin: Option<&str>, raw: &str) -> bool {
     let Ok(u) = reqwest::Url::parse(raw) else {
         return false;
@@ -766,13 +696,11 @@ fn url_mode_origin_ok(origin: Option<&str>, raw: &str) -> bool {
     let host = host.to_lowercase();
     match origin {
         Some(srv) => host == srv || host.ends_with(&format!(".{srv}")),
-        // no origin to pin against: only encrypted urls are trustworthy
+
         None => u.scheme() == "https",
     }
 }
 
-/// best-effort system browser open (start/open/xdg-open); failures are
-/// silent because the url is always surfaced as a note regardless
 fn open_in_browser(url: String) {
     let mut cmd = {
         #[cfg(target_os = "windows")]
@@ -801,17 +729,13 @@ fn open_in_browser(url: String) {
     else {
         return;
     };
-    // reap so the launcher process does not linger as a zombie
+
     tokio::task::spawn_blocking(move || {
         let mut child = child;
         let _ = child.wait();
     });
 }
 
-/// handle one url-mode elicitation/create: validate the url against the
-/// server origin, surface it as a note + /mcplog entry, open the browser
-/// best-effort, and reply with the empty result (completion arrives later
-/// as notifications/elicitation/complete); untrusted urls decline
 async fn url_mode_elicitation(shared: &Arc<Shared>, params: &Value) -> Value {
     let url = params["url"].as_str().unwrap_or("").trim().to_string();
     let id = params["elicitationId"]
@@ -847,7 +771,7 @@ async fn url_mode_elicitation(shared: &Arc<Shared>, params: &Value) -> Value {
         )));
     }
     open_in_browser(url);
-    // spec: the empty result means the url was shown, not that the flow ended
+
     json!({})
 }
 
@@ -861,8 +785,6 @@ fn root_name(dir: &str) -> String {
         .to_string()
 }
 
-/// syslog-style severity used by notifications/message; debug is the least
-/// severe, emergency the most
 fn log_level_rank(level: &str) -> Option<u8> {
     match level {
         "debug" => Some(0),
@@ -877,7 +799,6 @@ fn log_level_rank(level: &str) -> Option<u8> {
     }
 }
 
-/// normalize a progressToken (number or string per spec) to a registry key
 fn token_key(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
@@ -886,7 +807,6 @@ fn token_key(v: &Value) -> String {
     }
 }
 
-/// display a progress number without a trailing .0
 fn trim_num(n: f64) -> String {
     if n.fract() == 0.0 {
         format!("{}", n as i64)
@@ -895,11 +815,6 @@ fn trim_num(n: f64) -> String {
     }
 }
 
-// ---------- transport ----------
-
-/// attach the negotiated MCP-Protocol-Version header (absent until
-/// initialize settles the version; user-configured headers may override it —
-/// this runs before they are applied)
 fn with_proto(
     req: reqwest::RequestBuilder,
     proto: &std::sync::Mutex<Option<String>>,
@@ -920,86 +835,66 @@ struct HttpCtx {
     headers: BTreeMap<String, String>,
     oauth: Option<crate::config::McpOAuthCfg>,
     session: std::sync::Mutex<Option<String>>,
-    /// the initialize params used at connect; a session-expiry reconnect
-    /// replays them (404/400 on a request = the server lost the session)
+
     init_params: std::sync::Mutex<Option<Value>>,
-    /// negotiated protocol version (set once initialize succeeds); rides
-    /// every later request as the MCP-Protocol-Version header
+
     proto: std::sync::Mutex<Option<String>>,
 }
 
-/// legacy http + server-sent-events transport: one long GET stream carries
-/// every server message, outgoing messages go to the endpoint the server
-/// announces with an `endpoint` event
 struct SseCtx {
     url: String,
     http: reqwest::Client,
     headers: BTreeMap<String, String>,
     oauth: Option<crate::config::McpOAuthCfg>,
-    /// message endpoint announced via the `endpoint` event
+
     endpoint: std::sync::Mutex<Option<String>>,
-    /// negotiated protocol version (set once initialize succeeds); rides
-    /// every later request as the MCP-Protocol-Version header
+
     proto: std::sync::Mutex<Option<String>>,
 }
 
-/// how outgoing messages are delivered and how replies to server->client
-/// requests are sent back
 enum Reply {
     Stdio { stdin: Arc<Mutex<ChildStdin>> },
     Http(Arc<HttpCtx>),
     Sse(Arc<SseCtx>),
 }
 
-/// state shared between the request path and the background reader task
 struct Shared {
     name: String,
     reply: Reply,
     hooks: McpHooks,
     sampling: bool,
-    /// elicitation/create requests are routed to the hooks' eliciter
+
     elicitation: bool,
-    /// lowercase host of the server url (remote servers only): url-mode
-    /// elicitation must land on the same host or a subdomain of it
+
     origin: Option<String>,
     next_id: AtomicU64,
     stale_tools: AtomicBool,
     stale_resources: AtomicBool,
     stale_prompts: AtomicBool,
     closed: AtomicBool,
-    /// server advertised resources.subscribe
+
     res_sub: AtomicBool,
-    /// uris this client subscribed to (resources/subscribe)
+
     subs: std::sync::Mutex<Vec<String>>,
-    /// server advertised logging
+
     logging: AtomicBool,
-    /// logging = false drops notifications/message from this server
+
     logging_on: bool,
-    /// in-flight progress tokens from tools/call _meta.progressToken:
-    /// normalized token -> tool label; unknown tokens are ignored
+
     progress: std::sync::Mutex<BTreeMap<String, String>>,
-    /// resetTimeoutOnProgress: in-flight tools/call tokens whose call
-    /// deadline restarts on every notifications/progress for that token
+
     progress_reset: std::sync::Mutex<BTreeMap<String, Arc<tokio::sync::Notify>>>,
-    /// keepalive state: false while pings keep failing (transition notes fire
-    /// only on flips, so a dead server never spams the chat)
+
     alive: AtomicBool,
-    /// last 1000 chars of a stdio server's stderr, kept for crash diagnostics
-    /// (the crash message carries it even when logging = false)
+
     stderr_tail: std::sync::Mutex<String>,
-    /// how the stdio child died, filled by the exit monitor:
-    /// "exit code 3" / "killed by signal 9"
+
     exit: std::sync::Mutex<Option<String>>,
-    /// per-phase timeouts, resolved once at connect (startup bounds the
-    /// connect + initialize window and is kept on McpConfig only):
-    /// general requests / discovery + resource reads / tools/call;
-    /// a legacy `timeout` overrides all three
+
     req: Duration,
     catalog: Duration,
     execution: Duration,
-    /// whether the roots capability was advertised at connect (false for the
-    /// 2026-07-28 protocol and newer, where roots are deprecated); gates the
-    /// notifications/roots/list_changed fan-out
+
     roots_cap: AtomicBool,
 }
 
@@ -1015,9 +910,6 @@ fn exec_to(shared: &Shared) -> Duration {
     shared.execution
 }
 
-/// tools/call deadline resolution: the per-server execution_timeout wins,
-/// then the legacy blanket timeout, then the global agent.mcp_timeout, then
-/// the built-in default
 fn exec_timeout(cfg: &McpConfig, global: Option<u64>) -> Duration {
     cfg.execution_timeout
         .map(Duration::from_secs)
@@ -1035,7 +927,6 @@ fn cfg_connect_timeout(cfg: &McpConfig) -> Duration {
 
 type Pending = Arc<Mutex<BTreeMap<u64, tokio::sync::oneshot::Sender<Result<Value>>>>>;
 
-/// build the per-server shared state for one transport choice
 fn shared_for(
     cfg: &McpConfig,
     hooks: &McpHooks,
@@ -1082,10 +973,6 @@ fn shared_for(
     (shared, Arc::new(Mutex::new(BTreeMap::new())))
 }
 
-/// platform handle that lets McpServer::drop take down the whole server
-/// process tree (npx-style wrappers leave grandchildren behind): unix spawns
-/// the server in its own process group (SIGKILLed on drop), windows attaches
-/// it to a kill-on-close job object (terminated when the handle drops)
 struct TreeKill {
     #[cfg(unix)]
     pgid: Option<u32>,
@@ -1096,22 +983,21 @@ struct TreeKill {
 struct McpServer {
     shared: Arc<Shared>,
     pending: Pending,
-    /// stdio child, shared with the exit monitor (crash diagnostics)
+
     child: Option<Arc<std::sync::Mutex<Child>>>,
-    /// platform tree-kill handle for stdio children (process group / job)
+
     tree: Option<TreeKill>,
-    /// background tasks (reader/live stream + optional keepalive); aborted on drop
+
     tasks: Vec<tokio::task::JoinHandle<()>>,
     tools: Vec<McpTool>,
     resources: Vec<McpResource>,
-    /// resource templates ride the resources cache (same list_changed)
+
     templates: Vec<McpTemplate>,
     prompts: Vec<McpPrompt>,
-    /// server instructions from initialize, surfaced into the system prompt
+
     instructions: Option<String>,
 }
 
-/// format per-server instructions as a system-prompt block; empty -> empty
 pub fn instructions_block(pairs: &[(String, String)]) -> String {
     if pairs.is_empty() {
         return String::new();
@@ -1139,7 +1025,6 @@ impl McpServer {
         parts.join(", ")
     }
 
-    /// fetch a paginated list method (tools/list, resources/list, prompts/list)
     async fn list_page(&self, method: &str, key: &str) -> Result<Vec<Value>> {
         let mut out = Vec::new();
         let mut cursor: Option<String> = None;
@@ -1167,7 +1052,6 @@ impl McpServer {
         Ok(render_resource_contents(&res))
     }
 
-    /// returns prompt messages as (role, text) pairs
     async fn get_prompt(&self, name: &str, args: &Value) -> Result<Vec<(String, String)>> {
         let res = self
             .request_t(
@@ -1179,7 +1063,6 @@ impl McpServer {
         Ok(parse_prompt_messages(&res))
     }
 
-    /// re-list tools after notifications/tools/list_changed
     async fn refresh_tools(&mut self) {
         if !self.shared.stale_tools.swap(false, Ordering::Relaxed) {
             return;
@@ -1198,8 +1081,7 @@ impl McpServer {
             Ok(items) => self.resources = parse_resources(&items),
             Err(_) => self.shared.stale_resources.store(true, Ordering::Relaxed),
         }
-        // templates share the resources/list_changed trigger; a failed or
-        // unsupported re-list keeps the old cache
+
         if let Ok(items) = self
             .list_page("resources/templates/list", "resourceTemplates")
             .await
@@ -1224,9 +1106,7 @@ impl Drop for McpServer {
         for t in self.tasks.drain(..) {
             t.abort();
         }
-        // streamable http: explicitly end the server-side session (best-effort,
-        // the spec says the server may not support it); a stdio child needs no
-        // goodbye — its whole process tree is taken down below
+
         if let Reply::Http(ctx) = &self.shared.reply {
             let ctx = Arc::clone(ctx);
             let name = self.shared.name.clone();
@@ -1239,8 +1119,7 @@ impl Drop for McpServer {
                 let _ = g.start_kill();
             }
         }
-        // the direct child is dead; take everything it spawned with it
-        // (synchronous SIGKILL: a reaper task could never run at shutdown)
+
         #[cfg(unix)]
         if let Some(pgid) = self.tree.as_ref().and_then(|t| t.pgid) {
             unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGKILL) };
@@ -1255,8 +1134,6 @@ fn extract_result(v: Value, name: &str) -> Result<Value> {
     Ok(v["result"].clone())
 }
 
-/// route one incoming jsonrpc value: responses go to pending waiters,
-/// server requests get answered, notifications update stale flags
 async fn dispatch_incoming(shared: &Arc<Shared>, pending: &Pending, v: Value) {
     let method = v
         .get("method")
@@ -1265,13 +1142,12 @@ async fn dispatch_incoming(shared: &Arc<Shared>, pending: &Pending, v: Value) {
     let id = v.get("id").cloned();
     match (method, id) {
         (Some(method), Some(id)) => {
-            handle_server_request(
-                shared,
+            tokio::spawn(handle_server_request(
+                shared.clone(),
                 id,
-                &method,
+                method,
                 v.get("params").cloned().unwrap_or(json!({})),
-            )
-            .await;
+            ));
         }
         (Some(method), None) => {
             let params = v.get("params").cloned().unwrap_or(json!({}));
@@ -1288,7 +1164,6 @@ async fn dispatch_incoming(shared: &Arc<Shared>, pending: &Pending, v: Value) {
     }
 }
 
-/// append one entry to the /mcplog ring buffer (oldest entries evicted)
 fn push_log_entry(shared: &Shared, level: &str, logger: &str, data: String) {
     let mut g = shared
         .hooks
@@ -1327,7 +1202,7 @@ fn handle_notification(shared: &Arc<Shared>, pending: &Pending, method: &str, pa
             if uri.is_empty() || !subscribed {
                 return;
             }
-            // re-read in the background, surface the fresh content as a note
+
             let shared = shared.clone();
             let pending = pending.clone();
             tokio::spawn(async move {
@@ -1353,7 +1228,6 @@ fn handle_notification(shared: &Arc<Shared>, pending: &Pending, method: &str, pa
             });
         }
         "notifications/elicitation/complete" => {
-            // url-mode flow finished server-side; make it visible
             let id = params["elicitationId"].as_str().unwrap_or("").to_string();
             push_log_entry(
                 shared,
@@ -1379,7 +1253,7 @@ fn handle_notification(shared: &Arc<Shared>, pending: &Pending, method: &str, pa
                 None => params["data"].to_string(),
             };
             push_log_entry(shared, &level, &logger, data.clone());
-            // warning and above also pop into the chat
+
             if log_level_rank(&level).unwrap_or(1) >= 3 {
                 if let Some(tx) = &shared.hooks.notes {
                     let head = if logger.is_empty() {
@@ -1411,7 +1285,7 @@ fn handle_notification(shared: &Arc<Shared>, pending: &Pending, method: &str, pa
             let Some(label) = label else {
                 return;
             };
-            // resetTimeoutOnProgress: restart the tools/call deadline
+
             let wake = shared
                 .progress_reset
                 .lock()
@@ -1443,11 +1317,9 @@ fn handle_notification(shared: &Arc<Shared>, pending: &Pending, method: &str, pa
     }
 }
 
-/// answer a server -> client request: roots/list from the hooks, sampling by
-/// calling the sampler; anything else is method-not-found
-async fn handle_server_request(shared: &Arc<Shared>, id: Value, method: &str, params: Value) {
+async fn handle_server_request(shared: Arc<Shared>, id: Value, method: String, params: Value) {
     type R = std::result::Result<Value, (i64, String)>;
-    let outcome: R = match method {
+    let outcome: R = match method.as_str() {
         "roots/list" => {
             let dirs: Vec<String> = shared
                 .hooks
@@ -1518,14 +1390,10 @@ async fn handle_server_request(shared: &Arc<Shared>, id: Value, method: &str, pa
             }
         }
         "elicitation/create" => {
-            // a decline (not an error) keeps the server's flow well-defined
             if !shared.elicitation {
                 Ok(json!({"action": "decline"}))
             } else if params["mode"].as_str() == Some("url") {
-                // url mode (protocol 2026-07-28): the server wants the user to
-                // finish a flow in the browser; no form input is collected,
-                // so the reply is the empty result once the url is surfaced
-                Ok(url_mode_elicitation(shared, &params).await)
+                Ok(url_mode_elicitation(&shared, &params).await)
             } else {
                 match &shared.hooks.eliciter {
                     None => Ok(json!({"action": "decline"})),
@@ -1543,7 +1411,7 @@ async fn handle_server_request(shared: &Arc<Shared>, id: Value, method: &str, pa
                                 }
                                 Ok(r)
                             }
-                            // a failed or timed-out prompt cancels instead of erroring
+
                             Ok(Err(_)) | Err(_) => Ok(json!({"action": "cancel"})),
                         }
                     }
@@ -1564,7 +1432,7 @@ async fn handle_server_request(shared: &Arc<Shared>, id: Value, method: &str, pa
             "error": {"code": code, "message": message}
         }),
     };
-    reply_message(shared, msg).await;
+    reply_message(&shared, msg).await;
 }
 
 async fn reply_message(shared: &Arc<Shared>, msg: Value) {
@@ -1580,8 +1448,6 @@ async fn reply_message(shared: &Arc<Shared>, msg: Value) {
             let _ = http_send(ctx, &shared.name, &msg, false).await;
         }
         Reply::Sse(ctx) => {
-            // answers ride the endpoint announced on the stream; if it is
-            // still unknown there is nowhere to send
             let ep = ctx.endpoint.lock().unwrap().clone();
             if let Some(ep) = ep {
                 let _ = sse_post(ctx, &shared.name, &ep, &msg).await;
@@ -1590,8 +1456,6 @@ async fn reply_message(shared: &Arc<Shared>, msg: Value) {
     }
 }
 
-/// periodic keepalive: ping the server on an interval, note the alive <->
-/// unresponsive transitions only (a dead server must not spam the chat)
 async fn keepalive_loop(shared: Arc<Shared>, pending: Pending, interval: Duration) {
     loop {
         tokio::time::sleep(interval).await;
@@ -1624,10 +1488,6 @@ async fn keepalive_loop(shared: Arc<Shared>, pending: Pending, interval: Duratio
     }
 }
 
-/// drain a stdio server's stderr into the shared log buffer as info entries
-/// with logger "stderr" (visible via /mcplog, never pops into the chat);
-/// the last chunk always lands in the crash-diagnostics tail, even when
-/// logging = false for the server
 async fn stderr_drain(err: impl tokio::io::AsyncRead + Unpin, shared: Arc<Shared>) {
     let mut lines = tokio::io::BufReader::new(err).lines();
     loop {
@@ -1673,8 +1533,6 @@ async fn stderr_drain(err: impl tokio::io::AsyncRead + Unpin, shared: Arc<Shared
     }
 }
 
-/// push a process-level diagnostics entry into the log buffer (logger
-/// "process", error level — crashes and dropped frames show up in /mcplog)
 fn push_process_log(shared: &Shared, data: &str) {
     let mut g = shared
         .hooks
@@ -1692,8 +1550,6 @@ fn push_process_log(shared: &Shared, data: &str) {
     }
 }
 
-/// the error a stdio client gets when the server dies: exit status plus the
-/// last chunk of stderr — usually the only hint why it crashed
 fn crash_message(name: &str, exit: Option<&str>, tail: &str) -> String {
     let tail = tail.trim();
     let mut out = match exit {
@@ -1707,8 +1563,6 @@ fn crash_message(name: &str, exit: Option<&str>, tail: &str) -> String {
     out
 }
 
-/// watch the stdio child and record how it died, so the reader's "server
-/// closed" error carries the exit code instead of nothing
 async fn exit_monitor(child: Arc<std::sync::Mutex<Child>>, shared: Arc<Shared>) {
     loop {
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -1742,10 +1596,6 @@ async fn exit_monitor(child: Arc<std::sync::Mutex<Child>>, shared: Arc<Shared>) 
     }
 }
 
-/// background reader for stdio servers: routes replies to pending waiters,
-/// answers server -> client requests, tracks notifications. reads raw chunks
-/// and splits frames on LF with a hard size cap — a runaway server cannot
-/// balloon memory; an oversized frame is dropped and the connection lives on
 async fn stdio_reader(
     mut reader: tokio::io::BufReader<ChildStdout>,
     shared: Arc<Shared>,
@@ -1753,7 +1603,7 @@ async fn stdio_reader(
 ) {
     use tokio::io::AsyncReadExt as _;
     let mut carry: Vec<u8> = Vec::new();
-    // carry[..scanned] holds no newline: only fresh bytes need scanning
+
     let mut scanned = 0usize;
     let mut tmp = [0u8; 8192];
     loop {
@@ -1776,10 +1626,9 @@ async fn stdio_reader(
             };
             dispatch_incoming(&shared, &pending, v).await;
         }
-        // the failing scan covered the whole carry: no newline anywhere
+
         scanned = carry.len();
-        // a partial frame growing past the cap: drop it, the connection
-        // survives (the rest of the frame parses as junk and is skipped)
+
         if carry.len() > FRAME_CAP {
             carry.clear();
             scanned = 0;
@@ -1787,8 +1636,7 @@ async fn stdio_reader(
         }
     }
     shared.closed.store(true, Ordering::Relaxed);
-    // give the exit monitor a beat to observe how the child died, then fail
-    // every in-flight request with the exit code and the stderr tail
+
     tokio::time::sleep(Duration::from_millis(400)).await;
     let exit = shared
         .exit
@@ -1813,9 +1661,6 @@ async fn stdio_reader(
     }
 }
 
-/// best-effort standalone sse stream (streamable http): carries live
-/// notifications and server -> client requests; exits when the server
-/// answers 405 (no stream support)
 async fn http_live(shared: Arc<Shared>, pending: Pending) {
     let Reply::Http(ctx) = &shared.reply else {
         return;
@@ -1838,10 +1683,6 @@ async fn http_live(shared: Arc<Shared>, pending: Pending) {
     }
 }
 
-/// connect a remote server: streamable http first, the legacy http + sse
-/// transport as fallback (opencode-style). initialize rides the transport
-/// selection — a success pins it. auth failures (401) are not transport
-/// mismatches, so they surface without a fallback attempt.
 async fn connect_remote(
     cfg: &McpConfig,
     hooks: &McpHooks,
@@ -1873,7 +1714,6 @@ async fn connect_remote(
         "clientInfo": {"name": "hi-derola", "version": "0.1.0"}
     });
 
-    // --- streamable http attempt ---
     let (http_shared, pending) = shared_for(
         cfg,
         hooks,
@@ -1914,8 +1754,6 @@ async fn connect_remote(
         return Err(first_err);
     }
 
-    // --- legacy http + sse attempt; on failure the original error is the
-    // meaningful one for every common case (dead server, real jsonrpc error)
     let (sse_shared, sse_pending) = shared_for(
         cfg,
         hooks,
@@ -1945,13 +1783,15 @@ async fn connect_remote(
             }
             Ok((sse_shared, sse_pending, v, tasks))
         }
-        Err(_) => Err(first_err),
+        Err(_) => {
+            for t in tasks.drain(..) {
+                t.abort();
+            }
+            Err(first_err)
+        }
     }
 }
 
-/// background reader for the legacy sse transport: opens the event stream,
-/// learns the message endpoint from the `endpoint` event, routes every json
-/// event through pending/dispatch; reconnects with backoff until closed
 async fn sse_live(shared: Arc<Shared>, pending: Pending) {
     let Reply::Sse(ctx) = &shared.reply else {
         return;
@@ -1994,7 +1834,6 @@ async fn sse_get_stream(ctx: &SseCtx, name: &str) -> Result<reqwest::Response> {
     Ok(req.send().await?)
 }
 
-/// resolve a possibly relative endpoint announcement against the server url
 fn absolute_url(base: &str, target: &str) -> String {
     if target.starts_with("http://") || target.starts_with("https://") {
         return target.to_string();
@@ -2005,7 +1844,6 @@ fn absolute_url(base: &str, target: &str) -> String {
     }
 }
 
-/// POST one message to the announced endpoint
 async fn sse_post(ctx: &SseCtx, name: &str, ep: &str, body: &Value) -> Result<()> {
     let token = crate::mcpauth::bearer(name, &ctx.url, ctx.oauth.as_ref(), &ctx.http, false)
         .await
@@ -2031,8 +1869,6 @@ async fn sse_post(ctx: &SseCtx, name: &str, ep: &str, body: &Value) -> Result<()
     Ok(())
 }
 
-/// wait until the server announces its message endpoint (sent immediately
-/// after the stream opens; the cap keeps a wrong-transport fallback fast)
 async fn sse_wait_endpoint(ctx: &SseCtx, timeout: Duration) -> Result<String> {
     let deadline = tokio::time::Instant::now() + timeout.min(Duration::from_secs(2));
     loop {
@@ -2046,8 +1882,6 @@ async fn sse_wait_endpoint(ctx: &SseCtx, timeout: Duration) -> Result<String> {
     }
 }
 
-/// consume the legacy sse stream: `endpoint` events pin the message endpoint,
-/// `message` events carry the jsonrpc traffic
 async fn sse_consume(
     mut resp: reqwest::Response,
     ctx: &Arc<SseCtx>,
@@ -2055,6 +1889,7 @@ async fn sse_consume(
     pending: &Pending,
 ) {
     let mut event = String::new();
+    let mut data_acc = String::new();
     let mut buf = String::new();
     loop {
         let Ok(Some(bytes)) = resp.chunk().await else {
@@ -2062,7 +1897,6 @@ async fn sse_consume(
         };
         buf.push_str(&String::from_utf8_lossy(&bytes));
         if buf.len() > FRAME_CAP {
-            // bound memory against a runaway event stream
             buf.clear();
             push_process_log(shared, "sse frame dropped: exceeds the 16 MiB cap");
         }
@@ -2073,22 +1907,40 @@ async fn sse_consume(
                 event = e.trim().to_string();
                 continue;
             }
-            let Some(data) = line.strip_prefix("data:") else {
+            if let Some(d) = line.strip_prefix("data:") {
+                let d = d.trim();
+                if d.is_empty() {
+                    continue;
+                }
+                if !data_acc.is_empty() {
+                    data_acc.push('\n');
+                }
+                data_acc.push_str(d);
                 continue;
-            };
-            let data = data.trim();
-            if event == "endpoint" {
-                *ctx.endpoint.lock().unwrap() = Some(absolute_url(&ctx.url, data));
+            }
+            if !line.is_empty() {
+                continue;
+            }
+            if data_acc.is_empty() {
                 event.clear();
                 continue;
             }
-            event.clear();
-            if data.is_empty() {
+            let data = std::mem::take(&mut data_acc);
+            let ev = std::mem::take(&mut event);
+            if ev == "endpoint" {
+                *ctx.endpoint.lock().unwrap() = Some(absolute_url(&ctx.url, &data));
                 continue;
             }
-            let Ok(v) = serde_json::from_str::<Value>(data) else {
+            let Ok(v) = serde_json::from_str::<Value>(&data) else {
                 continue;
             };
+            dispatch_incoming(shared, pending, v).await;
+        }
+    }
+    if !data_acc.is_empty() {
+        if event == "endpoint" {
+            *ctx.endpoint.lock().unwrap() = Some(absolute_url(&ctx.url, &data_acc));
+        } else if let Ok(v) = serde_json::from_str::<Value>(&data_acc) {
             dispatch_incoming(shared, pending, v).await;
         }
     }
@@ -2115,9 +1967,6 @@ async fn http_get_stream(ctx: &HttpCtx, name: &str) -> Result<reqwest::Response>
     Ok(req.send().await?)
 }
 
-/// consume an sse stream, routing every json event through pending/dispatch.
-/// with want_id: resolve when the matching response arrives (request path);
-/// without: consume until the stream ends (live GET stream)
 async fn route_sse(
     mut resp: reqwest::Response,
     shared: &Arc<Shared>,
@@ -2125,34 +1974,48 @@ async fn route_sse(
     want_id: Option<u64>,
 ) -> Result<Value> {
     let mut buf = String::new();
+    let mut data_acc = String::new();
     loop {
         let Some(bytes) = resp.chunk().await? else {
             break;
         };
         buf.push_str(&String::from_utf8_lossy(&bytes));
         if buf.len() > FRAME_CAP {
-            // bound memory against a runaway event stream
             buf.clear();
             push_process_log(shared, "sse frame dropped: exceeds the 16 MiB cap");
         }
         while let Some(pos) = buf.find('\n') {
             let line: String = buf.drain(..pos + 1).collect();
-            let Some(data) = line.trim_end().strip_prefix("data:") else {
-                continue;
-            };
-            let data = data.trim();
-            if data.is_empty() {
+            let line = line.trim_end();
+            if let Some(d) = line.strip_prefix("data:") {
+                let d = d.trim();
+                if d.is_empty() {
+                    continue;
+                }
+                if !data_acc.is_empty() {
+                    data_acc.push('\n');
+                }
+                data_acc.push_str(d);
                 continue;
             }
-            let Ok(v) = serde_json::from_str::<Value>(data) else {
+            if !line.is_empty() {
                 continue;
-            };
-            let mid = v.get("id").and_then(|x| x.as_u64());
-            if v.get("method").is_none() && want_id.is_some() && mid == want_id {
-                return extract_result(v, &shared.name);
             }
-            dispatch_incoming(shared, pending, v).await;
+            if let Some(v) = take_sse_event(&mut data_acc) {
+                let mid = v.get("id").and_then(|x| x.as_u64());
+                if v.get("method").is_none() && want_id.is_some() && mid == want_id {
+                    return extract_result(v, &shared.name);
+                }
+                dispatch_incoming(shared, pending, v).await;
+            }
         }
+    }
+    if let Some(v) = take_sse_event(&mut data_acc) {
+        let mid = v.get("id").and_then(|x| x.as_u64());
+        if v.get("method").is_none() && want_id.is_some() && mid == want_id {
+            return extract_result(v, &shared.name);
+        }
+        dispatch_incoming(shared, pending, v).await;
     }
     match want_id {
         Some(_) => bail!("mcp {}: no response in sse stream", shared.name),
@@ -2160,7 +2023,14 @@ async fn route_sse(
     }
 }
 
-/// POST one jsonrpc message with auth/session headers
+fn take_sse_event(acc: &mut String) -> Option<Value> {
+    if acc.is_empty() {
+        return None;
+    }
+    let data = std::mem::take(acc);
+    serde_json::from_str::<Value>(&data).ok()
+}
+
 async fn http_send(
     ctx: &HttpCtx,
     name: &str,
@@ -2191,8 +2061,6 @@ async fn http_send(
     }
 }
 
-/// read a response body with a hard size cap (a runaway server must not
-/// balloon client memory)
 async fn capped_body(mut resp: reqwest::Response, name: &str) -> Result<String> {
     if let Some(len) = resp.content_length() {
         if len as usize > FRAME_CAP {
@@ -2209,8 +2077,6 @@ async fn capped_body(mut resp: reqwest::Response, name: &str) -> Result<String> 
     Ok(String::from_utf8_lossy(&out).into_owned())
 }
 
-/// send a request or notification; for http requests the reply is the
-/// return value, for stdio it arrives via pending
 async fn send_msg(shared: &Arc<Shared>, pending: &Pending, msg: &Value) -> Result<Value> {
     match &shared.reply {
         Reply::Stdio { stdin } => {
@@ -2223,7 +2089,6 @@ async fn send_msg(shared: &Arc<Shared>, pending: &Pending, msg: &Value) -> Resul
         }
         Reply::Http(ctx) => http_post(shared, ctx, pending, msg).await,
         Reply::Sse(ctx) => {
-            // the reply arrives on the event stream, routed through pending
             let ep = sse_wait_endpoint(ctx, req_to(shared)).await?;
             sse_post(ctx, &shared.name, &ep, msg).await?;
             Ok(json!({}))
@@ -2239,7 +2104,6 @@ async fn http_post(
 ) -> Result<Value> {
     let name = &shared.name;
     let Some(id) = body.get("id").and_then(|x| x.as_u64()) else {
-        // notification: best effort
         let _ = http_send(ctx, name, body, false).await;
         return Ok(json!({}));
     };
@@ -2251,7 +2115,6 @@ async fn http_post(
         let r = http_send(ctx, name, body, refreshed).await?;
         match r.status().as_u16() {
             401 if !refreshed => {
-                // one re-auth attempt, then the failure surfaces
                 refreshed = true;
                 continue;
             }
@@ -2263,17 +2126,13 @@ async fn http_post(
                 };
                 bail!("mcp {name}: 401 unauthorized{hint}");
             }
-            // session-expiry reconnect: a server that restarted answers 404
-            // (and some answer 400) for its lost session id; replay the
-            // initialize handshake once and retry the original request
+
             404 | 400 if !reinited && method != "initialize" && can_reinit(ctx) => {
                 reinited = true;
-                http_reinit(shared, ctx).await?;
+                http_reinit(shared, ctx, pending).await?;
                 continue;
             }
-            // transient failures on the connect/list phases: a short backoff
-            // retry (Retry-After honored when present); a real tools/call is
-            // never blindly replayed
+
             s if is_transient(s) && retries < 2 && is_list_phase(&method) => {
                 retries += 1;
                 let wait = r
@@ -2294,7 +2153,10 @@ async fn http_post(
     };
     let status = resp.status();
     if !status.is_success() {
-        let text = capped_body(resp, name).await.unwrap_or_default();
+        let text = match tokio::time::timeout(REQUEST_TIMEOUT, capped_body(resp, name)).await {
+            Ok(t) => t.unwrap_or_default(),
+            Err(_) => String::new(),
+        };
         bail!(
             "mcp {name}: {} {}",
             status,
@@ -2316,30 +2178,31 @@ async fn http_post(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
+    let to = exec_to(shared);
     if ctype.contains("text/event-stream") {
-        route_sse(resp, shared, pending, Some(id)).await
+        match tokio::time::timeout(to, route_sse(resp, shared, pending, Some(id))).await {
+            Ok(r) => r,
+            Err(_) => bail!("mcp {name}: no response within {}s", to.as_secs()),
+        }
     } else {
-        let text = capped_body(resp, name).await?;
+        let text = match tokio::time::timeout(to, capped_body(resp, name)).await {
+            Ok(r) => r?,
+            Err(_) => bail!("mcp {name}: response body exceeded {}s", to.as_secs()),
+        };
         let v: Value = serde_json::from_str(&text)
             .map_err(|e| anyhow::anyhow!("mcp {name}: bad json: {e}"))?;
         extract_result(v, name)
     }
 }
 
-/// reinit guard: replaying initialize needs the params captured at connect
 fn can_reinit(ctx: &HttpCtx) -> bool {
     ctx.init_params.lock().unwrap().is_some()
 }
 
-/// server-side hiccups worth a retry: request timeout, throttling and any
-/// 5xx (gateway reboots, upstream blips)
 fn is_transient(status: u16) -> bool {
     status == 408 || status == 429 || status >= 500
 }
 
-/// the phases a blind replay is safe in: transport selection and catalog
-/// discovery (opencode scopes their transient retries the same way) — a real
-/// tools/call must not run twice
 fn is_list_phase(method: &str) -> bool {
     matches!(
         method,
@@ -2351,10 +2214,7 @@ fn is_list_phase(method: &str) -> bool {
     )
 }
 
-/// session-expiry reconnect: drop the stale session id, replay initialize +
-/// notifications/initialized (the params captured at connect), so the next
-/// attempt of the original request rides a fresh session
-async fn http_reinit(shared: &Arc<Shared>, ctx: &HttpCtx) -> Result<()> {
+async fn http_reinit(shared: &Arc<Shared>, ctx: &HttpCtx, pending: &Pending) -> Result<()> {
     let name = &shared.name;
     *ctx.session.lock().unwrap() = None;
     let params = ctx
@@ -2363,11 +2223,15 @@ async fn http_reinit(shared: &Arc<Shared>, ctx: &HttpCtx) -> Result<()> {
         .unwrap()
         .clone()
         .context("mcp: no initialize params for reconnect")?;
-    let msg = json!({"jsonrpc": "2.0", "id": shared.next_id.fetch_add(1, Ordering::Relaxed) + 1, "method": "initialize", "params": params});
+    let rid = shared.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+    let msg = json!({"jsonrpc": "2.0", "id": rid, "method": "initialize", "params": params});
     let resp = http_send(ctx, name, &msg, false).await?;
     if !resp.status().is_success() {
         let status = resp.status();
-        let text = capped_body(resp, name).await.unwrap_or_default();
+        let text = match tokio::time::timeout(REQUEST_TIMEOUT, capped_body(resp, name)).await {
+            Ok(t) => t.unwrap_or_default(),
+            Err(_) => String::new(),
+        };
         bail!(
             "mcp {name}: reinitialize failed: {} {}",
             status,
@@ -2381,18 +2245,32 @@ async fn http_reinit(shared: &Arc<Shared>, ctx: &HttpCtx) -> Result<()> {
     {
         *ctx.session.lock().unwrap() = Some(sid.to_string());
     }
-    let body = capped_body(resp, name).await?;
-    let v: Value = serde_json::from_str(&body)
-        .map_err(|e| anyhow::anyhow!("mcp {name}: bad json in reinitialize: {e}"))?;
+    let ctype = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let to = exec_to(shared);
+    let v = if ctype.contains("text/event-stream") {
+        match tokio::time::timeout(to, route_sse(resp, shared, pending, Some(rid))).await {
+            Ok(r) => r?,
+            Err(_) => bail!("mcp {name}: reinitialize timed out"),
+        }
+    } else {
+        let body = match tokio::time::timeout(to, capped_body(resp, name)).await {
+            Ok(r) => r?,
+            Err(_) => bail!("mcp {name}: reinitialize body exceeded {}s", to.as_secs()),
+        };
+        serde_json::from_str(&body)
+            .map_err(|e| anyhow::anyhow!("mcp {name}: bad json in reinitialize: {e}"))?
+    };
     extract_result(v, name)?;
     let note = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
     let _ = http_send(ctx, name, &note, false).await;
     Ok(())
 }
 
-/// explicitly end a streamable http session: DELETE with the session id
-/// (spec: the server may answer 405 when it does not support termination —
-/// that is success for our purposes); best-effort, used on client close
 async fn http_terminate(ctx: &HttpCtx, name: &str) {
     let Some(sid) = ctx.session.lock().unwrap().clone() else {
         return;
@@ -2409,16 +2287,11 @@ async fn http_terminate(ctx: &HttpCtx, name: &str) {
     for (k, v) in ctx.headers.iter() {
         req = req.header(k.as_str(), v.as_str());
     }
-    // best-effort: 405 (termination unsupported) and every other outcome
-    // still ends our side of the session
+
     let _ = tokio::time::timeout(Duration::from_secs(5), req.send()).await;
     *ctx.session.lock().unwrap() = None;
 }
 
-/// notifications/cancelled is sent when a request future is dropped mid-wait
-/// (the chat turn was aborted) so the server stops the work too; the timeout
-/// paths leave it armed on purpose — the abandoned call must be told to stop
-/// (best-effort: a closed transport just swallows the send)
 struct CancelGuard {
     shared: Arc<Shared>,
     pending: Pending,
@@ -2444,7 +2317,6 @@ impl Drop for CancelGuard {
         let pending = self.pending.clone();
         let id = self.id;
         h.spawn(async move {
-            // the abandoned id can never be answered by this client again
             pending.lock().await.remove(&id);
             let msg = json!({
                 "jsonrpc": "2.0",
@@ -2456,8 +2328,6 @@ impl Drop for CancelGuard {
     }
 }
 
-/// one request/response round trip; shared between McpServer and the
-/// notification-driven re-reads
 async fn request(
     shared: &Arc<Shared>,
     pending: &Pending,
@@ -2476,13 +2346,13 @@ async fn request(
         id,
         armed: false,
     };
-    // http replies come back inline, nothing stays in flight to cancel
+
     if matches!(sent, Ok(_)) && !matches!(shared.reply, Reply::Http(_)) {
         guard.armed = true;
     }
     let res = match sent {
         Err(e) => Err(e),
-        // http replies come back inline; stdio replies arrive via pending
+
         Ok(v) if matches!(shared.reply, Reply::Http(_)) => Ok(v),
         Ok(_) => match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(r)) => {
@@ -2497,10 +2367,6 @@ async fn request(
     res
 }
 
-/// request() with resetTimeoutOnProgress for tools/call (opencode's catalog
-/// hardcodes the hook on): the call deadline restarts every time the server
-/// reports progress for the call's token, so a chatty long-running job is not
-/// killed mid-flight while a silent one still hits the fixed timeout
 async fn request_reset(
     shared: &Arc<Shared>,
     pending: &Pending,
@@ -2512,7 +2378,7 @@ async fn request_reset(
     let id = shared.next_id.fetch_add(1, Ordering::Relaxed) + 1;
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     let notify = Arc::new(tokio::sync::Notify::new());
-    // registered before the send so a note racing the send is not lost
+
     shared
         .progress_reset
         .lock()
@@ -2532,7 +2398,7 @@ async fn request_reset(
     }
     let res = match sent {
         Err(e) => Err(e),
-        // http replies come back inline; stdio/sse replies arrive via pending
+
         Ok(v) if matches!(shared.reply, Reply::Http(_)) => Ok(v),
         Ok(_) => {
             let mut deadline = tokio::time::Instant::now() + timeout;
@@ -2540,7 +2406,7 @@ async fn request_reset(
                 tokio::select! {
                     biased;
                     r = &mut rx => match r {
-                        // the pending channel carries Result<Value> items
+
                         Ok(Ok(r)) => {
                             guard.disarm();
                             break Ok(r);
@@ -2549,8 +2415,7 @@ async fn request_reset(
                             break Err(anyhow::anyhow!("mcp {}: server closed", shared.name))
                         }
                     },
-                    // notify_one stores a permit when nobody waits, so a note
-                    // landing between iterations is consumed on the next poll
+
                     _ = notify.notified() => {
                         deadline = tokio::time::Instant::now() + timeout;
                     }
@@ -2584,8 +2449,6 @@ impl McpServer {
             .map(|_| ())
     }
 
-    /// subscribe to resource updates; the uri registers before the request so
-    /// an update pushed right after the answer is not missed
     async fn subscribe(&self, uri: &str) -> Result<()> {
         if !self.shared.res_sub.load(Ordering::Relaxed) {
             bail!(
@@ -2616,7 +2479,6 @@ impl McpServer {
         }
     }
 
-    /// best-effort: local state wins, a failed unsubscribe request is tolerated
     async fn unsubscribe(&self, uri: &str) -> Result<()> {
         if let Ok(mut g) = self.shared.subs.lock() {
             g.retain(|u| u != uri);
@@ -2635,9 +2497,7 @@ impl McpServer {
         let remote = cfg.r#type.as_deref() == Some("remote")
             || (cfg.command.is_empty() && cfg.url.is_some());
         let sampling = hooks.sampler.is_some() && cfg.sampling != Some(false);
-        // url-mode elicitation needs no eliciter hook (no user input is
-        // collected client-side), only the config opt-out kills it; the form
-        // branch still declines when no eliciter is wired
+
         let elicitation = cfg.elicitation != Some(false);
         let (shared, pending, child, reader, stderr, pre_tasks, init, tree) = if remote {
             let (sh, pd, i, tasks) = connect_remote(cfg, hooks, sampling, elicitation).await?;
@@ -2645,8 +2505,7 @@ impl McpServer {
         } else {
             let mut cmd = tokio::process::Command::new(&cfg.command);
             cmd.args(&cfg.args).envs(&cfg.env);
-            // cwd for local servers: validated up front so a typo fails with
-            // a clear message instead of a generic spawn error
+
             if let Some(wd) = &cfg.cwd {
                 let p = std::path::Path::new(wd);
                 anyhow::ensure!(p.is_dir(), "mcp {}: cwd not found: {wd}", cfg.name);
@@ -2656,15 +2515,12 @@ impl McpServer {
             {
                 cmd.creation_flags(0x0800_0000);
             }
-            // the server gets its own process group (unix) / job object
-            // (windows) so dropping McpServer can take the whole tree down
+
             #[cfg(unix)]
             cmd.process_group(0);
             let mut child = cmd
                 .stdin(std::process::Stdio::piped())
                 .stdout(std::process::Stdio::piped())
-                // stderr is piped so a chatty server cannot block on a full
-                // pipe; the drain task logs it (or discards it)
                 .stderr(std::process::Stdio::piped())
                 .spawn()
                 .with_context(|| format!("mcp {}: spawn {}", cfg.name, cfg.command))?;
@@ -2710,16 +2566,12 @@ impl McpServer {
             prompts: Vec::new(),
             instructions: None,
         };
-        // stderr of a stdio server lands in the shared log buffer (logger
-        // "stderr", info level — /mcplog shows it, the chat is not spammed);
-        // always drained so the child never blocks on a full pipe; the last
-        // chunk also feeds crash diagnostics
+
         if let Some(err) = stderr {
             s.tasks
                 .push(tokio::spawn(stderr_drain(err, s.shared.clone())));
         }
-        // background traffic: stdio reader or the http live stream (a no-op
-        // for the legacy sse transport, which runs its own stream task)
+
         if let Some(reader) = reader {
             s.tasks.push(tokio::spawn(stdio_reader(
                 reader,
@@ -2730,13 +2582,13 @@ impl McpServer {
             s.tasks
                 .push(tokio::spawn(http_live(s.shared.clone(), s.pending.clone())));
         }
-        // how the stdio child died feeds the "server closed" crash message
+
         if let Some(c) = &s.child {
             s.tasks
                 .push(tokio::spawn(exit_monitor(c.clone(), s.shared.clone())));
         }
         s.tasks.extend(pre_tasks);
-        // optional keepalive: periodic pings note alive <-> unresponsive flips
+
         let ka_secs = cfg.keepalive.unwrap_or(0);
         if ka_secs > 0 {
             s.tasks.push(tokio::spawn(keepalive_loop(
@@ -2757,9 +2609,7 @@ impl McpServer {
         if elicitation {
             client_caps["elicitation"] = json!({});
         }
-        // remote transports already answered initialize during transport
-        // selection (and validated the negotiation); stdio sends it here
-        // (bounded by the startup phase)
+
         let init = match init {
             Some(v) => v,
             None => {
@@ -2794,8 +2644,7 @@ impl McpServer {
             .logging
             .store(has_cap(&caps, "logging"), Ordering::Relaxed);
         s.notify_t("notifications/initialized").await?;
-        // tools: strict when the server declares the capability (keeps the oauth 401
-        // hints), tolerated otherwise so tools-less servers still connect
+
         let tools_cap = has_cap(&caps, "tools");
         match s.list_page("tools/list", "tools").await {
             Ok(items) => s.tools = parse_tools(&items),
@@ -2805,14 +2654,12 @@ impl McpServer {
                 }
             }
         }
-        // resources and prompts never fail the connect: older servers may
-        // answer with method-not-found even after advertising the capability
+
         if has_cap(&caps, "resources") {
             if let Ok(items) = s.list_page("resources/list", "resources").await {
                 s.resources = parse_resources(&items);
             }
-            // templates are optional too: a method-not-found just means an
-            // older server with plain resources
+
             if let Ok(items) = s
                 .list_page("resources/templates/list", "resourceTemplates")
                 .await
@@ -2836,9 +2683,6 @@ pub struct McpClient {
 
 pub type McpSlot = std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<McpClient>>>>;
 
-/// last connect failure per server name, for /mcpstatus: the manager only
-/// holds live servers, so a failed connect would otherwise be invisible
-/// (this survives even when every server failed and the client is None)
 static CONNECT_FAILURES: std::sync::Mutex<BTreeMap<String, String>> =
     std::sync::Mutex::new(BTreeMap::new());
 
@@ -2935,8 +2779,6 @@ pub async fn reconnect_one(
     }
 }
 
-/// parse a runtime add spec: `<name> <url>` for remote (anything with ://),
-/// `<name> <command...>` for local; shared by the tui and the gui
 pub fn parse_add(spec: &str) -> Result<McpConfig> {
     let bad = || anyhow::anyhow!("usage: /mcpadd <name> <url> | /mcpadd <name> <command...>");
     let Some((name, rest)) = spec.trim().split_once(char::is_whitespace) else {
@@ -2974,16 +2816,20 @@ pub fn parse_add(spec: &str) -> Result<McpConfig> {
 
 impl McpClient {
     async fn replace(&self, cfg: &McpConfig, hooks: &McpHooks) -> Result<String> {
+        let s = match McpServer::connect(cfg, hooks).await {
+            Ok(s) => s,
+            Err(e) => {
+                note_connect_failure(&cfg.name, &format!("{e:#}"));
+                return Err(e);
+            }
+        };
+        let sum = s.summary();
         let mut servers = self.servers.lock().await;
         servers.retain(|s| s.shared.name != cfg.name);
-        let s = McpServer::connect(cfg, hooks).await?;
-        let sum = s.summary();
         servers.push(s);
         Ok(sum)
     }
 
-    /// connect a server at runtime (from /mcpadd) and slot it in; the
-    /// previous instance only drops after a successful connect
     pub async fn add(&self, cfg: &McpConfig, hooks: &McpHooks) -> Result<String> {
         let s = match McpServer::connect(cfg, hooks).await {
             Ok(s) => s,
@@ -3000,8 +2846,6 @@ impl McpClient {
         Ok(sum)
     }
 
-    /// drop a live server without touching the config (runtime disable);
-    /// a stdio child dies with its McpServer
     pub async fn disconnect(&self, name: &str) -> Result<String> {
         let mut servers = self.servers.lock().await;
         let before = servers.len();
@@ -3030,8 +2874,6 @@ impl McpClient {
         out
     }
 
-    /// per-server instructions from initialize, paired with the server name;
-    /// a server whose every tool is denied by the permission rules stays quiet
     pub async fn instructions(&self, perm: &crate::perm::PermCfg) -> Vec<(String, String)> {
         let servers = self.servers.lock().await;
         servers
@@ -3052,38 +2894,40 @@ impl McpClient {
         let Some((server, tool)) = server_tool.split_once("__") else {
             bail!("bad mcp tool name: {server_tool}");
         };
-        let mut servers = self.servers.lock().await;
-        let Some(s) = servers.iter_mut().find(|s| s.shared.name == server) else {
-            bail!("mcp server not found: {server}");
+        let arguments: Value = serde_json::from_str(args)
+            .map_err(|e| anyhow::anyhow!("mcp {server}: bad tool arguments: {e}"))?;
+        let (shared, pending) = {
+            let mut servers = self.servers.lock().await;
+            let Some(s) = servers.iter_mut().find(|s| s.shared.name == server) else {
+                bail!("mcp server not found: {server}");
+            };
+            (s.shared.clone(), s.pending.clone())
         };
-        let arguments: Value = serde_json::from_str(args).unwrap_or(json!({}));
-        // the token lets the server report live progress via notifications/progress
-        let token = s.shared.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let token = shared.next_id.fetch_add(1, Ordering::Relaxed) + 1;
         let mut params = json!({
             "name": tool,
             "arguments": arguments,
             "_meta": {"progressToken": token}
         });
-        // session passthrough: servers correlate calls to the chat session
-        let sid = s.shared.hooks.session_id();
+        let sid = shared.hooks.session_id();
         if !sid.is_empty() {
             params["_meta"]["ai.hi-derola/sessionID"] = json!(sid);
         }
-        s.shared
+        shared
             .progress
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(token.to_string(), tool.to_string());
         let res = request_reset(
-            &s.shared,
-            &s.pending,
-            exec_to(&s.shared),
+            &shared,
+            &pending,
+            exec_to(&shared),
             "tools/call",
             params,
             &token.to_string(),
         )
         .await;
-        s.shared
+        shared
             .progress
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3103,8 +2947,7 @@ impl McpClient {
         if res["isError"].as_bool().unwrap_or(false) {
             bail!("{}", if text.is_empty() { "tool error" } else { &text });
         }
-        // structuredContent fallback: a server may answer with only
-        // structuredContent and no text blocks
+
         if text.is_empty() {
             if let Some(sc) = res.get("structuredContent") {
                 if !sc.is_null() {
@@ -3118,7 +2961,6 @@ impl McpClient {
         Ok(text)
     }
 
-    /// all resources across servers, in connect order
     pub async fn resources(&self) -> Vec<McpResourceInfo> {
         let mut servers = self.servers.lock().await;
         let mut out = Vec::new();
@@ -3137,7 +2979,6 @@ impl McpClient {
         out
     }
 
-    /// all resource templates across servers, in connect order
     pub async fn templates(&self) -> Vec<McpTemplateInfo> {
         let mut servers = self.servers.lock().await;
         let mut out = Vec::new();
@@ -3156,7 +2997,6 @@ impl McpClient {
         out
     }
 
-    /// read one resource; empty server name auto-resolves when the uri is unique
     pub async fn read_resource(&self, server: &str, uri: &str) -> Result<String> {
         let mut servers = self.servers.lock().await;
         if server.is_empty() {
@@ -3176,7 +3016,6 @@ impl McpClient {
         s.read_resource(uri).await
     }
 
-    /// all prompts across servers, in connect order
     pub async fn prompts(&self) -> Vec<McpPromptInfo> {
         let mut servers = self.servers.lock().await;
         let mut out = Vec::new();
@@ -3202,7 +3041,6 @@ impl McpClient {
         out
     }
 
-    /// fetch prompt messages as (role, text) pairs
     pub async fn get_prompt(
         &self,
         server: &str,
@@ -3216,9 +3054,6 @@ impl McpClient {
         s.get_prompt(name, args).await
     }
 
-    /// update the exposed roots and tell every live server that advertised
-    /// them (the 2026-07-28 protocol deprecates roots, so those servers are
-    /// not notified)
     pub async fn set_roots(&self, dirs: Vec<String>) {
         if let Ok(mut g) = self.hooks.roots.write() {
             *g = dirs;
@@ -3232,7 +3067,6 @@ impl McpClient {
         }
     }
 
-    /// subscribe to a resource so updates arrive as chat notes
     pub async fn subscribe(&self, server: &str, uri: &str) -> Result<()> {
         let servers = self.servers.lock().await;
         let Some(s) = servers.iter().find(|s| s.shared.name == server) else {
@@ -3241,7 +3075,6 @@ impl McpClient {
         s.subscribe(uri).await
     }
 
-    /// stop the subscription; best-effort
     pub async fn unsubscribe(&self, server: &str, uri: &str) -> Result<()> {
         let servers = self.servers.lock().await;
         let Some(s) = servers.iter().find(|s| s.shared.name == server) else {
@@ -3250,7 +3083,6 @@ impl McpClient {
         s.unsubscribe(uri).await
     }
 
-    /// (server, uri) pairs currently subscribed
     pub async fn subscriptions(&self) -> Vec<(String, String)> {
         let servers = self.servers.lock().await;
         let mut out = Vec::new();
@@ -3264,8 +3096,6 @@ impl McpClient {
         out
     }
 
-    /// set the minimum log level (logging/setLevel); empty server name applies
-    /// to every logging-capable server; returns one status line per server
     pub async fn set_log_level(&self, server: &str, level: &str) -> Vec<String> {
         if log_level_rank(level).is_none() {
             return vec![format!(
@@ -3306,7 +3136,6 @@ impl McpClient {
         out
     }
 
-    /// recent notifications/message entries, oldest first
     pub fn logs(&self) -> Vec<McpLogEntry> {
         self.hooks
             .logs
@@ -3318,19 +3147,13 @@ impl McpClient {
     }
 }
 
-/// one per-server line of the /mcpstatus summary
 pub struct McpStatusEntry {
     pub name: String,
-    /// connected | crashed | failed | needs registration | needs auth |
-    /// auth expired | disabled | not connected
+
     pub state: String,
     pub detail: String,
 }
 
-/// assemble the per-server status from the config list, the live manager and
-/// the remembered connect failures (the opencode-style connected / failed /
-/// needs_auth summary); a server only in config but not live and not failed
-/// is simply "not connected"
 pub async fn status(slot: &McpSlot, cfgs: &[McpConfig]) -> Vec<McpStatusEntry> {
     let live = slot.lock().unwrap().clone();
     let mut servers: Vec<(String, String, Option<String>, bool)> = Vec::new();
@@ -3358,8 +3181,7 @@ pub async fn status(slot: &McpSlot, cfgs: &[McpConfig]) -> Vec<McpStatusEntry> {
     let mut out = Vec::new();
     for c in cfgs {
         let name = c.name.clone();
-        // every branch computes the pair, then one push moves it (avoids
-        // borrowing `name` in a detail format after the struct shorthand)
+
         let (state, detail) = if c.enabled == Some(false) {
             ("disabled", "enabled = false in config".to_string())
         } else if let Some((_, sum, exited, alive)) = servers.iter().find(|(n, _, _, _)| *n == name)
@@ -3459,8 +3281,6 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "ping");
 
-        // outputSchema tolerance: exotic outputSchema ignored, broken
-        // inputSchema coerced to a valid object schema
         let weird = parse_tools(&[json!({
             "name": "w",
             "description": "d",
@@ -3531,8 +3351,6 @@ mod tests {
         assert_eq!(hooks.roots.read().unwrap().len(), 1);
     }
 
-    /// spawned as a child process by the connect tests; acts as a fake stdio
-    /// mcp server. plain test run: no-op.
     #[test]
     fn fake_mcp_child() {
         if std::env::var("HI_DEROLA_FAKE_MCP").is_err() {
@@ -3540,7 +3358,7 @@ mod tests {
         }
         let mode = std::env::var("HI_DEROLA_FAKE_MCP").unwrap_or_default();
         use std::io::{BufRead, Write};
-        // stderr probe: the client must pipe it into the log buffer
+
         eprintln!("fake-mcp stderr line");
         let stdin = std::io::stdin();
         let mut out = std::io::stdout().lock();
@@ -3554,7 +3372,7 @@ mod tests {
         let mut url_reply = Value::Null;
         let mut ping_reply = Value::Null;
         let mut tools_listed = 0u32;
-        // the tools/call request "hang" is currently ignoring
+
         let mut hang_id: Option<u64> = None;
         for line in stdin.lock().lines() {
             let Ok(line) = line else { break };
@@ -3564,9 +3382,6 @@ mod tests {
             let method = v["method"].as_str().unwrap_or("").to_string();
             if method == "notifications/initialized" {
                 if mode == "urlmode" {
-                    // url-mode elicitation: one trusted url, one cross-host
-                    // http url the client must reject, then the completion
-                    // notification for the trusted flow
                     let reqs = [
                         json!({"jsonrpc": "2.0", "id": 503, "method": "elicitation/create", "params": {
                             "mode": "url",
@@ -3588,7 +3403,6 @@ mod tests {
                     }
                     out.flush().unwrap();
                 } else if mode != "min" {
-                    // server -> client requests the client must answer
                     let reqs = [
                         json!({"jsonrpc": "2.0", "id": 501, "method": "roots/list", "params": {}}),
                         json!({"jsonrpc": "2.0", "id": 502, "method": "sampling/createMessage", "params": {
@@ -3614,9 +3428,6 @@ mod tests {
                 continue;
             }
             if method.starts_with("notifications/") {
-                // hang reports a cancelled call through the log buffer so the
-                // test can observe that notifications/cancelled arrived and
-                // matched the hanging request
                 if mode == "hang" && method == "notifications/cancelled" {
                     let got = v["params"]["requestId"].as_u64().unwrap_or(0);
                     let data = if Some(got) == hang_id {
@@ -3631,14 +3442,14 @@ mod tests {
                 }
                 continue;
             }
-            // nopong mode keeps pings hanging: keepalive must time out
+
             if method == "ping" && mode == "nopong" {
                 continue;
             }
             let Some(id) = v.get("id").and_then(|x| x.as_u64()) else {
                 continue;
             };
-            // replies to the server-initiated requests above
+
             if (501..=504).contains(&id) {
                 if v.get("error").is_some() {
                     if id == 503 {
@@ -3655,7 +3466,6 @@ mod tests {
                 } else if id == 503 {
                     elicit_reply = v["result"].clone();
                 } else if mode == "urlmode" {
-                    // 504 is the second url-mode elicitation
                     url_reply = v["result"].clone();
                 } else {
                     ping_reply = v["result"].clone();
@@ -3667,22 +3477,16 @@ mod tests {
                     caps_seen = v["params"]["capabilities"].clone();
                     proto_seen = v["params"]["protocolVersion"].clone();
                     if mode == "crash" {
-                        // die with a non-zero code and some stderr noise: the
-                        // client's error must carry both
                         eprintln!("boom-1: exploded during startup");
                         eprintln!("boom-2: giving up");
                         std::process::exit(3);
                     }
                     if mode == "jumbo" {
-                        // one oversized frame before the answer: the reader
-                        // must drop it and still process the real reply
                         let junk = "x".repeat(16 * 1024 * 1024 + 64);
                         writeln!(out, "{junk}").unwrap();
                         out.flush().unwrap();
                     }
                     if mode == "tree" {
-                        // spawn a grandchild the client must take down with
-                        // the tree; its pid rides the log buffer to the test
                         if let Ok(gc) = std::process::Command::new("sleep").arg("30").spawn() {
                             let pid = gc.id();
                             let note = json!({"jsonrpc": "2.0", "method": "notifications/message",
@@ -3695,17 +3499,13 @@ mod tests {
                     } else if mode == "min" {
                         json!({"capabilities": {}})
                     } else if mode == "badproto" {
-                        // a revision this client never spoke: negotiation
-                        // must refuse it (auto/pin), legacy tolerates
                         json!({"protocolVersion": "1999-01-01", "capabilities": {}})
                     } else {
-                        // a well-behaved server accepts the offered version
                         json!({"protocolVersion": v["params"]["protocolVersion"], "capabilities": {"tools": {}, "resources": {"subscribe": true}, "prompts": {}, "logging": {}}, "instructions": "always call ping twice"})
                     }
                 }
                 "tools/list" => {
                     if mode == "min" {
-                        // answered as an error: tolerated because no tools cap
                         let e = json!({"code": -32601, "message": "method not found"});
                         let resp = json!({"jsonrpc": "2.0", "id": id, "error": e});
                         writeln!(out, "{resp}").unwrap();
@@ -3726,14 +3526,8 @@ mod tests {
                 }
                 "tools/call" => {
                     if mode == "struct" {
-                        // no content blocks: the client must fall back to
-                        // structuredContent
                         json!({"structuredContent": {"answer": 42}})
                     } else if mode == "slow" {
-                        // six progress notes 300ms apart, the answer only
-                        // lands after ~1.8s: with resetTimeoutOnProgress a
-                        // 1s deadline keeps sliding, without it the call
-                        // would time out
                         let tok = v["params"]["_meta"]["progressToken"].clone();
                         for i in 1..=6u32 {
                             std::thread::sleep(std::time::Duration::from_millis(300));
@@ -3744,13 +3538,9 @@ mod tests {
                         }
                         json!({"content": [{"type": "text", "text": "slow-done"}]})
                     } else if mode == "hang" {
-                        // never answered: the fixed timeout (or an aborted
-                        // request) must clean up on the client side
                         hang_id = Some(id);
                         continue;
                     } else {
-                        // progress for the in-flight token, then a stale token
-                        // the client must ignore; live refresh trigger last
                         let tok = v["params"]["_meta"]["progressToken"].clone();
                         let notes = [
                             json!({"jsonrpc": "2.0", "method": "notifications/progress",
@@ -3764,7 +3554,7 @@ mod tests {
                             writeln!(out, "{n}").unwrap();
                         }
                         out.flush().unwrap();
-                        // live refresh trigger: notify before answering
+
                         let n =
                             json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"});
                         writeln!(out, "{n}").unwrap();
@@ -3804,7 +3594,6 @@ mod tests {
                     {"role": "user", "content": {"type": "text", "text": "review the code in lang"}}
                 ]}),
                 "resources/subscribe" => {
-                    // update pushed before the answer: the client must not miss it
                     let n = json!({"jsonrpc": "2.0", "method": "notifications/resources/updated",
                         "params": {"uri": v["params"]["uri"]}});
                     writeln!(out, "{n}").unwrap();
@@ -3968,8 +3757,6 @@ mod tests {
             "server ping answered with empty result"
         );
 
-        // the ping reply was preceded by notifications/tools/list_changed:
-        // the next specs() must re-list and see the second tool
         let client = McpClient {
             servers: Mutex::new(vec![s]),
             hooks: hooks.clone(),
@@ -3980,8 +3767,7 @@ mod tests {
         assert_eq!(tpls[0].uri_template, "file:///{path}");
         let specs = client.specs().await;
         assert_eq!(specs.len(), 3, "tools refreshed after list_changed");
-        // outputSchema tolerance: the unresolvable $ref is ignored and the
-        // broken (null) inputSchema is coerced to a valid object schema
+
         let weird = specs.iter().find(|t| t.name == "mcp__t__weird").unwrap();
         assert_eq!(
             weird.parameters,
@@ -4080,8 +3866,6 @@ mod tests {
         assert_eq!(dump["elicitation"]["action"], "decline");
     }
 
-    /// poll the /mcplog ring buffer until an entry containing `needle` shows
-    /// up (server -> client handling is async), 2s budget
     async fn wait_for_log(logs: &McpLogBuf, needle: &str) -> bool {
         for _ in 0..40 {
             {
@@ -4099,7 +3883,6 @@ mod tests {
 
     #[tokio::test]
     async fn url_mode_elicitation_validates_and_completes() {
-        // no eliciter hook: url-mode needs none (no form input is collected)
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws"))).with_notes(tx);
         let logs = hooks.logs.clone();
@@ -4115,20 +3898,20 @@ mod tests {
             .unwrap();
         let dump: Value =
             serde_json::from_str(res["content"][0]["text"].as_str().unwrap()).unwrap();
-        // the trusted https url got the spec reply: the empty result
+
         assert_eq!(
             dump["elicitation"],
             json!({}),
             "url-mode replies empty result"
         );
-        // the cross-host http url was declined
+
         assert_eq!(dump["url_reply"]["action"], "decline");
         assert_eq!(
             dump["caps"]["elicitation"],
             json!({}),
             "cap advertised without eliciter"
         );
-        // surfacing, rejection and completion all landed in /mcplog
+
         assert!(
             wait_for_log(&logs, "url elicitation login-1: sign in to continue").await,
             "surfaced entry missing"
@@ -4141,7 +3924,7 @@ mod tests {
             wait_for_log(&logs, "url elicitation login-1 complete").await,
             "completion entry missing"
         );
-        // the trusted url was surfaced as a note with the url in it
+
         let mut saw_note = false;
         for _ in 0..40 {
             while let Some(ev) = rx.try_recv().ok() {
@@ -4189,7 +3972,7 @@ mod tests {
             json!({"c": "green"}),
             "enum pick by index"
         );
-        // enumNames: the display label maps back to the raw enum value
+
         let named = json!({"type": "object", "properties": {"c": {
             "enum": ["red", "green"], "enumNames": ["Red Team", "Green Team"]
         }}});
@@ -4208,7 +3991,7 @@ mod tests {
             json!({"c": "green"}),
             "index still works with enumNames"
         );
-        // multiselect: comma-separated text maps through items.enum(+Names)
+
         let multi = json!({"type": "object", "properties": {"tags": {
             "type": "array",
             "items": {"enum": ["a", "b", "c"], "enumNames": ["Aa", "Bb", "Cc"]}
@@ -4228,7 +4011,7 @@ mod tests {
             json!({"tags": ["a"]}),
             "multiselect drops unmatched items"
         );
-        // multiselect: a json array answer coerces each element
+
         let schema2 = json!({"type": "object", "properties": {
             "tags": {"type": "array", "items": {"enum": ["a", "b", "c"]}}
         }});
@@ -4237,7 +4020,7 @@ mod tests {
             json!({"tags": ["a", "c"]}),
             "json array answer coerced"
         );
-        // array without items.enum keeps the raw split values
+
         let free = json!({"type": "object", "properties": {
             "tags": {"type": "array", "items": {"type": "string"}}
         }});
@@ -4246,7 +4029,7 @@ mod tests {
             json!({"tags": ["x", "y"]}),
             "free-form array splits on commas"
         );
-        // non-string enums: exact json values pass through
+
         let nums = json!({"type": "object", "properties": {"n": {"enum": [1, 2, 3]}}});
         assert_eq!(
             elicit_content(&nums, r#"{"n": 2}"#).unwrap(),
@@ -4289,7 +4072,6 @@ mod tests {
         assert!(opts.is_empty(), "multi-property schemas get no buttons");
         assert!(!multiple);
 
-        // single array property: multiselect buttons with display labels
         let multi = json!({"type": "object", "properties": {"tags": {
             "type": "array", "items": {"enum": ["a", "b"], "enumNames": ["Aa", "Bb"]}
         }}});
@@ -4306,7 +4088,6 @@ mod tests {
             "buttons carry display labels"
         );
 
-        // single scalar enum property: single-pick buttons, plain hint
         let single = json!({"type": "object", "properties": {"c": {"enum": ["red", "green"]}}});
         let (q, opts, multiple) = elicit_question("pick", &single);
         assert!(!multiple);
@@ -4346,7 +4127,6 @@ mod tests {
         assert_eq!(out.action, "accept");
         assert_eq!(out.content["color"], "green");
 
-        // empty answer (esc in the tui, skip in the gui) cancels
         let (tx2, mut rx2) = tokio::sync::mpsc::unbounded_channel();
         let el2 = default_eliciter(tx2);
         tokio::spawn(async move {
@@ -4377,8 +4157,6 @@ mod tests {
 
         client.call("t__ping", "{}").await.unwrap();
 
-        // the two progress notifications for the in-flight token surfaced,
-        // the stale unknown token did not
         let mut saw = Vec::new();
         while let Ok(crate::provider::ApiEvent::Note(n)) = nrx.try_recv() {
             if n.starts_with("mcp t: ping") {
@@ -4394,7 +4172,6 @@ mod tests {
             "live progress notes, fractional progress kept, unknown token ignored"
         );
 
-        // the token registry is cleaned up after the call
         let servers = client.servers.lock().await;
         assert!(servers[0].shared.progress.lock().unwrap().is_empty());
     }
@@ -4405,8 +4182,7 @@ mod tests {
         let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws"))).with_notes(ntx);
         let cfg = child_cfg_ka("1", None, None, None, Some(1));
         let _s = McpServer::connect(&cfg, &hooks).await.unwrap();
-        // two keepalive intervals with prompt ping answers: no keepalive notes
-        // (the mode-1 child does note its error log message, that one is fine)
+
         tokio::time::sleep(Duration::from_millis(2500)).await;
         while let Ok(crate::provider::ApiEvent::Note(n)) = nrx.try_recv() {
             assert!(
@@ -4422,7 +4198,7 @@ mod tests {
         let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws"))).with_notes(ntx);
         let cfg = child_cfg_ka("nopong", None, None, None, Some(1));
         let _s = McpServer::connect(&cfg, &hooks).await.unwrap();
-        // pings hang, every ping times out after ~1s: exactly one transition note
+
         tokio::time::sleep(Duration::from_millis(3500)).await;
         let mut notes = Vec::new();
         while let Ok(crate::provider::ApiEvent::Note(n)) = nrx.try_recv() {
@@ -4473,8 +4249,6 @@ mod tests {
             vec![("t".to_string(), "mem://stats".to_string())]
         );
 
-        // the fake server pushed notifications/resources/updated right after the
-        // subscribe answer: the client re-reads and notes the fresh content
         let mut saw_update = false;
         for _ in 0..10 {
             match tokio::time::timeout(Duration::from_secs(2), nrx.recv()).await {
@@ -4504,8 +4278,6 @@ mod tests {
             hooks: hooks.clone(),
         };
 
-        // the initialize-phase notifications/message is buffered alongside
-        // the child's stderr probe line (drained into the same buffer)
         let mut ready = false;
         for _ in 0..100 {
             let g = hooks.logs.lock().unwrap();
@@ -4529,7 +4301,6 @@ mod tests {
         drop(logs);
         assert!(client.logs().len() >= 2);
 
-        // error rank also surfaces as a chat note
         let mut saw_log_note = false;
         for _ in 0..10 {
             match tokio::time::timeout(Duration::from_secs(2), nrx.recv()).await {
@@ -4558,7 +4329,7 @@ mod tests {
         let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws"))).with_notes(ntx);
         let cfg = child_cfg_opts("1", None, Some(false));
         let _s = McpServer::connect(&cfg, &hooks).await.unwrap();
-        // the child's stderr probe must be dropped too, not just notifications/message
+
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(
             hooks.logs.lock().unwrap().is_empty(),
@@ -4573,7 +4344,6 @@ mod tests {
         let s = McpServer::connect(&child_cfg("1"), &hooks).await.unwrap();
         assert_eq!(s.instructions.as_deref(), Some("always call ping twice"));
 
-        // min mode: initialize carries no instructions
         let s = McpServer::connect(&child_cfg("min"), &hooks).await.unwrap();
         assert!(s.instructions.is_none());
 
@@ -4593,12 +4363,10 @@ mod tests {
             hooks: hooks.clone(),
         };
 
-        // default permissions: instructions ride the prompt
         let pairs = client.instructions(&crate::perm::PermCfg::default()).await;
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].0, "t");
 
-        // mcp = deny silences every server that has tools
         let perm = crate::perm::PermCfg {
             mcp: Some("deny".into()),
             ..Default::default()
@@ -4621,7 +4389,7 @@ mod tests {
         let s = McpServer::connect(&child_cfg_timeout("1", Some(5)), &hooks)
             .await
             .unwrap();
-        // the legacy blanket timeout overrides every phase
+
         assert_eq!(req_to(&s.shared), Duration::from_secs(5));
         assert_eq!(cat_to(&s.shared), Duration::from_secs(5));
         assert_eq!(exec_to(&s.shared), Duration::from_secs(5));
@@ -4630,7 +4398,6 @@ mod tests {
             Duration::from_secs(5)
         );
 
-        // per-phase fields win over the legacy override
         let mut c = child_cfg_timeout("1", Some(5));
         c.startup_timeout = Some(10);
         c.catalog_timeout = Some(45);
@@ -4641,7 +4408,6 @@ mod tests {
         assert_eq!(exec_to(&s.shared), Duration::from_secs(7200));
         assert_eq!(cfg_connect_timeout(&c), Duration::from_secs(10));
 
-        // defaults stay untouched without any override
         let s = McpServer::connect(&child_cfg("1"), &hooks).await.unwrap();
         assert_eq!(req_to(&s.shared), REQUEST_TIMEOUT);
         assert_eq!(cat_to(&s.shared), CATALOG_TIMEOUT);
@@ -4652,7 +4418,7 @@ mod tests {
     #[tokio::test]
     async fn execution_timeout_bounds_tools_call() {
         let hooks = McpHooks::workspace(None);
-        // a silent call hits the execution deadline
+
         let (client, _) = connect_all(&[child_cfg_exec("hang", Some(1))], &hooks).await;
         let client = client.expect("hang server connects");
         let err = client.call("t__ping", "{}").await.unwrap_err();
@@ -4661,7 +4427,6 @@ mod tests {
             "silent call must hit the execution timeout: {err:#}"
         );
 
-        // a progress-reporting call keeps sliding past the deadline
         let (client, _) = connect_all(&[child_cfg_exec("slow", Some(1))], &hooks).await;
         let client = client.expect("slow server connects");
         let out = client.call("t__ping", "{}").await.unwrap();
@@ -4719,13 +4484,12 @@ mod tests {
         let hooks = McpHooks::workspace(None);
         let (client, _) = connect_all(&[child_cfg("1")], &hooks).await;
         let client = client.expect("server connects");
-        // no session id set: _meta carries only the progress token
+
         let out = client.call("t__ping", "{}").await.unwrap();
         let v: Value = serde_json::from_str(&out).unwrap();
         assert!(v["meta"]["ai.hi-derola/sessionID"].is_null());
         assert!(v["meta"]["progressToken"].is_u64());
 
-        // a session id rides every tools/call
         let session = Arc::new(std::sync::RwLock::new("sess-42".to_string()));
         let hooks = McpHooks::workspace(None).with_session(session);
         let (client, _) = connect_all(&[child_cfg("1")], &hooks).await;
@@ -4735,12 +4499,6 @@ mod tests {
         assert_eq!(v["meta"]["ai.hi-derola/sessionID"], json!("sess-42"));
     }
 
-    /// fake streamable http server with session semantics: a fresh
-    /// mcp-session-id per initialize, DELETE recorded, GET refused (405);
-    /// with expires = true the second catalog request answers 404 once,
-    /// forcing the client's session-expiry reconnect; fail_lists serves that
-    /// many 503s for list-phase methods (retried by the client), fail_calls
-    /// does the same for tools/call (which must NOT be retried)
     fn spawn_fake_streamable(
         expires: bool,
         fail_lists: usize,
@@ -4845,7 +4603,6 @@ mod tests {
                     }
                     let n = st.non_init.fetch_add(1, Ordering::Relaxed);
                     if st.expires && n == 1 {
-                        // the session just "expired": the client must re-init
                         let _ = s.write_all(
                             b"HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nContent-Length: 17\r\nConnection: close\r\n\r\nsession not found",
                         );
@@ -4895,7 +4652,7 @@ mod tests {
         calls_seen: AtomicUsize,
         list_503s: AtomicUsize,
         deletes: std::sync::Mutex<Vec<String>>,
-        /// MCP-Protocol-Version header of every POST (empty string = absent)
+
         proto_hdrs: std::sync::Mutex<Vec<String>>,
     }
 
@@ -4940,8 +4697,6 @@ mod tests {
         );
     }
 
-    /// connect the stdio fake with a protocol_version setting and return the
-    /// dump the fake echoes back (carries the offered version + client caps)
     async fn neg_dump(pv: Option<&str>) -> Value {
         let mut cfg = child_cfg("1");
         cfg.protocol_version = pv.map(|s| s.to_string());
@@ -4960,7 +4715,6 @@ mod tests {
 
     #[tokio::test]
     async fn protocol_negotiation_stdio_modes() {
-        // legacy (absent and explicit): classic stdio version, roots kept
         let d = neg_dump(None).await;
         assert_eq!(
             d["proto"], "2024-11-05",
@@ -4971,7 +4725,6 @@ mod tests {
         assert_eq!(d["proto"], "2024-11-05");
         assert_eq!(d["caps"]["roots"]["listChanged"], true);
 
-        // auto: newest revision offered, deprecated roots dropped
         let d = neg_dump(Some("auto")).await;
         assert_eq!(d["proto"], LATEST_PROTOCOL_VERSION);
         assert!(
@@ -4980,7 +4733,6 @@ mod tests {
         );
         assert_eq!(d["caps"]["elicitation"], json!({}), "other caps untouched");
 
-        // pin: exact version; roots kept below the deprecation revision
         let d = neg_dump(Some("2025-06-18")).await;
         assert_eq!(d["proto"], "2025-06-18");
         assert_eq!(d["caps"]["roots"]["listChanged"], true);
@@ -4994,8 +4746,6 @@ mod tests {
 
     #[tokio::test]
     async fn protocol_negotiation_validates_the_answer() {
-        // auto must refuse a revision it never spoke (the fake answers
-        // 1999-01-01), with a hint at the escape hatch
         let mut cfg = child_cfg("badproto");
         cfg.protocol_version = Some("auto".to_string());
         let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws")));
@@ -5009,7 +4759,6 @@ mod tests {
             "error hints at the config: {err}"
         );
 
-        // legacy trusts the answer: the same server still connects
         let mut cfg = child_cfg("badproto");
         cfg.protocol_version = Some("legacy".to_string());
         let hooks = McpHooks::workspace(Some(std::path::PathBuf::from("/tmp/ws")));
@@ -5040,7 +4789,7 @@ mod tests {
             Some(c) => c,
             None => panic!("server must connect: {logs:?}"),
         };
-        // exercise a real call: the negotiated version rides every later POST
+
         let _ = client.call("t__ping", "{}").await.unwrap();
         let hdrs = state.proto_hdrs.lock().unwrap().clone();
         assert!(!hdrs.is_empty());
@@ -5133,7 +4882,6 @@ mod tests {
             "disabled server exposes no tools"
         );
 
-        // /mcpconnect refuses a disabled server even with a live client
         let slot: McpSlot = std::sync::Arc::new(std::sync::Mutex::new(Some(client)));
         let mut off2 = child_cfg("1");
         off2.name = "off".into();
@@ -5148,13 +4896,13 @@ mod tests {
     #[tokio::test]
     async fn cwd_option_spawns_and_validates() {
         let hooks = McpHooks::workspace(None);
-        // a real dir: connect works
+
         let mut cfg = child_cfg("1");
         cfg.cwd = Some(std::env::temp_dir().display().to_string());
         McpServer::connect(&cfg, &hooks)
             .await
             .expect("valid cwd connects");
-        // a bogus dir: clear error before the spawn
+
         cfg.cwd = Some("/nonexistent-hi-derola-dir/xyz".into());
         match McpServer::connect(&cfg, &hooks).await {
             Ok(_) => panic!("bogus cwd must fail"),
@@ -5165,14 +4913,12 @@ mod tests {
     #[tokio::test]
     async fn reset_timeout_on_progress_extends_call() {
         let hooks = McpHooks::workspace(None);
-        // slow server: ~1.8s of progress notes, then the answer — a fixed 1s
-        // deadline would kill the call, each progress restarts it instead
+
         let (client, _) = connect_all(&[child_cfg_timeout("slow", Some(1))], &hooks).await;
         let client = client.expect("slow server connects");
         let out = client.call("t__ping", "{}").await.unwrap();
         assert_eq!(out, "slow-done");
 
-        // no progress at all: the 1s deadline still fires
         let (client, _) = connect_all(&[child_cfg_timeout("hang", Some(1))], &hooks).await;
         let client = client.expect("hang server connects");
         let err = client.call("t__ping", "{}").await.unwrap_err();
@@ -5191,7 +4937,6 @@ mod tests {
         let shared = s.shared.clone();
         let pending = s.pending.clone();
         let j = tokio::spawn(async move {
-            // mimics a tools/call running inside a chat turn
             let _ = request(
                 &shared,
                 &pending,
@@ -5201,11 +4946,10 @@ mod tests {
             )
             .await;
         });
-        // let the request reach the server and hang
+
         tokio::time::sleep(Duration::from_millis(300)).await;
         j.abort();
-        // the fake server answers notifications/cancelled through the log
-        // buffer; the requestId must match the hanging tools/call
+
         let mut found = false;
         for _ in 0..40 {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -5225,8 +4969,6 @@ mod tests {
         drop(s);
     }
 
-    /// /proc state of a pid: false when gone or already a zombie (a zombie
-    /// still answers kill(pid, 0) but is terminated for our purposes)
     #[cfg(target_os = "linux")]
     fn proc_alive(pid: u32) -> bool {
         match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
@@ -5254,7 +4996,7 @@ mod tests {
             .expect("grandchild pid reported through the log buffer");
         assert!(proc_alive(pid), "grandchild must be alive while connected");
         drop(s);
-        // the whole process group is SIGKILLed with the server
+
         let mut dead = false;
         for _ in 0..40 {
             if !proc_alive(pid) {
@@ -5266,7 +5008,6 @@ mod tests {
         assert!(dead, "grandchild must die together with the server tree");
     }
 
-    /// read one http request (headers + content-length body) from a raw stream
     fn read_http_req(s: &mut std::net::TcpStream) -> String {
         use std::io::Read as _;
         let mut buf = Vec::new();
@@ -5307,12 +5048,11 @@ mod tests {
 
     #[test]
     fn parse_add_specs() {
-        // remote by ://
         let c = parse_add("search https://example.com/mcp?x=1").unwrap();
         assert_eq!(c.name, "search");
         assert_eq!(c.r#type.as_deref(), Some("remote"));
         assert_eq!(c.url.as_deref(), Some("https://example.com/mcp?x=1"));
-        // local command with args
+
         let c = parse_add("fs npx -y @modelcontextprotocol/server-filesystem /tmp").unwrap();
         assert_eq!(c.command, "npx");
         assert_eq!(
@@ -5320,7 +5060,7 @@ mod tests {
             vec!["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
         );
         assert!(c.url.is_none());
-        // bad specs
+
         assert!(parse_add("").is_err());
         assert!(parse_add("justname").is_err());
         assert!(
@@ -5340,7 +5080,6 @@ mod tests {
         let client = client.expect("base server connects");
         assert_eq!(client.specs().await.len(), 1);
 
-        // add a second live server at runtime
         let mut c2 = child_cfg("struct");
         c2.name = "t2".into();
         let sum = client.add(&c2, &hooks).await.unwrap();
@@ -5348,7 +5087,6 @@ mod tests {
         let names: Vec<String> = client.specs().await.into_iter().map(|t| t.name).collect();
         assert!(names.contains(&"mcp__t2__ping".to_string()), "{names:?}");
 
-        // re-add replaces instead of duplicating
         client.add(&c2, &hooks).await.unwrap();
         let names: Vec<String> = client.specs().await.into_iter().map(|t| t.name).collect();
         assert_eq!(
@@ -5357,7 +5095,6 @@ mod tests {
             "re-add replaces, got {names:?}"
         );
 
-        // disconnect drops it, a second disconnect errors
         assert_eq!(
             client.disconnect("t2").await.unwrap(),
             "mcp t2: disconnected"
@@ -5366,7 +5103,7 @@ mod tests {
         assert!(!names.iter().any(|n| n.starts_with("mcp__t2__")));
         let err = client.disconnect("t2").await.unwrap_err().to_string();
         assert!(err.contains("not connected"), "{err}");
-        // the first server is untouched
+
         assert_eq!(names.len(), 1);
     }
 
@@ -5375,7 +5112,7 @@ mod tests {
         use std::io::Write as _;
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
-        // writer handle: the post handlers answer over the get stream
+
         let writer: Arc<std::sync::Mutex<Option<std::net::TcpStream>>> = Arc::default();
         std::thread::spawn(move || {
             for stream in listener.incoming() {
@@ -5390,7 +5127,6 @@ mod tests {
                     let path = target.split('?').next().unwrap_or("/").to_string();
                     let body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
                     if method == "POST" && path == "/mcp" {
-                        // streamable http unsupported: a legacy sse-only server
                         let _ = s.write_all(
                             b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                         );
@@ -5400,12 +5136,11 @@ mod tests {
                         let _ = s.write_all(
                             b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n",
                         );
-                        // share the writer before the announcement: posts may
-                        // arrive as soon as the client sees the endpoint
+
                         *w.lock().unwrap() = Some(s.try_clone().unwrap());
                         let _ = s.write_all(b"event: endpoint\ndata: /messages?sessionId=s1\n\n");
                         let _ = s.flush();
-                        // hold the stream open; post handlers write the replies
+
                         loop {
                             std::thread::park();
                         }
@@ -5449,15 +5184,13 @@ mod tests {
         assert_eq!(specs.len(), 1, "tools listed over the sse transport");
         assert_eq!(specs[0].name, "mcp__t__sse_tool");
         assert!(logs.iter().any(|l| l.contains("connected")), "{logs:?}");
-        // initialize rode the sse transport: instructions arrived over the stream
+
         assert_eq!(
             client.instructions(&crate::perm::PermCfg::default()).await,
             vec![("t".to_string(), "via legacy sse".to_string())]
         );
     }
 
-    // CONNECT_FAILURES is a process global: status tests serialize on it so
-    // parallel test threads do not pollute each other's expectations
     static STATUS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn status_cfg(name: &str) -> McpConfig {
@@ -5471,15 +5204,15 @@ mod tests {
     fn exec_timeout_resolution() {
         let cfg = McpConfig::default();
         assert_eq!(exec_timeout(&cfg, None), EXECUTION_TIMEOUT);
-        // the global agent.mcp_timeout fills in when the server sets nothing
+
         assert_eq!(exec_timeout(&cfg, Some(120)), Duration::from_secs(120));
-        // the per-server legacy blanket beats the global
+
         let cfg = McpConfig {
             timeout: Some(60),
             ..Default::default()
         };
         assert_eq!(exec_timeout(&cfg, Some(120)), Duration::from_secs(60));
-        // the per-server execution_timeout beats everything
+
         let cfg = McpConfig {
             timeout: Some(60),
             execution_timeout: Some(10),
@@ -5495,20 +5228,16 @@ mod tests {
         let slot: McpSlot = Arc::new(std::sync::Mutex::new(None));
         let cfgs = vec![status_cfg("st-failed"), status_cfg("st-plain")];
 
-        // nothing failed yet: both are just "not connected"
         let list = status(&slot, &cfgs).await;
         assert_eq!(list[0].state, "not connected");
         assert_eq!(list[1].state, "not connected");
 
-        // a remembered connect failure shows up as "failed" with the error
         note_connect_failure("st-failed", "server closed (exit code 3)");
         let list = status(&slot, &cfgs).await;
         assert_eq!(list[0].state, "failed");
         assert!(list[0].detail.contains("exit code 3"));
         assert_eq!(list[1].state, "not connected");
 
-        // a rejected dynamic registration surfaces as needs registration
-        // with the static client_id hint
         note_connect_failure(
             "st-failed",
             "dynamic registration failed: 404 Not Found — add oauth.client_id",
@@ -5545,8 +5274,7 @@ mod tests {
             oauth: Some(crate::config::McpOAuthOpt::Off(true)),
             ..Default::default()
         }];
-        // the auth store has no entry for this name in tests: needs auth
-        // (use a name that cannot exist in the real store)
+
         let list = status(&slot, &cfgs).await;
         let entry = &list[0];
         if entry.state == "needs auth" || entry.state == "auth expired" {

@@ -18,7 +18,7 @@ pub enum Op {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Hunk {
-    rows: Vec<(u8, String)>, // 0 context, 1 add, 2 delete
+    rows: Vec<(u8, String)>,
 }
 
 impl Hunk {
@@ -101,16 +101,16 @@ impl Active {
     }
 }
 
-/// Parse the V4A patch format: *** Begin Patch / *** Add File / *** Update File
-/// (*** Move to) with ' ', '-' and '+' body lines, '@@' hunk separators and
-/// *** Delete File / *** End Patch. Structural only: contents are applied in plan().
 pub fn parse(text: &str) -> Result<Vec<Op>> {
     let mut ops: Vec<Op> = Vec::new();
     let mut active: Option<Active> = None;
     for raw in text.lines() {
         let line = clean(raw);
         let header = line.strip_prefix("*** ").unwrap_or("");
-        if header == "Begin Patch" || header == "End Patch" {
+        if header == "End Patch" {
+            break;
+        }
+        if header == "Begin Patch" {
             continue;
         }
         if line.trim().is_empty() && active.is_none() {
@@ -218,8 +218,6 @@ pub fn parse(text: &str) -> Result<Vec<Op>> {
     Ok(ops)
 }
 
-/// returns (offset, fuzzy) where fuzzy means the match only held after
-/// trimming trailing whitespace from both sides
 fn find_hunk(body: &[String], h: &Hunk, path: &str, idx: usize) -> Result<(usize, bool)> {
     let old = h.old();
     if old.is_empty() {
@@ -253,8 +251,6 @@ fn find_hunk(body: &[String], h: &Hunk, path: &str, idx: usize) -> Result<(usize
     )
 }
 
-/// returns (display, write target, patched content) — pure: the raw file
-/// content comes in, callers decide where it is read from (host fs or VM)
 fn update_content(
     raw: &str,
     path: &str,
@@ -276,8 +272,6 @@ fn update_content(
         let (at, fuzzy) = find_hunk(&body[pos..], h, path, i + 1)?;
         out.extend_from_slice(&body[pos..pos + at]);
         if fuzzy {
-            // context lines keep their original trailing whitespace,
-            // only '+' lines come from the patch
             let mut oi = 0usize;
             for (k, s) in &h.rows {
                 match k {
@@ -296,7 +290,7 @@ fn update_content(
     }
     out.extend_from_slice(&body[pos..]);
     let mut content = out.join("\n");
-    if had_nl && !content.ends_with('\n') {
+    if had_nl && !out.is_empty() && !content.ends_with('\n') {
         content.push('\n');
     }
     if crlf && !content.is_empty() {
@@ -319,8 +313,6 @@ pub struct Planned {
     pub items: Vec<(char, String)>,
 }
 
-/// Validate ops against the filesystem and compute patched contents without
-/// writing anything; commit() applies the plan.
 pub fn plan(ops: Vec<Op>) -> Result<Planned> {
     plan_with(
         ops,
@@ -329,9 +321,6 @@ pub fn plan(ops: Vec<Op>) -> Result<Planned> {
     )
 }
 
-/// same as plan(), but reads file contents and existence through the given
-/// closures — the sandbox guest tools use this to validate and patch VM
-/// files over ssh instead of host paths
 pub fn plan_with(
     ops: Vec<Op>,
     read: &dyn Fn(&str) -> Result<String>,
@@ -372,6 +361,11 @@ pub fn plan_with(
                 move_to,
                 hunks,
             } => {
+                if let Some(to) = &move_to {
+                    if to != &path && exists(to)? {
+                        bail!("apply_patch: Move to: {to}: already exists");
+                    }
+                }
                 let raw = read(&path)
                     .map_err(|e| anyhow!("apply_patch: Update File: {path}: {:#}", e))?;
                 let (display, target, content) = update_content(&raw, &path, &move_to, &hunks)?;
@@ -391,7 +385,6 @@ pub fn plan_with(
     })
 }
 
-/// applies the plan and returns the written file paths (moves target the new path)
 pub fn commit(p: Planned) -> Result<Vec<String>> {
     for (path, content) in &p.write {
         let fp = std::path::Path::new(path);
@@ -408,7 +401,6 @@ pub fn commit(p: Planned) -> Result<Vec<String>> {
     Ok(p.write.into_iter().map(|(p, _)| p).collect())
 }
 
-/// every path mentioned by the patch, in order of appearance (Move to included)
 pub fn paths(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for raw in text.lines() {
@@ -435,8 +427,6 @@ pub struct Preview {
     pub new: Option<String>,
 }
 
-/// best-effort per-file before/after for the diff preview; entries are skipped
-/// when the patch or the file is unreadable
 pub fn preview(text: &str) -> Vec<Preview> {
     let Ok(ops) = parse(text) else {
         return Vec::new();
@@ -479,7 +469,6 @@ pub fn preview(text: &str) -> Vec<Preview> {
     out
 }
 
-/// One-line-per-file summary for the detail view: "A a.rs, M b.rs -> c.rs, D d.rs"
 pub fn summarize(text: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     let mut pending: Option<(char, String)> = None;
@@ -532,8 +521,6 @@ mod tests {
 
     #[test]
     fn plan_with_closures_behave_like_plan() {
-        // the guest apply_patch path plans against closures instead of the
-        // host fs — semantics must be identical
         let mut files = std::collections::BTreeMap::new();
         files.insert("a.txt".to_string(), "one\ntwo\n".to_string());
         let read = |p: &str| -> Result<String> {
@@ -541,11 +528,9 @@ mod tests {
         };
         let exists = |p: &str| -> Result<bool> { Ok(files.contains_key(p)) };
 
-        // deleting a missing file must fail before anything is planned
         let patch = "*** Begin Patch\n*** Add File: b.txt\n+hello\n*** Delete File: nope.txt\n*** End Patch";
         assert!(plan_with(parse(patch).unwrap(), &read, &exists).is_err());
 
-        // add + update go through
         let patch =
             "*** Begin Patch\n*** Add File: b.txt\n+hello\n*** Update File: a.txt\n@@\n one\n-two\n+TWO\n*** End Patch";
         let planned = plan_with(parse(patch).unwrap(), &read, &exists).unwrap();
@@ -560,7 +545,6 @@ mod tests {
         assert!(planned.items.contains(&('A', "b.txt".to_string())));
         assert!(planned.items.contains(&('M', "a.txt".to_string())));
 
-        // moving a file writes the new path and deletes the old one
         files.insert("m.txt".to_string(), "x\n".to_string());
         let read2 = |p: &str| -> Result<String> {
             files.get(p).cloned().ok_or_else(|| anyhow!("missing {p}"))

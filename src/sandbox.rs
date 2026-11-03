@@ -1,37 +1,3 @@
-//! Local sandbox: disposable QEMU virtual machines so the agent (and the
-//! user's files) can live away from the host machine.
-//!
-//! Phase 1 covered the lifecycle around the VM itself: QEMU detection, a
-//! creation wizard (image -> resources -> create) with resumable downloads
-//! and progress reporting, and start/stop/delete backed by a small on-disk
-//! store.
-//!
-//! Phase 2 makes the VM agent-ready: cloud images get a cloud-init seed
-//! (`seed.rs` — CIDATA volume with the wizard login + a generated ssh key,
-//! sudo per the root flag), the guest sshd is polled through the host ssh
-//! client (`sshx`) and surfaces as a per-card ssh badge, a terminal window
-//! can be opened into the VM, and the agent itself can be installed inside
-//! the guest (config upload + rustup + cargo install, live log) and then
-//! launched there as a TUI — so the agent works on VM files, never on yours.
-//!
-//! Phase 3 wires the VM into the agent loop: every distro comes in a
-//! minimal / standard pair (the wizard and the TUI /sandbox command can
-//! pick either), and the chat can attach to a running VM so the bash tool
-//! executes inside it over ssh ("shell route") — the model works on VM
-//! files without its commands ever touching the host.
-//!
-//! Storage layout under `<config dir>/hi-derola/sandboxes/`:
-//! ```text
-//! <id>/sandbox.json   the SandboxSpec the wizard produced
-//! <id>/state.json     { "pid": <u32|null> } — qemu pid for crash recovery
-//! <id>/image.qcow2    downloaded cloud image (debian / ubuntu kinds)
-//! <id>/disk.qcow2     the VM disk (overlay on top of image.qcow2)
-//! <id>/seed.img       cloud-init CIDATA volume (cloud kinds only)
-//! <id>/id_ed25519(.pub)  the VM ssh keypair baked into the seed
-//! <id>/known_hosts    per-sandbox host keys (accept-new)
-//! <id>/qemu.log       stderr/stdout of the last qemu run (crash tail)
-//! ```
-
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -42,23 +8,17 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// Debian 13 "trixie" minimal cloud image (genericcloud — the smallest
-/// variant, built for virtual machines; boots both BIOS and UEFI)
 pub const DEBIAN_TRIXIE_URL: &str =
     "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2";
-/// Debian 13 "trixie" standard cloud image (generic — the full variant with
-/// more packages on board, same cloud-init wiring)
+
 pub const DEBIAN_TRIXIE_STD_URL: &str =
     "https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2";
-/// Ubuntu 24.04 LTS *minimal* cloud image — Canonical trims it to boot
-/// smaller and faster than the standard server cloud image
+
 pub const UBUNTU_2404_URL: &str = "https://cloud-images.ubuntu.com/minimal/releases/24.04/release/ubuntu-24.04-minimal-cloudimg-amd64.img";
-/// Ubuntu 24.04 LTS standard server cloud image (the classic one — bigger,
-/// but ships the full server toolset out of the box)
+
 pub const UBUNTU_2404_STD_URL: &str =
     "https://cloud-images.ubuntu.com/releases/24.04/release/ubuntu-24.04-server-cloudimg-amd64.img";
-/// legacy NixOS entry: kept so old sandbox.json files still load, no longer
-/// offered by the wizard (no cloud-init → no seed/ssh login wiring)
+
 pub const NIXOS_URL: &str =
     "https://channels.nixos.org/nixos-25.05/latest-nixos-minimal-x86_64-linux.qcow2";
 
@@ -71,7 +31,6 @@ pub const PORT_MIN: u16 = 1024;
 pub const PORT_MAX: u16 = 65_535;
 pub const DEFAULT_PORT: u16 = 2222;
 
-/// how long the ssh-wait thread polls the guest sshd after boot
 pub const SSH_WAIT_SECS: u64 = 600;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,11 +43,9 @@ pub enum ImageKind {
     Ubuntu2404,
     #[serde(rename = "ubuntu-24.04-std")]
     Ubuntu2404Std,
-    /// legacy: not offered by the wizard anymore, but old sandboxes must
-    /// keep loading (see NIXOS_URL)
+
     Nixos,
-    /// user-provided image file: .iso boots as install media (cdrom),
-    /// anything else (qcow2/raw/vdi/...) is used as the VM disk directly
+
     Custom,
 }
 
@@ -119,8 +76,6 @@ impl ImageKind {
         self.url().is_some()
     }
 
-    /// kinds that ship cloud-init and therefore get a seed image, an ssh
-    /// keypair and the wait/install tooling
     pub fn wants_seed(self) -> bool {
         matches!(
             self,
@@ -132,8 +87,6 @@ impl ImageKind {
     }
 }
 
-/// extra tcp forwards on the user-mode net (host side binds loopback;
-/// applied on the next VM start)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PortFwd {
     pub host_port: u16,
@@ -146,26 +99,24 @@ fn default_fwd_host() -> String {
     "127.0.0.1".to_string()
 }
 
-/// the VM shape the wizard produces; persisted verbatim as sandbox.json
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxSpec {
     pub id: String,
     pub name: String,
-    /// in-VM ssh login the cloud-init seed creates (cloud kinds)
+
     #[serde(default = "default_login")]
     pub login: String,
     pub kind: ImageKind,
-    /// absolute path to the user-provided image (kind = custom)
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub iso_path: Option<String>,
     pub disk_gib: u32,
     pub ram_mib: u32,
     pub cpus: u32,
-    /// whether the in-VM agent may run as root: passwordless sudo comes
-    /// from the cloud-init seed when on, no sudo at all when off
+
     #[serde(default)]
     pub root: bool,
-    /// host port forwarded to guest ssh (22)
+
     pub ssh_port: u16,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub forwards: Vec<PortFwd>,
@@ -176,7 +127,6 @@ fn default_login() -> String {
     crate::seed::DEFAULT_LOGIN.to_string()
 }
 
-/// wizard request; every resource field is optional and clamped
 #[derive(Debug, Clone, Deserialize)]
 pub struct NewSandbox {
     pub name: String,
@@ -206,14 +156,13 @@ pub enum VmState {
     Failed,
 }
 
-/// QEMU availability snapshot shown by the wizard banner
 #[derive(Debug, Clone, Serialize)]
 pub struct QemuInfo {
     pub system_path: Option<String>,
     pub system_version: Option<String>,
     pub img_path: Option<String>,
     pub img_version: Option<String>,
-    /// whpx | kvm | hvf | tcg (tcg = slow software emulation fallback)
+
     pub accel: Option<String>,
 }
 
@@ -223,7 +172,6 @@ impl QemuInfo {
     }
 }
 
-/// serializable download progress snapshot (the live one lives in atomics)
 #[derive(Debug, Clone, Serialize)]
 pub struct DownloadProgress {
     pub url: String,
@@ -241,21 +189,18 @@ pub struct SandboxStatus {
     pub dir: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub download: Option<DownloadProgress>,
-    /// ssh/agent reachability (seed kinds only, meaningful while running)
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssh: Option<SshInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-// ------------------------------------------------------------ ssh & agent
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SshState {
-    /// VM not running (or the wait thread was cancelled) — the GUI hides it
     Idle,
-    /// polling the guest sshd
+
     Waiting,
     Ready,
     Failed,
@@ -264,15 +209,12 @@ pub enum SshState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentState {
-    /// not probed / not installed
     Unknown,
     Installing,
     Installed,
     Failed,
 }
 
-/// install progress for the in-VM agent; `log` is the tail of the remote
-/// bootstrap output (rustup/cargo lines stream in while it runs)
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentInfo {
     pub state: AgentState,
@@ -284,24 +226,20 @@ pub struct AgentInfo {
     pub log: Vec<String>,
 }
 
-/// the per-sandbox ssh snapshot the GUI polls (state machine owned by the
-/// wait/install threads, guarded by one mutex)
 #[derive(Debug, Clone, Serialize)]
 pub struct SshInfo {
     pub state: SshState,
     pub user: String,
     pub port: u16,
-    /// seconds the last ready-wait took (or is ticking while waiting)
+
     pub elapsed_secs: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     pub agent: AgentInfo,
 }
 
-/// live ssh/agent bookkeeping for one sandbox (in-memory only)
 #[derive(Debug)]
 pub struct SshLive {
-    /// stop() / delete() / a new wait run flip this to interrupt the threads
     pub cancel: AtomicBool,
     pub info: Mutex<SshInfo>,
 }
@@ -334,7 +272,6 @@ impl SshLive {
         f(&mut self.info.lock().unwrap());
     }
 
-    /// keep at most the last N bootstrap log lines
     const LOG_TAIL: usize = 200;
     fn push_log(&self, line: &str) {
         self.set(|i| {
@@ -347,9 +284,6 @@ impl SshLive {
     }
 }
 
-// ---------------------------------------------------------------- detection
-
-/// search PATH (plus a few well-known install dirs on Windows) for a binary
 pub fn find_binary(name: &str) -> Option<PathBuf> {
     let names: Vec<String> = if cfg!(windows) {
         vec![format!("{name}.exe")]
@@ -379,7 +313,6 @@ pub fn find_binary(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// "QEMU emulator version 8.2.0 (Debian 1:8.2.0+ds-1)" -> the whole first line
 pub fn parse_version_line(output: &str) -> Option<String> {
     output
         .lines()
@@ -397,7 +330,6 @@ pub fn parse_version_line(output: &str) -> Option<String> {
         .map(|l| l.to_string())
 }
 
-/// parse `qemu-system-x86_64 -accel help` output; falls back to "tcg"
 pub fn parse_accel_list(output: &str) -> String {
     let low = output.to_lowercase();
     for accel in ["whpx", "kvm", "hvf"] {
@@ -435,7 +367,6 @@ fn detect_accel(system: &Path) -> String {
     }
 }
 
-/// probe qemu-system-x86_64 + qemu-img and the best hardware accelerator
 pub fn detect_qemu() -> QemuInfo {
     let system = find_binary("qemu-system-x86_64");
     let img = find_binary("qemu-img");
@@ -451,9 +382,6 @@ pub fn detect_qemu() -> QemuInfo {
     }
 }
 
-// ------------------------------------------------------------- arg builders
-
-/// pure qemu-system arg list for a spec (program path is prepended by the caller)
 pub fn build_qemu_args(spec: &SandboxSpec, dir: &Path, accel: &str) -> Vec<String> {
     let mut a: Vec<String> = vec![
         "-machine".into(),
@@ -461,7 +389,7 @@ pub fn build_qemu_args(spec: &SandboxSpec, dir: &Path, accel: &str) -> Vec<Strin
         "-accel".into(),
         accel.into(),
     ];
-    // tcg (software emulation) benefits from the widest cpu model
+
     if accel == "tcg" {
         a.extend(["-cpu".into(), "max".into()]);
     }
@@ -483,7 +411,6 @@ pub fn build_qemu_args(spec: &SandboxSpec, dir: &Path, accel: &str) -> Vec<Strin
             ]);
         }
         ImageKind::Custom => {
-            // user's own disk image is booted directly, no local disk needed
             a.extend([
                 "-drive".into(),
                 format!(
@@ -501,8 +428,6 @@ pub fn build_qemu_args(spec: &SandboxSpec, dir: &Path, accel: &str) -> Vec<Strin
                 ),
             ]);
             if spec.kind.wants_seed() {
-                // cloud-init NoCloud seed: a tiny FAT volume labeled CIDATA
-                // carrying user-data/meta-data (login + ssh key)
                 a.extend([
                     "-drive".into(),
                     format!(
@@ -516,9 +441,6 @@ pub fn build_qemu_args(spec: &SandboxSpec, dir: &Path, accel: &str) -> Vec<Strin
 
     a.extend([
         "-netdev".into(),
-        // loopback bind: the guest ssh is reachable from this machine only
-        // (and no firewall prompt on windows); extra forwards from the spec
-        // ride the same user-mode net
         format!(
             "user,id=n0,hostfwd=tcp:127.0.0.1:{}-:22{}",
             spec.ssh_port,
@@ -544,7 +466,6 @@ pub fn build_qemu_args(spec: &SandboxSpec, dir: &Path, accel: &str) -> Vec<Strin
     a
 }
 
-/// pure qemu-img arg list: overlay on the cloud image or a fresh disk
 pub fn build_img_args(kind: ImageKind, dir: &Path, disk_gib: u32) -> Vec<String> {
     let disk = dir.join("disk.qcow2");
     match kind {
@@ -583,9 +504,6 @@ fn is_iso_path(path: Option<&str>) -> bool {
     }
 }
 
-// ------------------------------------------------------------------ manager
-
-/// live download state kept in atomics; snapshot() renders it for the UI
 #[derive(Debug)]
 struct ProgShared {
     url: String,
@@ -622,19 +540,16 @@ struct Entry {
     spec: SandboxSpec,
     state: VmState,
     pid: Option<u32>,
-    /// pid was recovered from state.json after an app restart — the OS may
-    /// have recycled it for an unrelated process, so verify before killing
+
     pid_from_disk: bool,
     prog: Option<Arc<ProgShared>>,
-    /// ssh/agent state machine (seed kinds only)
+
     ssh: Option<Arc<SshLive>>,
     error: Option<String>,
-    /// set right before we kill qemu so the watchdog reports Stopped, not Failed
+
     stopping: bool,
 }
 
-/// persisted as <id>/state.json so a running VM survives (and is detected
-/// after) an app restart
 #[derive(Debug, Serialize, Deserialize)]
 struct PersistState {
     #[serde(default)]
@@ -646,19 +561,15 @@ pub struct SandboxManager {
     inner: Mutex<BTreeMap<String, Entry>>,
 }
 
-/// tests root the shared manager at a scratch dir instead of the real
-/// config dir; must be set before the first `global()` call
 #[cfg(test)]
 static TEST_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// point `global()` at a scratch dir (test-only, first call wins)
 #[cfg(test)]
 pub fn test_global_dir(dir: PathBuf) {
     let _ = TEST_DIR.set(dir);
 }
 
 impl SandboxManager {
-    /// manager rooted at <config>/hi-derola/sandboxes (shared app instance)
     pub fn global() -> &'static Arc<SandboxManager> {
         static M: OnceLock<Arc<SandboxManager>> = OnceLock::new();
         M.get_or_init(|| {
@@ -666,13 +577,12 @@ impl SandboxManager {
             #[cfg(test)]
             let dir = TEST_DIR.get().cloned().unwrap_or(dir);
             let m = Arc::new(SandboxManager::new(dir));
-            // VMs found running after an app restart resume their ssh probing
+
             m.spawn_ssh_wait_all();
             m
         })
     }
 
-    /// <config>/hi-derola/sandboxes next to config.toml
     fn default_dir() -> PathBuf {
         crate::config::config_path()
             .parent()
@@ -697,8 +607,6 @@ impl SandboxManager {
         self.dir.join(id)
     }
 
-    /// rescan the storage dir; a stored pid that is still alive means the VM
-    /// survived an app restart and shows up as running
     pub fn reload(&self) {
         let Ok(entries) = std::fs::read_dir(&self.dir) else {
             return;
@@ -789,8 +697,6 @@ impl SandboxManager {
         }
     }
 
-    /// add an extra tcp forward (host loopback -> guest); takes effect on
-    /// the next VM start
     pub fn fwd_add(
         &self,
         id: &str,
@@ -835,7 +741,6 @@ impl SandboxManager {
         self.status_of(id)
     }
 
-    /// remove the forward with the given host-side port
     pub fn fwd_del(&self, id: &str, host_port: u16) -> Result<SandboxStatus> {
         let mut done = false;
         self.with_entry(id, |e| {
@@ -857,7 +762,6 @@ impl SandboxManager {
         }
     }
 
-    /// validate + clamp a wizard request into a spec (no side effects)
     fn prepare_spec(&self, req: &NewSandbox) -> Result<SandboxSpec> {
         let name = req.name.trim();
         if name.is_empty() {
@@ -927,9 +831,6 @@ impl SandboxManager {
         })
     }
 
-    /// create a sandbox from the wizard request; cloud kinds start
-    /// downloading immediately (progress via list()) and get their
-    /// cloud-init seed written before the first boot can ever happen
     pub fn create(self: &Arc<Self>, req: &NewSandbox) -> Result<SandboxStatus> {
         let spec = self.prepare_spec(req)?;
         let dir = self.sandbox_dir(&spec.id);
@@ -938,8 +839,6 @@ impl SandboxManager {
         std::fs::write(dir.join("sandbox.json"), raw)?;
         self.persist_pid(&spec.id, None);
 
-        // the seed (login + ssh key + sudo per the root flag) must be on
-        // disk before the first boot; a failure surfaces as a failed sandbox
         let seed_err = if spec.kind.wants_seed() {
             crate::seed::ensure_seed(&dir, &spec.id, &spec.login, spec.root).err()
         } else {
@@ -996,8 +895,6 @@ impl SandboxManager {
             .ok_or_else(|| anyhow!("sandbox \"{id}\" not found"))
     }
 
-    /// start the VM (or, for a cloud kind whose image is missing, restart
-    /// the download — the same button doubles as retry)
     pub fn start(self: &Arc<Self>, id: &str) -> Result<SandboxStatus> {
         let spec = {
             let map = self.inner.lock().unwrap();
@@ -1019,13 +916,11 @@ impl SandboxManager {
         let img = PathBuf::from(qemu.img_path.unwrap());
         let accel = qemu.accel.unwrap_or_else(|| "tcg".to_string());
 
-        // ensure the disk exists (custom disk images skip this entirely)
         let disk = dir.join("disk.qcow2");
         let custom_disk_boot =
             spec.kind == ImageKind::Custom && !is_iso_path(spec.iso_path.as_deref());
         if !custom_disk_boot {
             if spec.kind.needs_download() && !dir.join("image.qcow2").is_file() {
-                // image not there (deleted / failed download) -> retry the download
                 let url = spec.kind.url().unwrap_or_default().to_string();
                 self.spawn_download(id.to_string(), url, dir.join("image.qcow2"));
                 self.with_entry(id, |e| {
@@ -1049,9 +944,6 @@ impl SandboxManager {
             }
         }
 
-        // make sure the cloud-init seed exists (heals sandboxes created
-        // before phase 2 and ones whose files were wiped; the VM must not
-        // boot without it or the login/key never materialize)
         if spec.kind.wants_seed() {
             crate::seed::ensure_seed(&dir, &spec.id, &spec.login, spec.root)
                 .map_err(|e| anyhow!("seed: {e:#}"))?;
@@ -1092,8 +984,6 @@ impl SandboxManager {
         self.status_of(id)
     }
 
-    /// kill only when the pid is ours from this session or really a qemu
-    /// process (protects against pid reuse after an app restart)
     fn kill_trusted(&self, id: &str, pid: u32) {
         let trusted = {
             let map = self.inner.lock().unwrap();
@@ -1107,15 +997,19 @@ impl SandboxManager {
         }
     }
 
-    /// stop the VM (or clear a failure / cancel nothing else)
     pub fn stop(&self, id: &str) -> Result<SandboxStatus> {
         let pid = {
             let mut map = self.inner.lock().unwrap();
             let e = map
                 .get_mut(id)
                 .ok_or_else(|| anyhow!("sandbox \"{id}\" not found"))?;
+            if let Some(p) = &e.prog {
+                p.cancel.store(true, Ordering::Relaxed);
+            }
             e.stopping = true;
-            e.state = VmState::Stopped;
+            if e.state != VmState::Downloading {
+                e.state = VmState::Stopped;
+            }
             e.error = None;
             if let Some(live) = &e.ssh {
                 live.cancel.store(true, Ordering::Relaxed);
@@ -1135,8 +1029,6 @@ impl SandboxManager {
         self.status_of(id)
     }
 
-    /// delete the sandbox dir; a running VM is stopped first, an in-flight
-    /// download is cancelled, ssh/install threads are interrupted
     pub fn delete(self: &Arc<Self>, id: &str) -> Result<()> {
         clear_shell_route_if(id);
         let pid = {
@@ -1154,11 +1046,11 @@ impl SandboxManager {
         };
         if let Some(p) = pid {
             self.kill_trusted(id, p);
-            // give the OS a moment to release the file handles before rm -rf
+
             std::thread::sleep(Duration::from_millis(150));
         }
         map_remove(&self.inner, id);
-        self.persist_pid(id, None); // keep state.json consistent if dir removal races
+        self.persist_pid(id, None);
         let dir = self.sandbox_dir(id);
         if dir.exists() {
             std::fs::remove_dir_all(&dir).with_context(|| format!("remove {}", dir.display()))?;
@@ -1171,11 +1063,7 @@ fn map_remove(map: &Mutex<BTreeMap<String, Entry>>, id: &str) -> bool {
     map.lock().unwrap().remove(id).is_some()
 }
 
-// ----------------------------------------------------------------- download
-
 impl SandboxManager {
-    /// stream the image to `dest` on a dedicated thread (its own tiny tokio
-    /// runtime; reqwest::chunk needs no extra features), reporting progress
     fn spawn_download(self: &Arc<Self>, id: String, url: String, dest: PathBuf) {
         let prog = Arc::new(ProgShared::new(url.clone()));
         self.with_entry(&id, |e| {
@@ -1191,7 +1079,8 @@ impl SandboxManager {
                 .build()
                 .map_err(|e| format!("runtime: {e}"))
                 .and_then(|rt| rt.block_on(download_to_file(&url, &part, &prog)));
-            let ok = result.is_ok() && !prog.cancel.load(Ordering::Relaxed);
+            let cancelled = prog.cancel.load(Ordering::Relaxed);
+            let ok = result.is_ok() && !cancelled;
             prog.done.store(true, Ordering::Relaxed);
             let mut error = result.err();
             if ok {
@@ -1201,11 +1090,9 @@ impl SandboxManager {
             } else {
                 let _ = std::fs::remove_file(&part);
             }
-            let final_state = if ok {
+            let final_state = if ok || cancelled {
                 VmState::Stopped
             } else {
-                // a cancelled download belongs to a deleted sandbox in the
-                // common case; if the entry survives, allow a clean retry
                 match error.as_deref() {
                     Some(e) if e.contains("cancelled") => VmState::Stopped,
                     _ => VmState::Failed,
@@ -1231,6 +1118,7 @@ impl SandboxManager {
 async fn download_to_file(url: &str, dest: &Path, prog: &ProgShared) -> Result<(), String> {
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(30))
+        .read_timeout(Duration::from_secs(60))
         .build()
         .map_err(|e| format!("client: {e}"))?;
     let mut resp = client
@@ -1257,11 +1145,7 @@ async fn download_to_file(url: &str, dest: &Path, prog: &ProgShared) -> Result<(
     Ok(())
 }
 
-// -------------------------------------------------------------- vm watchdog
-
 impl SandboxManager {
-    /// owns the qemu child; when it exits on its own (crash, busy port,
-    /// bad image) the sandbox flips to failed with the qemu.log tail
     fn spawn_watchdog(self: &Arc<Self>, id: String, mut child: std::process::Child) {
         let mgr = self.clone();
         std::thread::spawn(move || {
@@ -1277,7 +1161,7 @@ impl SandboxManager {
             };
             mgr.with_entry(&id, |e| {
                 if e.pid != Some(pid) {
-                    return; // a newer run owns this entry
+                    return;
                 }
                 e.pid = None;
                 if let Some(live) = &e.ssh {
@@ -1292,8 +1176,7 @@ impl SandboxManager {
                     e.state = VmState::Stopped;
                 } else {
                     e.state = VmState::Failed;
-                    // the route would just error on the next bash call anyway
-                    // (self-heal there), detaching now keeps the state honest
+
                     clear_shell_route_if(&id);
                     let mut msg = reason;
                     let log = mgr.sandbox_dir(&id).join("qemu.log");
@@ -1310,14 +1193,11 @@ impl SandboxManager {
     }
 }
 
-// --------------------------------------------------------------- ssh bridge
-
 impl SandboxManager {
     fn ssh_target(dir: &Path, spec: &SandboxSpec) -> crate::sshx::SshTarget {
         crate::sshx::SshTarget::new(dir, spec.ssh_port, &spec.login)
     }
 
-    /// (spec, dir, live ssh state) for a sandbox that has one
     fn ssh_parts(&self, id: &str) -> Option<(SandboxSpec, PathBuf, Arc<SshLive>)> {
         let map = self.inner.lock().unwrap();
         map.get(id).and_then(|e| {
@@ -1327,8 +1207,6 @@ impl SandboxManager {
         })
     }
 
-    /// resume ssh probing for every VM that reload() found still running
-    /// (the app was restarted under a live guest)
     pub fn spawn_ssh_wait_all(self: &Arc<Self>) {
         let ids: Vec<String> = {
             let map = self.inner.lock().unwrap();
@@ -1342,9 +1220,6 @@ impl SandboxManager {
         }
     }
 
-    /// background thread: poll the guest sshd until it answers, then probe
-    /// for an already-installed agent (the disk survives restarts); the
-    /// whole ride is visible on the card as a waiting -> ready badge
     fn spawn_ssh_wait(self: &Arc<Self>, id: String) {
         let mgr = self.clone();
         std::thread::spawn(move || {
@@ -1371,8 +1246,6 @@ impl SandboxManager {
             let started = Instant::now();
             let deadline = started + Duration::from_secs(SSH_WAIT_SECS);
 
-            // a 1s ticker keeps the "waiting… Ns" counter alive while the
-            // poller blocks on ssh attempts
             let stop_ticker = Arc::new(AtomicBool::new(false));
             let ticker = {
                 let live = live.clone();
@@ -1411,8 +1284,7 @@ impl SandboxManager {
                         i.elapsed_secs = secs;
                         i.error = None;
                     });
-                    // reflect an agent that is already installed; an install
-                    // in flight is never touched by the probe
+
                     if let Ok(p) = crate::sshx::probe_agent(&bin, &target, &live.cancel) {
                         live.set(|i| {
                             if i.agent.state != AgentState::Installing {
@@ -1442,11 +1314,6 @@ impl SandboxManager {
         }
     }
 
-    /// install (or reinstall) the agent inside the running VM: upload the
-    /// host config (the agent needs its provider + api key), stream the
-    /// bootstrap script (apt tools per the root flag -> rustup -> cargo
-    /// install from the public repo), then verify the binary. Runs on its
-    /// own thread; the card follows the log.
     pub fn install_agent(self: &Arc<Self>, id: &str) -> Result<SandboxStatus> {
         let (spec, _dir, live) = self
             .ssh_parts(id)
@@ -1483,7 +1350,6 @@ impl SandboxManager {
             let target = Self::ssh_target(&mgr.sandbox_dir(&id), &spec);
             let cancel = &live.cancel;
 
-            // 1. the agent needs the host config (provider + api key) to run
             match std::fs::read_to_string(crate::config::config_path()) {
                 Ok(cfg) => {
                     live.push_log("[*] uploading the host config (provider, api key)");
@@ -1516,7 +1382,6 @@ impl SandboxManager {
                 }
             }
 
-            // 2. the bootstrap itself
             let res = crate::sshx::stream(
                 &bin,
                 &target,
@@ -1553,8 +1418,6 @@ impl SandboxManager {
         self.status_of(&id)
     }
 
-    /// open a terminal window with an interactive ssh session into the VM
-    /// (plain shell, or the agent TUI when `agent` is on)
     pub fn open_terminal(&self, id: &str, agent: bool) -> Result<()> {
         let (spec, dir, live) = self
             .ssh_parts(id)
@@ -1572,8 +1435,6 @@ impl SandboxManager {
         crate::sshx::spawn_terminal(&bin, &args).map_err(|e| anyhow!("{e}"))
     }
 
-    /// run one command in the VM and return its output (power-user path;
-    /// later phases route agent tools through this)
     pub fn ssh_exec(
         &self,
         id: &str,
@@ -1599,8 +1460,6 @@ impl SandboxManager {
         .map_err(|e| anyhow!("{e}"))
     }
 
-    /// pipe stdin bytes into a remote command (`cat > file` style writes);
-    /// returns (exit code, tail of the remote output for error messages)
     pub fn ssh_stream(
         &self,
         id: &str,
@@ -1640,40 +1499,27 @@ impl SandboxManager {
     }
 }
 
-// ------------------------------------------------------------- shell route
-
-/// id of the sandbox or remote host the bash tool currently executes in
-/// ("shell route", attached via the TUI /sandbox or /host commands); global,
-/// so both frontends route the same way and the flag survives across chat
-/// sessions in one process. Values: "sbx:<id>" or "host:<id>" (a bare
-/// sandbox id from older sessions is treated as "sbx:<id>").
 static SHELL_ROUTE: Mutex<Option<String>> = Mutex::new(None);
 
-/// the attached route id, if any ("sbx:<id>" or "host:<id>")
 pub fn shell_route() -> Option<String> {
     SHELL_ROUTE.lock().unwrap().clone()
 }
 
-/// the attached sandbox id, if any
 pub fn shell_route_sbx() -> Option<String> {
     let r = SHELL_ROUTE.lock().unwrap().clone()?;
     let id = r.strip_prefix("sbx:").unwrap_or(&r).to_string();
     (r.starts_with("sbx:") || !r.starts_with("host:")).then_some(id)
 }
 
-/// the attached remote host id, if any
 pub fn shell_route_host() -> Option<String> {
     let r = SHELL_ROUTE.lock().unwrap().clone()?;
     r.strip_prefix("host:").map(|s| s.to_string())
 }
 
-/// attach / detach shell routing; callers validate the target first
 pub fn set_shell_route(id: Option<String>) {
     *SHELL_ROUTE.lock().unwrap() = id;
 }
 
-/// drop the route when it points at a sandbox that just stopped, failed or
-/// was deleted; a no-op when another target is attached
 fn clear_shell_route_if(id: &str) {
     let mut r = SHELL_ROUTE.lock().unwrap();
     let hit = match r.as_deref() {
@@ -1690,9 +1536,6 @@ enum RouteTarget {
     Host(String, String),
 }
 
-/// resolve the attached target for any routed tool call: (id, display name),
-/// detaching first when the target is gone/offline so a stale route cannot
-/// wedge the agent
 fn route_resolve() -> Result<RouteTarget> {
     let raw = shell_route().ok_or_else(|| anyhow!("no sandbox or host attached"))?;
     if let Some(id) = raw.strip_prefix("host:") {
@@ -1727,7 +1570,6 @@ fn route_resolve() -> Result<RouteTarget> {
     Ok(RouteTarget::Sbx(id, st.spec.name))
 }
 
-/// display name of the attached target ("box" / "box (debian)" / "web (host)")
 pub fn route_name() -> Option<String> {
     match route_resolve() {
         Ok(RouteTarget::Sbx(_, n)) => Some(n),
@@ -1736,7 +1578,6 @@ pub fn route_name() -> Option<String> {
     }
 }
 
-/// run one command on the attached target (sandbox VM or remote host)
 fn route_ssh_exec(command: &str, timeout_secs: Option<u64>) -> Result<crate::sshx::SshOut> {
     match route_resolve()? {
         RouteTarget::Sbx(id, _) => SandboxManager::global().ssh_exec(&id, command, timeout_secs),
@@ -1746,7 +1587,6 @@ fn route_ssh_exec(command: &str, timeout_secs: Option<u64>) -> Result<crate::ssh
     }
 }
 
-/// pipe stdin bytes into a command on the attached target
 fn route_ssh_stream(
     command: &str,
     stdin: &[u8],
@@ -1762,10 +1602,6 @@ fn route_ssh_stream(
     }
 }
 
-/// run one bash-tool command on the attached target over ssh and format the
-/// result like the local bash tool does (stdout+stderr combined, "(no
-/// output)" for silence, exit code appended on failure). Detaches itself
-/// when the target is gone so a stale route cannot wedge the agent.
 pub fn sandbox_bash(cmd: &str, timeout_secs: Option<u64>) -> Result<String> {
     let out = route_ssh_exec(cmd, Some(timeout_secs.unwrap_or(120).clamp(1, 600)))?;
     let mut text = out.stdout;
@@ -1784,9 +1620,6 @@ pub fn sandbox_bash(cmd: &str, timeout_secs: Option<u64>) -> Result<String> {
     Ok(text)
 }
 
-/// system-prompt addendum while the shell route is active: the model must
-/// know its commands AND file tools run on the attached machine, not on the
-/// host
 pub fn shell_route_addendum() -> Option<String> {
     let mode = match route_resolve() {
         Ok(RouteTarget::Sbx(_, name)) => format!(
@@ -1812,23 +1645,10 @@ pub fn shell_route_addendum() -> Option<String> {
     ))
 }
 
-// -------------------------------------------------------- guest file tools
-//
-// While a sandbox is attached, the agent's file tools execute inside the VM
-// over the same ssh channel as the bash tool. Transports: `base64 -w0` for
-// reads (byte-exact, survives any encoding) and `cat > file` through the
-// ssh stdin pipe for writes. Matching/searching (glob, grep) runs with the
-// guest's GNU find/grep and is filtered/formatted host-side so the model
-// sees the exact same output shapes as with the host tools.
-
-/// quote one string for a remote shell command line (the ssh exec argument
-/// is parsed by the guest login shell)
 fn sq(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// paths as the model sees them: relative to the guest home, printed without
-/// the noisy "./" prefix and with the search root trimmed when given
 fn guest_rel(line: &str, dir: &str) -> String {
     let l = line.strip_prefix("./").unwrap_or(line);
     if dir == "." || dir.is_empty() {
@@ -1840,7 +1660,6 @@ fn guest_rel(line: &str, dir: &str) -> String {
         .unwrap_or_else(|| l.to_string())
 }
 
-/// fetch one file's bytes from the attached target (size-capped, base64 over ssh)
 fn guest_fetch_cap(path: &str, cap: u64) -> Result<Vec<u8>> {
     let out = route_ssh_exec(&format!("wc -c < {}", sq(path)), Some(30))?;
     if out.code != 0 {
@@ -1864,10 +1683,6 @@ fn guest_fetch(path: &str) -> Result<Vec<u8>> {
     guest_fetch_cap(path, crate::tools::MAX_ATTACH_BYTES)
 }
 
-/// apply_patch on the attached target: plan_with validates against remote
-/// files (reads via base64, existence via `test -e`), then every write and
-/// delete goes through the remote primitives — all-or-nothing like the host
-/// tool. Every overwrite is recorded for the VM undo stack first.
 pub fn guest_apply_patch(patch_text: &str) -> Result<String> {
     route_resolve()?;
     let read = |p: &str| -> Result<String> {
@@ -1897,8 +1712,6 @@ pub fn guest_apply_patch(patch_text: &str) -> Result<String> {
     Ok(out)
 }
 
-/// fetch an image from the attached target for vision attach — same (mime,
-/// base64) shape as files::read_image, so the chat plumbing is identical
 pub fn guest_read_image(path: &str) -> Result<(String, String)> {
     route_resolve()?;
     let out = route_ssh_exec(&format!("wc -c < {}", sq(path)), Some(30))?;
@@ -1924,8 +1737,6 @@ pub fn guest_read_image(path: &str) -> Result<(String, String)> {
     ))
 }
 
-/// copy one file out of the VM onto the host (the "get my work back" path:
-/// base64 over ssh, then a plain host write)
 pub fn fetch_from_vm(id: &str, vm_path: &str, host_path: &str) -> Result<String> {
     let out = SandboxManager::global().ssh_exec(
         id,
@@ -1952,11 +1763,7 @@ pub fn fetch_from_vm(id: &str, vm_path: &str, host_path: &str) -> Result<String>
     ))
 }
 
-/// push a host file into a specific VM (parent dirs created); the
-/// counterpart of `fetch_from_vm` for quick one-file delivery — unlike the
-/// routed guest tools this targets the given sandbox id directly
 pub fn push_to_vm(id: &str, host_path: &str, vm_path: &str) -> Result<String> {
-    // ssh_stream buffers the bytes in memory, so keep a generous but sane cap
     const MAX_PUSH: u64 = 256 * 1024 * 1024;
     let meta = std::fs::metadata(host_path).map_err(|e| anyhow!("{host_path}: {e}"))?;
     if !meta.is_file() {
@@ -1991,15 +1798,6 @@ pub fn push_to_vm(id: &str, host_path: &str, vm_path: &str) -> Result<String> {
     ))
 }
 
-// -------------------------------------------------------- vm background bash
-//
-// `background = true` while a VM is attached starts the command as a remote
-// nohup task (setsid process group, output to a guest log file, exit code
-// captured into a sibling .code file). A host-side watcher polls the log and
-// the liveness of the pid over ssh every ~2s, streams new bytes into the bg
-// registry and reports completion through the same queue/wake plumbing as
-// local background bash, so task_status / task_kill keep working unchanged.
-
 type BgVms = HashMap<String, (String, u32, String, String)>;
 
 static BG_VMS: OnceLock<Arc<Mutex<BgVms>>> = OnceLock::new();
@@ -2008,7 +1806,6 @@ fn bg_vms() -> &'static Arc<Mutex<BgVms>> {
     BG_VMS.get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
 }
 
-/// remember which guest job belongs to a bg task id (for task_kill)
 pub fn vm_bg_register(bg_id: &str, sandbox: &str, pid: u32, log: &str, code_file: &str) {
     bg_vms().lock().unwrap().insert(
         bg_id.to_string(),
@@ -2033,8 +1830,6 @@ fn vm_bg_lookup(bg_id: &str) -> Option<(String, u32)> {
         .map(|(s, p, _, _)| (s.clone(), *p))
 }
 
-/// spawn a background command on the attached target; returns (route id,
-/// remote pid, remote log path, remote code file path)
 pub fn vm_bg_spawn(cmd: &str) -> Result<(String, u32, String, String)> {
     let route = shell_route().ok_or_else(|| anyhow!("no sandbox or host attached"))?;
     let name = route_name().unwrap_or_else(|| route.clone());
@@ -2056,7 +1851,6 @@ pub fn vm_bg_spawn(cmd: &str) -> Result<(String, u32, String, String)> {
     Ok((route, pid, log.clone(), format!("{log}.code")))
 }
 
-/// parse `vm_bg_spawn` stdout: first line = guest pid, second = log path
 fn parse_vm_bg_spawn(stdout: &str) -> Result<(u32, String)> {
     let mut lines = stdout.lines();
     let pid = lines
@@ -2074,9 +1868,6 @@ fn parse_vm_bg_spawn(stdout: &str) -> Result<(u32, String)> {
     Ok((pid, log))
 }
 
-/// run one command on a stored route id ("sbx:<id>" / "host:<id>") — the
-/// background-task counterpart of route_ssh_exec that does not touch the
-/// live route
 fn route_exec_by(
     route: &str,
     command: &str,
@@ -2089,7 +1880,6 @@ fn route_exec_by(
     SandboxManager::global().ssh_exec(id, command, timeout_secs)
 }
 
-/// kill the remote process group of a background task (best effort)
 pub fn vm_bg_kill(route: &str, pid: u32) -> Result<()> {
     route_exec_by(
         route,
@@ -2099,7 +1889,6 @@ pub fn vm_bg_kill(route: &str, pid: u32) -> Result<()> {
     Ok(())
 }
 
-/// kill by bg task id (used by the bg registry kill hook)
 pub fn vm_bg_kill_by_id(bg_id: &str) -> String {
     match vm_bg_lookup(bg_id) {
         Some((sandbox, pid)) => match vm_bg_kill(&sandbox, pid) {
@@ -2110,8 +1899,6 @@ pub fn vm_bg_kill_by_id(bg_id: &str) -> String {
     }
 }
 
-/// one watcher poll: how many bytes the log has now, the new bytes, and
-/// whether the remote process is still alive (with its exit code when gone)
 pub struct VmBgPoll {
     pub size: u64,
     pub chunk: String,
@@ -2158,8 +1945,6 @@ pub fn vm_bg_poll(
     })
 }
 
-/// parse the liveness probe output: "RUNNING" while alive, else
-/// "DONE" followed by the captured exit code line
 fn parse_vm_bg_alive(stdout: &str) -> (bool, Option<i32>) {
     if stdout.contains("RUNNING") {
         return (true, None);
@@ -2171,7 +1956,6 @@ fn parse_vm_bg_alive(stdout: &str) -> (bool, Option<i32>) {
     (false, code)
 }
 
-/// push bytes into a remote file (parent dirs created), `cat >` over ssh stdin
 fn guest_push(path: &str, bytes: &[u8]) -> Result<()> {
     let dir = match path.rsplit_once('/') {
         Some((d, _)) if !d.is_empty() => d,
@@ -2192,15 +1976,11 @@ fn guest_push(path: &str, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// capture the current content of a remote file into the VM undo stack
-/// (best effort: a failed fetch just means "the file does not exist yet")
 fn record_vm_overwrite(path: &str) {
     let old = guest_fetch_cap(path, crate::snapshot::VM_SNAPSHOT_FILE_CAP).ok();
     crate::snapshot::vm_record(path, old);
 }
 
-/// transport for the routed-target undo store: current bytes of one remote
-/// file (None when missing/unreadable/oversized)
 pub fn vm_fetch_capped(path: &str, cap: u64) -> Option<Vec<u8>> {
     if shell_route().is_none() {
         return None;
@@ -2208,8 +1988,6 @@ pub fn vm_fetch_capped(path: &str, cap: u64) -> Option<Vec<u8>> {
     guest_fetch_cap(path, cap).ok()
 }
 
-/// transport for the routed-target undo store: put bytes back (or remove
-/// the file when the turn started without it); bypasses undo recording
 pub fn vm_restore(path: &str, data: Option<&[u8]>) {
     let res = match data {
         Some(bytes) => guest_push(path, bytes),
@@ -2220,14 +1998,12 @@ pub fn vm_restore(path: &str, data: Option<&[u8]>) {
     }
 }
 
-/// read_file on the attached target: same numbered format as the host reader
 pub fn guest_read(path: &str, offset: usize, limit: usize) -> Result<String> {
     route_resolve()?;
     let bytes = guest_fetch(path)?;
     crate::tools::format_numbered(path, bytes, offset, limit)
 }
 
-/// write_file on the attached target
 pub fn guest_write(path: &str, content: &str) -> Result<String> {
     route_resolve()?;
     record_vm_overwrite(path);
@@ -2235,8 +2011,6 @@ pub fn guest_write(path: &str, content: &str) -> Result<String> {
     Ok(format!("wrote {path} ({} lines)", content.lines().count()))
 }
 
-/// edit on the attached target: fetch, string-replace with the host matching
-/// rules (crlf/bom/unicode/fuzzy tolerance), push back
 pub fn guest_edit(path: &str, old: &str, new: &str, replace_all: bool) -> Result<String> {
     route_resolve()?;
     let bytes = guest_fetch(path)?;
@@ -2252,7 +2026,6 @@ pub fn guest_edit(path: &str, old: &str, new: &str, replace_all: bool) -> Result
     ))
 }
 
-/// list_files on the attached target: 3 levels of `find -printf`, dirs marked with /
 pub fn guest_list_files(dir: &str) -> Result<String> {
     route_resolve()?;
     let max = crate::tools::MAX_LIST;
@@ -2283,8 +2056,6 @@ pub fn guest_list_files(dir: &str) -> Result<String> {
     Ok(entries.join("\n"))
 }
 
-/// glob on the attached target: the remote lists files with find, host-side
-/// glob matching picks the winners (same pattern dialect as the local tool)
 pub fn guest_glob(dir: &str, pattern: &str) -> Result<String> {
     use crate::search::{glob_match, MAX_RESULTS};
     route_resolve()?;
@@ -2318,10 +2089,6 @@ pub fn guest_glob(dir: &str, pattern: &str) -> Result<String> {
     Ok(s)
 }
 
-/// grep inside the VM: GNU grep -rInE in the guest, output parsed and
-/// grouped host-side exactly like the local tool. The regex crate validates
-/// the pattern first so error messages match the host tool; \d/\D are
-/// translated to their ERE spellings.
 pub fn guest_grep(dir: &str, pattern: &str, include: Option<&str>) -> Result<String> {
     use crate::search::MAX_RESULTS;
     if let Err(e) = regex::Regex::new(pattern) {
@@ -2347,7 +2114,6 @@ pub fn guest_grep(dir: &str, pattern: &str, include: Option<&str>) -> Result<Str
     let mut hits: Vec<(String, usize, String)> = Vec::new();
     let mut more = false;
     for line in out.stdout.lines() {
-        // "path:line:text" — the line number sits between the first two colons
         let Some(a) = line.find(':') else { continue };
         let rest = &line[a + 1..];
         let Some(b) = rest.find(':') else { continue };
@@ -2382,7 +2148,6 @@ pub fn guest_grep(dir: &str, pattern: &str, include: Option<&str>) -> Result<Str
     Ok(s)
 }
 
-/// compact single-line ssh error for tool output
 fn one_line(stderr: &str, code: i32) -> String {
     let msg = stderr.trim();
     if msg.is_empty() {
@@ -2392,7 +2157,6 @@ fn one_line(stderr: &str, code: i32) -> String {
     }
 }
 
-/// last `max` bytes of a file, char-boundary safe, as one trimmed line block
 fn tail_file(path: &Path, max: usize) -> String {
     let Ok(raw) = std::fs::read(path) else {
         return String::new();
@@ -2411,9 +2175,6 @@ fn tail_file(path: &Path, max: usize) -> String {
         .join(" | ")
 }
 
-// ------------------------------------------------------------- ids & misc
-
-/// lowercase ascii slug of the sandbox name (fallback "sandbox")
 pub fn map_id_slug(name: &str) -> String {
     let mut out = String::new();
     for ch in name.trim().to_lowercase().chars() {
@@ -2434,7 +2195,6 @@ pub fn map_id_slug(name: &str) -> String {
     }
 }
 
-/// slug + short random suffix, uniquified with `taken`
 fn unique_id(base: &str, mut taken: impl FnMut(&str) -> bool) -> String {
     for _ in 0..64 {
         let mut b = [0u8; 2];
@@ -2453,7 +2213,6 @@ fn unique_id(base: &str, mut taken: impl FnMut(&str) -> bool) -> String {
     )
 }
 
-/// hide the console window a helper process would flash on Windows
 pub(crate) fn silent(cmd: &mut Command) -> &mut Command {
     #[cfg(windows)]
     {
@@ -2466,13 +2225,10 @@ pub(crate) fn silent(cmd: &mut Command) -> &mut Command {
 
 #[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
-    // EPERM means "exists but not ours" — still alive
     let r = unsafe { libc::kill(pid as i32, 0) };
     r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
-/// true if the pid belongs to a qemu binary; guards against the OS recycling
-/// a stored pid for an unrelated process between app restarts
 fn pid_is_qemu(pid: u32) -> bool {
     #[cfg(unix)]
     {
@@ -2543,7 +2299,7 @@ mod tests {
         assert_eq!(sq("a'b"), "'a'\\''b'");
         assert_eq!(sq("$(rm -rf ~)"), "'$(rm -rf ~)'");
         assert_eq!(sq(""), "''");
-        // the escaping round-trips: sh -c would see the original string back
+
         let quoted = sq("it's \"ok\"");
         assert!(quoted.starts_with('\'') && quoted.ends_with('\''));
         assert!(quoted.contains(r"'\'"));
@@ -2555,7 +2311,7 @@ mod tests {
         assert_eq!(guest_rel("src/lib.rs", "."), "src/lib.rs");
         assert_eq!(guest_rel("/home/u/src/lib.rs", "/home/u"), "src/lib.rs");
         assert_eq!(guest_rel("/home/u/src/lib.rs", "/home/u/"), "src/lib.rs");
-        // outside the root: returned untouched
+
         assert_eq!(guest_rel("/etc/passwd", "/home/u"), "/etc/passwd");
     }
 
@@ -2572,11 +2328,11 @@ mod tests {
         let (pid, log) = parse_vm_bg_spawn("12345\n/root/.hi-derola-bg/x.log\n").unwrap();
         assert_eq!(pid, 12345);
         assert_eq!(log, "/root/.hi-derola-bg/x.log");
-        // whitespace tolerant
+
         let (pid, log) = parse_vm_bg_spawn(" 42 \n /tmp/l.log \n").unwrap();
         assert_eq!(pid, 42);
         assert_eq!(log, "/tmp/l.log");
-        // garbage is a clean error, not a bogus task
+
         assert!(parse_vm_bg_spawn("").is_err());
         assert!(parse_vm_bg_spawn("abc\n/x.log\n").is_err());
         assert!(parse_vm_bg_spawn("0\n/x.log\n").is_err());
@@ -2588,24 +2344,22 @@ mod tests {
         assert_eq!(parse_vm_bg_alive("RUNNING\n"), (true, None));
         assert_eq!(parse_vm_bg_alive("DONE\n0\n"), (false, Some(0)));
         assert_eq!(parse_vm_bg_alive("DONE\n127\n"), (false, Some(127)));
-        // no code file -> the `|| echo 0` fallback already ran; a bare DONE
-        // yields no code (treated as -1 by the caller)
+
         assert_eq!(parse_vm_bg_alive("DONE\n"), (false, None));
     }
 
     #[test]
     fn guest_read_uses_the_shared_numbered_formatter() {
-        // format_numbered is the shared read_file formatter for host and VM
         let out = crate::tools::format_numbered("t.rs", b"fn a() {}\nfn b() {}\n".to_vec(), 1, 1)
             .unwrap();
         assert!(out.starts_with("t.rs (2 lines)\n"));
         assert!(out.contains("1\u{2192}fn a() {}"));
         assert!(out.contains("... (+1 more lines, use offset 2)"));
-        // binary detection survives the base64 round trip by construction
+
         let bin = vec![0u8, 1, 2, 3];
         let out = crate::tools::format_numbered("t.bin", bin, 1, 10).unwrap();
         assert!(out.contains("binary file (4 bytes)"));
-        // oversize is rejected before any formatting
+
         let big = vec![b'x'; (crate::tools::MAX_ATTACH_BYTES + 1) as usize];
         assert!(crate::tools::format_numbered("big", big, 1, 10).is_err());
     }
@@ -2668,7 +2422,7 @@ mod tests {
         );
         let k: ImageKind = serde_json::from_str("\"ubuntu-24.04\"").unwrap();
         assert_eq!(k, ImageKind::Ubuntu2404);
-        // legacy kinds keep loading
+
         let k: ImageKind = serde_json::from_str("\"nixos\"").unwrap();
         assert_eq!(k, ImageKind::Nixos);
         assert_eq!(ImageKind::DebianTrixie.url(), Some(DEBIAN_TRIXIE_URL));
@@ -2727,22 +2481,19 @@ mod tests {
         assert!(ImageKind::Ubuntu2404.wants_seed());
         assert!(ImageKind::DebianTrixieStd.wants_seed());
         assert!(ImageKind::Ubuntu2404Std.wants_seed());
-        // no cloud-init -> no seed/ssh wiring
+
         assert!(!ImageKind::Nixos.wants_seed());
         assert!(!ImageKind::Custom.wants_seed());
     }
 
     #[test]
     fn shell_route_set_clear_and_detach() {
-        // root the shared manager at a scratch dir: global() must not touch
-        // the real config dir from tests
         test_global_dir(
             std::env::temp_dir().join(format!("hiderola-sbx-test-{}", std::process::id())),
         );
         set_shell_route(None);
         assert!(shell_route().is_none());
 
-        // attach + pointwise clear of a different id keeps the route
         set_shell_route(Some("sbx:vm-a".into()));
         clear_shell_route_if("vm-b");
         assert_eq!(shell_route().as_deref(), Some("sbx:vm-a"));
@@ -2751,12 +2502,10 @@ mod tests {
         clear_shell_route_if("vm-a");
         assert!(shell_route().is_none());
 
-        // a bare legacy id still counts as a sandbox route
         set_shell_route(Some("vm-a".into()));
         assert_eq!(shell_route_sbx().as_deref(), Some("vm-a"));
         set_shell_route(None);
 
-        // a host route only clears through its own path
         set_shell_route(Some("host:web-1".into()));
         assert_eq!(shell_route_host().as_deref(), Some("web-1"));
         assert!(shell_route_sbx().is_none());
@@ -2764,11 +2513,9 @@ mod tests {
         assert_eq!(shell_route_host().as_deref(), Some("web-1"));
         set_shell_route(None);
 
-        // sandbox_bash without a route is a clean error
         let err = sandbox_bash("true", None).unwrap_err().to_string();
         assert!(err.contains("no sandbox or host attached"), "{err}");
 
-        // a route pointing at a nonexistent sandbox self-detaches
         set_shell_route(Some("sbx:ghost-vm".into()));
         let err = sandbox_bash("true", None).unwrap_err().to_string();
         assert!(err.contains("no longer exists"), "{err}");
@@ -2806,14 +2553,14 @@ mod tests {
         assert!(s.contains("-m 2048"));
         assert!(s.contains("-smp 2"));
         assert!(s.contains("file=/vm/test/disk.qcow2,format=qcow2,if=virtio"));
-        // loopback bind: the guest ssh is host-local only
+
         assert!(s.contains("hostfwd=tcp:127.0.0.1:2222-:22"));
         assert!(!s.contains("hostfwd=tcp::2222"));
         assert!(s.contains("-device virtio-net-pci,netdev=n0"));
         assert!(s.contains("-name hiderola-test-01"));
         assert!(!s.contains("-cpu max"), "hw accel keeps the default cpu");
         assert!(!s.contains("-cdrom"));
-        // the cloud-init seed rides along as a second raw disk
+
         assert!(s.contains("file=/vm/test/seed.img,format=raw,if=virtio"));
 
         let ubuntu = spec("ub", ImageKind::Ubuntu2404, None);
@@ -2839,7 +2586,6 @@ mod tests {
         assert!(!s.contains("-boot d"));
         assert!(!s.contains("seed.img"));
 
-        // legacy nixos boots without a seed (no cloud-init inside)
         let nix = spec("nix", ImageKind::Nixos, None);
         let a = build_qemu_args(&nix, dir, "kvm");
         assert!(!a.join(" ").contains("seed.img"));
@@ -2884,7 +2630,7 @@ mod tests {
         let mut calls = 0;
         let id = unique_id("test", |_| {
             calls += 1;
-            calls <= 2 // first two candidates pretend to be taken
+            calls <= 2
         });
         assert!(id.starts_with("test-"));
         assert_eq!(calls, 3);
@@ -2903,9 +2649,9 @@ mod tests {
                 kind: ImageKind::Custom,
                 login: None,
                 iso_path: Some(iso.display().to_string()),
-                disk_gib: Some(1000), // clamped
-                ram_mib: Some(100),   // clamped
-                cpus: Some(99),       // clamped
+                disk_gib: Some(1000),
+                ram_mib: Some(100),
+                cpus: Some(99),
                 root: true,
                 ssh_port: Some(3000),
             })
@@ -2919,32 +2665,29 @@ mod tests {
         assert!(dir.join(&st.spec.id).join("sandbox.json").is_file());
         assert_eq!(mgr.list().len(), 1);
 
-        // duplicate name refused (checked before the iso path check)
         assert!(mgr.create(&req("Test Box", ImageKind::Custom)).is_err());
-        // duplicate port refused
+
         let mut r2 = req("other", ImageKind::Custom);
         r2.iso_path = Some(iso.display().to_string());
         r2.ssh_port = Some(3000);
         assert!(mgr.create(&r2).is_err());
-        // missing image file refused
+
         let mut r3 = req("noiso", ImageKind::Custom);
         r3.iso_path = Some("/definitely/not/here.iso".into());
         assert!(mgr.create(&r3).is_err());
-        // empty name refused
+
         assert!(mgr.create(&req("   ", ImageKind::Custom)).is_err());
 
         mgr.delete(&st.spec.id).unwrap();
         assert!(mgr.list().is_empty());
         assert!(!dir.join(&st.spec.id).exists());
-        // double delete reports cleanly
+
         assert!(mgr.delete(&st.spec.id).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn cloud_create_smoke() {
-        // network may or may not exist here; only assert the entry lands in
-        // the manager with its wizard metadata persisted
         let dir = temp_dir("cloud");
         let mgr = Arc::new(SandboxManager::new(dir.clone()));
         let st = mgr
@@ -2967,14 +2710,14 @@ mod tests {
         let mgr = Arc::new(SandboxManager::new(dir.clone()));
         let st = mgr.create(&req("seeded", ImageKind::Ubuntu2404)).unwrap();
         let sdir = dir.join(&st.spec.id);
-        // the seed must be on disk before the first boot can happen
+
         assert!(sdir.join("seed.img").is_file());
         assert!(sdir.join("id_ed25519").is_file());
         assert!(sdir.join("id_ed25519.pub").is_file());
         let pub_line = std::fs::read_to_string(sdir.join("id_ed25519.pub")).unwrap();
         assert!(pub_line.starts_with("ssh-ed25519 "));
         assert!(pub_line.contains("hiderola-"));
-        // ssh snapshot is part of the status
+
         let st = mgr.list().into_iter().next().unwrap();
         let ssh = st.ssh.expect("seed kinds carry ssh info");
         assert_eq!(ssh.user, "derola");
@@ -3007,14 +2750,12 @@ mod tests {
         let iso = dir.join("a.iso");
         std::fs::write(&iso, b"x").unwrap();
 
-        // default login kicks in
         let mut r = req("dflt", ImageKind::Custom);
         r.iso_path = Some(iso.display().to_string());
         let st = mgr.create(&r).unwrap();
         assert_eq!(st.spec.login, "derola");
         let _ = mgr.delete(&st.spec.id);
 
-        // valid custom login passes through (trim included)
         let mut r = req("custom", ImageKind::Custom);
         r.iso_path = Some(iso.display().to_string());
         r.login = Some("  agent-1 ".into());
@@ -3022,7 +2763,6 @@ mod tests {
         assert_eq!(st.spec.login, "agent-1");
         let _ = mgr.delete(&st.spec.id);
 
-        // blank login falls back to the default
         let mut r = req("blank", ImageKind::Custom);
         r.iso_path = Some(iso.display().to_string());
         r.login = Some("   ".into());
@@ -3030,8 +2770,6 @@ mod tests {
         assert_eq!(st.spec.login, "derola");
         let _ = mgr.delete(&st.spec.id);
 
-        // invalid logins are refused before anything is written;
-        // empty/blank logins are NOT errors — they fall back to the default
         for bad in [
             "root",
             "Root",
@@ -3051,9 +2789,9 @@ mod tests {
     fn install_gates() {
         let dir = temp_dir("gates");
         let mgr = Arc::new(SandboxManager::new(dir.clone()));
-        // unknown sandbox
+
         assert!(mgr.install_agent("missing").is_err());
-        // known but not running
+
         let st = mgr.create(&req("gated", ImageKind::DebianTrixie)).unwrap();
         assert!(mgr.install_agent(&st.spec.id).is_err());
         let _ = mgr.delete(&st.spec.id);
@@ -3071,18 +2809,15 @@ mod tests {
         let st = mgr.create(&r).unwrap();
         let id = st.spec.id.clone();
 
-        // a fresh manager instance picks the sandbox up from disk
         let mgr2 = Arc::new(SandboxManager::new(dir.clone()));
         let items = mgr2.list();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].state, VmState::Stopped);
 
-        // dead pid -> stopped
         mgr2.persist_pid(&id, Some(4_000_000_000));
         mgr2.reload();
         assert_eq!(mgr2.list()[0].state, VmState::Stopped);
 
-        // live pid (this test process) -> running
         std::fs::write(
             dir.join(&id).join("state.json"),
             format!("{{\"pid\":{}}}", std::process::id()),
@@ -3104,7 +2839,6 @@ mod tests {
 
     #[test]
     fn sandbox_status_json_shape_matches_gui() {
-        // the GUI reads s.spec.*, s.state, s.download, s.error — lock the shape
         let st = SandboxStatus {
             spec: spec("gui", ImageKind::Custom, Some("/x.iso")),
             state: VmState::Stopped,
@@ -3130,7 +2864,6 @@ mod tests {
 
     #[test]
     fn ssh_info_json_shape_matches_gui() {
-        // the GUI reads s.ssh.state/.user/.port/.elapsed_secs/.agent.*
         let info = SshInfo {
             state: SshState::Ready,
             user: "derola".into(),
@@ -3173,7 +2906,6 @@ mod tests {
         assert!(v["agent"].get("version").is_none());
         assert!(v["agent"].get("log").is_none());
 
-        // a failed wait carries the error
         let info = SshInfo {
             state: SshState::Failed,
             user: "joe".into(),

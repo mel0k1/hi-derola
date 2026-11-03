@@ -12,7 +12,6 @@ const FALLBACK: ModelInfo = ModelInfo {
 };
 
 const CATALOG: &[(&str, u64, f64, f64)] = &[
-    // openai, usd per 1m tokens (input, output)
     ("gpt-5", 400_000, 1.25, 10.0),
     ("gpt-5-mini", 400_000, 0.25, 2.0),
     ("gpt-5-nano", 400_000, 0.05, 0.4),
@@ -31,7 +30,6 @@ const CATALOG: &[(&str, u64, f64, f64)] = &[
     ("o3", 200_000, 2.0, 8.0),
     ("o3-mini", 200_000, 1.1, 4.4),
     ("o4-mini", 200_000, 1.1, 4.4),
-    // anthropic
     ("claude-opus-4-5", 200_000, 5.0, 25.0),
     ("claude-opus-4", 200_000, 15.0, 75.0),
     ("claude-sonnet-4-5", 200_000, 3.0, 15.0),
@@ -44,7 +42,6 @@ const CATALOG: &[(&str, u64, f64, f64)] = &[
     ("claude-3-opus", 200_000, 15.0, 75.0),
     ("claude-3-sonnet", 200_000, 3.0, 15.0),
     ("claude-3-haiku", 200_000, 0.25, 1.25),
-    // google
     ("gemini-2.5-pro", 1_048_576, 1.25, 10.0),
     ("gemini-2.5-flash", 1_048_576, 0.3, 2.5),
     ("gemini-2.5-flash-lite", 1_048_576, 0.1, 0.4),
@@ -52,24 +49,19 @@ const CATALOG: &[(&str, u64, f64, f64)] = &[
     ("gemini-2.0-flash-lite", 1_048_576, 0.075, 0.3),
     ("gemini-1.5-pro", 2_000_000, 1.25, 5.0),
     ("gemini-1.5-flash", 1_048_576, 0.075, 0.3),
-    // deepseek
     ("deepseek-chat", 128_000, 0.27, 1.1),
     ("deepseek-reasoner", 128_000, 0.55, 2.19),
     ("deepseek-v3", 128_000, 0.27, 1.1),
     ("deepseek-r1", 128_000, 0.55, 2.19),
-    // xai
     ("grok-4", 256_000, 3.0, 15.0),
     ("grok-4-fast", 2_000_000, 0.2, 0.5),
     ("grok-3", 131_000, 3.0, 15.0),
     ("grok-3-mini", 131_000, 0.3, 0.5),
-    // moonshot
     ("kimi-k2", 256_000, 0.6, 2.5),
     ("kimi-latest", 128_000, 0.6, 2.5),
-    // zhipu
     ("glm-4.6", 200_000, 0.6, 2.2),
     ("glm-4.5", 128_000, 0.6, 2.2),
     ("glm-4.5-air", 128_000, 0.2, 1.1),
-    // alibaba
     ("qwen3-coder", 256_000, 0.3, 1.2),
     ("qwen3-max", 256_000, 1.2, 6.0),
     ("qwen3", 128_000, 0.2, 0.8),
@@ -111,8 +103,6 @@ pub fn cost(model: &str, input: u64, output: u64) -> f64 {
     cost_cached(model, input, output, 0, 0.0)
 }
 
-/// cached tokens are billed at `cached_discount` of the input price
-/// (anthropic cache read ~0.1x, openai ~0.5x)
 pub fn cost_cached(model: &str, input: u64, output: u64, cached: u64, cached_discount: f64) -> f64 {
     let mi = lookup(model);
     let fresh = input.saturating_sub(cached);
@@ -165,10 +155,9 @@ mod tests {
 
     #[test]
     fn cost_cached_math() {
-        // 1m fresh + 1m cached at half price + 100k out
         let c = cost_cached("gpt-4o", 2_000_000, 100_000, 1_000_000, 0.5);
         assert!((c - (2.5 + 1.25 + 1.0)).abs() < 1e-9);
-        // cached larger than input must not go negative
+
         assert!(cost_cached("gpt-4o", 100, 0, 5_000, 0.5) >= 0.0);
     }
 }

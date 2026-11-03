@@ -1,22 +1,3 @@
-//! user-defined JavaScript tools: drop a .js file into `.hi-derola/tools/`
-//! (project) or `<config>/hi-derola/tools/` (global) and it shows up as a
-//! regular tool the model can call. A file looks like:
-//!
-//! ```js
-//! module.exports = {
-//!   name: "slugify",
-//!   description: "Convert text to a URL slug",
-//!   parameters: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
-//!   execute(input) { return input.text.toLowerCase().replace(/\s+/g, "-"); },
-//! };
-//! ```
-//!
-//! Everything runs inside the same confined boa sandbox as the code tool:
-//! no filesystem, no network, no processes. A string return value is passed
-//! through as-is, anything else is serialized as JSON. console.log lines are
-//! appended to the tool output. Project tools win over global ones with the
-//! same name; names colliding with built-ins are rejected at load time.
-
 use boa_engine::{
     builtins::promise::PromiseState, js_string, native_function::NativeFunction,
     object::builtins::JsPromise, object::JsObject, property::Attribute, Context, JsValue, Source,
@@ -29,7 +10,6 @@ use std::time::{Duration, Instant};
 
 use crate::provider::ToolSpec;
 
-/// sandbox budget for one tool call
 const TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CODE_BYTES: usize = 256 * 1024;
 const MAX_LOOP_ITERATIONS: u64 = 5_000_000;
@@ -54,7 +34,6 @@ struct Cache {
 static DIR_OVERRIDE: Mutex<Option<PathBuf>> = Mutex::new(None);
 static CACHE: RwLock<Option<Arc<Cache>>> = RwLock::new(None);
 
-/// tests point the scanner at a temp directory; None clears the override
 pub fn set_dir_override(dir: Option<PathBuf>) {
     *DIR_OVERRIDE.lock().unwrap() = dir;
     *CACHE.write().unwrap() = None;
@@ -64,7 +43,6 @@ fn override_dir() -> Option<PathBuf> {
     DIR_OVERRIDE.lock().unwrap().clone()
 }
 
-/// scan dirs in precedence order: project first (wins), then global
 fn scan_dirs() -> Vec<PathBuf> {
     if let Some(d) = override_dir() {
         return vec![d];
@@ -88,7 +66,6 @@ fn cache() -> Arc<Cache> {
     c
 }
 
-/// force a rescan of the tools directories
 pub fn reload() {
     *CACHE.write().unwrap() = None;
     cache();
@@ -128,8 +105,6 @@ fn load() -> Cache {
     }
 }
 
-/// evaluate one file in a throwaway context and pull the tool definition
-/// out of module.exports
 fn load_file(path: &std::path::Path, taken: &[String]) -> Result<JsTool, String> {
     let meta = std::fs::metadata(path).map_err(|e| format!("unreadable: {e}"))?;
     if meta.len() as usize > MAX_CODE_BYTES {
@@ -201,7 +176,6 @@ fn load_file(path: &std::path::Path, taken: &[String]) -> Result<JsTool, String>
     })
 }
 
-/// built-in tool names a user tool must not shadow
 fn reserved(name: &str) -> bool {
     static RESERVED: OnceLock<Vec<String>> = OnceLock::new();
     let list = RESERVED.get_or_init(|| {
@@ -264,8 +238,6 @@ fn console_native(
     Ok(JsValue::undefined())
 }
 
-/// run one tool's execute(input) on a blocking thread; returns the formatted
-/// output (logs appended) or an error message
 fn run_in_thread(tool: &JsTool, input: &Value) -> (Result<String, String>, Vec<String>) {
     let source = tool.source.clone();
     let input = input.clone();
@@ -342,7 +314,6 @@ fn run_in_thread(tool: &JsTool, input: &Value) -> (Result<String, String>, Vec<S
     (out, logs)
 }
 
-/// the registered JS tools as model-facing specs
 pub fn specs() -> Vec<ToolSpec> {
     cache()
         .tools
@@ -366,7 +337,6 @@ pub fn has(name: &str) -> bool {
     cache().tools.iter().any(|t| t.name == name)
 }
 
-/// execute a registered JS tool by name
 pub async fn run_tool(name: &str, args: &str) -> anyhow::Result<String> {
     let tool = cache()
         .tools
@@ -382,7 +352,6 @@ pub async fn run_tool(name: &str, args: &str) -> anyhow::Result<String> {
     out.map_err(|e| anyhow::anyhow!(e))
 }
 
-/// one line per loaded tool plus skipped-file reasons; for /jstools
 pub fn summary() -> String {
     let c = cache();
     if c.tools.is_empty() && c.skipped.is_empty() {
@@ -410,8 +379,6 @@ mod tests {
         d
     }
 
-    // every test below mutates the shared DIR_OVERRIDE/CACHE globals; run
-    // them one at a time or they reload each other's tool dirs mid-test
     static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
@@ -433,7 +400,7 @@ mod tests {
         "#,
         )
         .unwrap();
-        // a file relying on the stem and returning a non-string value
+
         std::fs::write(
             dir.join("adder.js"),
             r#"
@@ -564,8 +531,7 @@ mod tests {
         set_dir_override(Some(dir.clone()));
         reload();
         assert_eq!(cache().tools.len(), 1);
-        // a second dir cannot be scanned while the override points at one
-        // place; duplicate rejection is covered by the skip-reasons test
+
         set_dir_override(None);
     }
 
@@ -624,7 +590,6 @@ mod tests {
         assert_eq!(empty.tools.len(), 0);
     }
 
-    /// sync driver for the async run_tool, same pattern as the web tests
     fn block<F: std::future::Future>(fut: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()

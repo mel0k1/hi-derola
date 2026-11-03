@@ -9,8 +9,7 @@ use crate::provider::ToolSpec;
 pub(crate) const MAX_LIST: usize = 500;
 const MAX_CAPTURE: usize = 256 * 1024;
 const READ_LIMIT: usize = 2000;
-/// how long a timed-out process tree may finish dying after SIGTERM
-/// (escalated to SIGKILL) before the shell result is returned
+
 const KILL_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 pub fn budget(out: String, max: usize) -> String {
@@ -33,22 +32,17 @@ fn tail(s: &str, max: usize) -> String {
     )
 }
 
-/// tool outputs are also saved to a file (so the model can read back whatever
-/// the inline budget cut away) once they reach this many bytes or lines —
-/// same two triggers as opencode's Truncate
 pub const SPILL_MIN: usize = 50_000;
 pub const SPILL_LINES: usize = 2000;
-/// spilled files older than this are deleted opportunistically on every spill
+
 const SPILL_RETENTION_SECS: u64 = 7 * 24 * 3600;
 
 static TRUNCATION_OVERRIDE: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
 
-/// tests point the spill store at a temp directory; None clears the override
 pub fn set_truncation_dir(dir: Option<std::path::PathBuf>) {
     *TRUNCATION_OVERRIDE.lock().unwrap() = dir;
 }
 
-/// where spilled tool outputs live: <data>/hi-derola/truncated
 pub fn truncation_dir() -> Option<std::path::PathBuf> {
     if let Some(d) = TRUNCATION_OVERRIDE.lock().unwrap().clone() {
         return Some(d);
@@ -56,9 +50,6 @@ pub fn truncation_dir() -> Option<std::path::PathBuf> {
     dirs::data_dir().map(|d| d.join("hi-derola").join("truncated"))
 }
 
-/// same budgeting as budget(), but oversized outputs additionally get saved
-/// verbatim to the truncation directory and the result carries the path, so
-/// nothing is truly lost to the inline cap; max == 0 (unlimited) skips spilling
 pub fn spill(out: String, tool: &str, max: usize) -> String {
     match truncation_dir() {
         Some(dir) => spill_into(&dir, out, tool, max),
@@ -130,8 +121,6 @@ fn spill_cleanup(dir: &std::path::Path) {
     }
 }
 
-/// true when `path` (an existing file) resolves inside `base`; used to let the
-/// model read our own spilled outputs without an external-directory approval
 pub fn path_in_dir(base: &std::path::Path, path: &str) -> bool {
     let Ok(base) = std::fs::canonicalize(base) else {
         return false;
@@ -432,7 +421,6 @@ pub fn specs() -> Vec<ToolSpec> {
     specs
 }
 
-/// plan-mode-only tools: saving the plan file and asking to leave plan mode
 pub fn plan_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
@@ -564,7 +552,6 @@ pub fn detail(name: &str, args: &str) -> String {
     }
 }
 
-/// file paths a mutation touches; drives the session review panel
 pub fn paths(name: &str, args: &str) -> Vec<String> {
     let v: Value = serde_json::from_str(args).unwrap_or(Value::Null);
     match name {
@@ -577,10 +564,14 @@ pub fn paths(name: &str, args: &str) -> Vec<String> {
             .and_then(|s| crate::patch::parse(s).ok())
             .map(|ops| {
                 ops.into_iter()
-                    .map(|o| match o {
-                        crate::patch::Op::Add { path, .. }
-                        | crate::patch::Op::Update { path, .. }
-                        | crate::patch::Op::Delete { path } => path,
+                    .flat_map(|o| match o {
+                        crate::patch::Op::Add { path, .. } | crate::patch::Op::Delete { path } => {
+                            vec![path]
+                        }
+                        crate::patch::Op::Update { path, move_to, .. } => match move_to {
+                            Some(to) if to != path => vec![path, to],
+                            _ => vec![path],
+                        },
                     })
                     .collect()
             })
@@ -735,7 +726,8 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
                 std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
             let (updated, count) = apply_edit(&content, old, new, replace_all)
                 .map_err(|e| anyhow::anyhow!("edit: {e:#} in {path}"))?;
-            std::fs::write(path, updated).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
+            crate::files::write_atomic(std::path::Path::new(path), &updated)
+                .map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
             Ok(format!(
                 "edited {path} ({count} replacement{}){}",
                 if count == 1 { "" } else { "s" },
@@ -898,8 +890,6 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
             };
             let timeout = v["timeout"].as_u64().unwrap_or(120).clamp(1, 600);
             if crate::sandbox::shell_route().is_some() {
-                // sandbox attached: the command runs inside the VM over ssh
-                // (the system ssh client blocks — keep it off the async workers)
                 let cmd = cmd.to_string();
                 return match tokio::task::spawn_blocking(move || {
                     crate::sandbox::sandbox_bash(&cmd, Some(timeout))
@@ -917,8 +907,6 @@ pub async fn execute(name: &str, args: &str, mcp: Option<&McpClient>) -> Result<
     }
 }
 
-/// run a blocking sandbox tool call off the async workers (the system ssh
-/// client blocks) — used by every routed tool, not just bash
 async fn vm_tool(f: impl FnOnce() -> anyhow::Result<String> + Send + 'static) -> Result<String> {
     match tokio::task::spawn_blocking(f).await {
         Ok(res) => res,
@@ -942,8 +930,7 @@ pub async fn bash_run(cmd: &str, workdir: Option<&str>, timeout: Option<u64>) ->
         }
         command.current_dir(w);
     }
-    // the shell gets its own process group so a timeout can reap the whole
-    // tree (children, servers it spawned), not just the shell itself
+
     #[cfg(unix)]
     command.process_group(0);
 
@@ -958,9 +945,6 @@ pub async fn bash_run(cmd: &str, workdir: Option<&str>, timeout: Option<u64>) ->
         Some(t) => match tokio::time::timeout(std::time::Duration::from_secs(t.max(1)), wait).await
         {
             Err(_) => {
-                // kill the direct child (kill_on_drop fires when the dropped
-                // future unwinds) plus everything it spawned: SIGTERM first
-                // so the tree can clean up, SIGKILL after a short grace
                 #[cfg(unix)]
                 if let Some(pid) = pgid {
                     let pgid = pid as libc::pid_t;
@@ -1026,14 +1010,10 @@ pub fn spawn_shell(cmd: &str, workdir: Option<&str>) -> Result<tokio::process::C
 
 static SHELL_OVERRIDE: OnceLock<Option<String>> = OnceLock::new();
 
-/// set the shell used by the bash tool, from [agent] shell in the config;
-/// a program name or a full path, empty strings fall back to the default
 pub fn set_shell(prog: Option<String>) {
     let _ = SHELL_OVERRIDE.set(prog);
 }
 
-/// command-line flag that makes the shell run one command string;
-/// derived from the program basename so both "pwsh" and full paths work
 fn shell_args(prog: &str) -> &'static str {
     let base = prog
         .rsplit(['/', '\\'])
@@ -1085,8 +1065,6 @@ fn norm_char(c: char) -> char {
     }
 }
 
-/// match old/new with lookalike unicode (smart quotes, dashes, nbsp) normalized
-/// to ascii, splice the replacement into the original text 1:1
 fn unicode_edit(
     content: &str,
     old: &str,
@@ -1128,7 +1106,6 @@ fn unicode_edit(
 const FUZZY_MIN: f64 = 0.85;
 const FUZZY_HINT: f64 = 0.6;
 
-/// char-level Levenshtein distance (two-row DP; edit lines are short)
 fn lev(a: &[char], b: &[char]) -> usize {
     let mut prev: Vec<usize> = (0..=b.len()).collect();
     let mut cur = vec![0usize; b.len() + 1];
@@ -1143,7 +1120,6 @@ fn lev(a: &[char], b: &[char]) -> usize {
     prev[b.len()]
 }
 
-/// similarity of two lines ignoring surrounding whitespace, 0.0..=1.0
 fn line_sim(a: &str, b: &str) -> f64 {
     let a: Vec<char> = a.trim().chars().collect();
     let b: Vec<char> = b.trim().chars().collect();
@@ -1154,8 +1130,7 @@ fn line_sim(a: &str, b: &str) -> f64 {
     if m == 0 {
         return 1.0;
     }
-    // the distance is at least the length gap; skip the DP when the
-    // threshold is already unreachable
+
     if (a.len() as f64 - b.len() as f64).abs() / m as f64 >= 1.0 - FUZZY_MIN {
         return 0.0;
     }
@@ -1168,9 +1143,6 @@ enum Shift {
     Sub(usize),
 }
 
-/// the uniform indentation difference between the old block and where it
-/// actually matched in the file (the model often writes the block at column
-/// 0 while the file has it nested); applied to the replacement lines
 fn indent_shift(c_lines: &[&str], at: usize, o_lines: &[&str]) -> Shift {
     for (j, o) in o_lines.iter().enumerate() {
         if o.trim().is_empty() {
@@ -1222,12 +1194,6 @@ fn apply_shift(line: &str, shift: &Shift) -> String {
     }
 }
 
-/// last-resort match for old_str that no longer matches the file letter for
-/// letter (the model misremembers a token or two). Slides the old block over
-/// the file line by line and accepts windows whose average per-line
-/// similarity (ignoring surrounding whitespace) is >= FUZZY_MIN. Single-line
-/// olds are never fuzzy-matched ("x = 1" vs "x = 2" is already 90% similar).
-/// The replacement is spliced with the matched block's indentation shift.
 fn fuzzy_edit(
     content: &str,
     old: &str,
@@ -1277,7 +1243,6 @@ fn fuzzy_edit(
     Ok(Some((joined, count)))
 }
 
-/// best near-miss block, used only for the "not found" error hint
 fn fuzzy_best(content: &str, old: &str) -> Option<(usize, f64)> {
     let c_lines: Vec<&str> = content.lines().collect();
     let o_lines: Vec<&str> = old.lines().collect();
@@ -1411,9 +1376,6 @@ fn restore_eol(text: &str, crlf: bool) -> String {
     }
 }
 
-/// format file bytes as the numbered read_file output (header with the total
-/// line count, 1-based line numbers, continuation hint). Shared with the
-/// sandbox reader, which fetches the same bytes over ssh from the VM.
 pub(crate) fn format_numbered(
     path: &str,
     bytes: Vec<u8>,
@@ -1449,7 +1411,6 @@ pub(crate) fn format_numbered(
     Ok(out)
 }
 
-/// After write_file/edit: run the formatter, then collect LSP diagnostics.
 async fn post_edit(path: &str) -> String {
     let mut out = String::new();
     if let Some(name) = crate::fmt::format_file(path).await {
@@ -1495,7 +1456,6 @@ mod tests {
 
     #[test]
     fn unicode_fallback_edit() {
-        // content with smart quotes, old_str typed with ascii quotes
         let content = "const s = \u{201c}hello\u{201d};\nlet d = \u{2013} 1;";
         let (out, n) =
             apply_edit(content, "const s = \"hello\";", "const s = \"bye\";", false).unwrap();
@@ -1505,10 +1465,10 @@ mod tests {
             out.contains('\u{2013}'),
             "untouched chars must stay original"
         );
-        // nbsp tolerance
+
         let (out, _) = apply_edit("a\u{00a0}b", "a b", "ab", false).unwrap();
         assert_eq!(out, "ab");
-        // multi without replace_all still errors
+
         assert!(apply_edit("x\u{2019}y x\u{2019}y", "x'y", "z", false).is_err());
         let (out, n) = apply_edit("x\u{2019}y x\u{2019}y", "x'y", "z", true).unwrap();
         assert_eq!(n, 2);
@@ -1542,7 +1502,7 @@ mod tests {
     fn spill_triggers_on_line_count_too() {
         let tmp = std::env::temp_dir().join("hi-derola-spill-lines");
         let _ = std::fs::remove_dir_all(&tmp);
-        // ~10KB of many short lines: under SPILL_MIN, over SPILL_LINES
+
         let out = "line\n".repeat(SPILL_LINES + 1);
         assert!(out.len() < SPILL_MIN);
         let res = spill_into(&tmp, out.clone(), "grep", 4096);
@@ -1557,7 +1517,7 @@ mod tests {
             std::fs::read_to_string(entries.pop().unwrap()).unwrap(),
             out
         );
-        // exactly at the line threshold (2000 lines) nothing spills
+
         let tmp2 = std::env::temp_dir().join("hi-derola-spill-lines-edge");
         let _ = std::fs::remove_dir_all(&tmp2);
         let res2 = spill_into(&tmp2, "l\n".repeat(SPILL_LINES), "grep", 4096);
@@ -1579,7 +1539,7 @@ mod tests {
             res.ends_with("cut off here]"),
             "the path hint closes the reply"
         );
-        // exactly one spill file and it holds the verbatim output
+
         let mut entries: Vec<_> = std::fs::read_dir(&tmp)
             .unwrap()
             .flatten()
@@ -1710,7 +1670,6 @@ mod tests {
 
     #[test]
     fn fuzzy_last_resort_edit() {
-        // one misremembered token in a multi-line block still lands
         let content = "fn main() {\n    let length = 10;\n    let width = 3;\n    let area = length * width;\n}\n";
         let old = "fn main() {\n    let lenght = 10;\n    let width = 3;\n    let area = length * width;\n}";
         let (out, n) = apply_edit(
@@ -1723,8 +1682,6 @@ mod tests {
         assert_eq!(n, 1);
         assert!(out.contains("println!(\"{area}\");"), "{out}");
 
-        // indentation-only mismatch: the block is nested in the file while
-        // old_str sits at column 0; the replacement is re-indented
         let content = "fn f() {\n    if ok {\n        go();\n    }\n}\n";
         let (out, n) = apply_edit(
             content,
@@ -1736,7 +1693,6 @@ mod tests {
         assert_eq!(n, 1);
         assert_eq!(out, "fn f() {\n    if ok {\n        go_fast();\n    }\n}\n");
 
-        // too different -> plain not found, no misleading hint
         let err = apply_edit(
             "one\ntwo\nthree\n",
             "one\ntotally different\nfive",
@@ -1750,22 +1706,19 @@ mod tests {
             "{err}"
         );
 
-        // close but under the threshold -> hint pointing at the best block
         let err = apply_edit("alpha one\nbeta two\n", "alpha ona\nbeta xy", "x", false)
             .unwrap_err()
             .to_string();
         assert!(err.contains("% similar"), "{err}");
 
-        // single-line old never fuzzy-matches, even at 90% similarity
         assert!(apply_edit("let x = 1;\n", "let x = 2;", "let x = 3;", false).is_err());
 
-        // ambiguous near-matches error without replace_all ...
         let dup = "alpha one\nbeta two\nalpha one\nbeta two\n";
         let err = apply_edit(dup, "alpha one\nbeta too", "REPL", false)
             .unwrap_err()
             .to_string();
         assert!(err.contains("matches multiple times"), "{err}");
-        // ... and with replace_all every near-miss is replaced
+
         let (out, n) = apply_edit(dup, "alpha one\nbeta too", "ALPHA\nBETA", true).unwrap();
         assert_eq!(n, 2);
         assert_eq!(out, "ALPHA\nBETA\nALPHA\nBETA\n");
@@ -1778,8 +1731,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let marker = dir.join("alive");
-        // the grandchild `sleep 2` would touch the marker at t=2.3s if it
-        // survived; the timeout fires at t=1s and must reap the whole tree
+
         let cmd = format!("sleep 0.3 && sleep 2 && touch {}", marker.display());
         let t0 = std::time::Instant::now();
         let out = bash_run(&cmd, None, Some(1)).await.unwrap();
@@ -1800,9 +1752,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let marker = dir.join("alive");
-        // the shell ignores SIGTERM, so only the SIGKILL escalation can stop
-        // it: without the escalation the marker appears at t=2.3s, while the
-        // check happens at t~3.1s
+
         let cmd = format!(
             "trap '' TERM; sleep 0.3 && sleep 2 && touch {}",
             marker.display()

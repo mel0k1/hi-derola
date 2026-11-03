@@ -12,7 +12,6 @@ pub fn enabled() -> bool {
 
 const MAX_FMT_BYTES: u64 = 2 * 1024 * 1024;
 
-/// Format a file in place after an edit. Returns the formatter name on success.
 pub async fn format_file(path: &str) -> Option<&'static str> {
     if !enabled() {
         return None;

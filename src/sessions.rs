@@ -308,7 +308,6 @@ mod tests {
         let got = load(&st.id).unwrap();
         assert_eq!(got.queue, vec!["first".to_string(), "second".to_string()]);
 
-        // a session written before the queue field existed still loads
         let mut v = serde_json::to_value(&got).unwrap();
         v.as_object_mut().unwrap().remove("queue");
         let old: StoredSession = serde_json::from_value(v).unwrap();
@@ -344,7 +343,7 @@ mod tests {
         save(&st).unwrap();
         let got = load(&st.id).unwrap();
         assert_eq!(got.usage, st.usage);
-        // sessions written before the usage field existed load with an empty ledger
+
         let mut v = serde_json::to_value(&got).unwrap();
         v.as_object_mut().unwrap().remove("usage");
         let old: StoredSession = serde_json::from_value(v).unwrap();

@@ -1,27 +1,3 @@
-//! ssh access to a running sandbox VM through the system ssh client.
-//!
-//! The host ships an ssh client everywhere we care about (Windows 10+ has
-//! OpenSSH in System32\OpenSSH, Linux/macOS always do), so instead of
-//! pulling a full ssh library we drive the binary directly — the same way
-//! the sandbox module drives qemu. Every invocation is batch/key-only:
-//!
-//! ```text
-//! ssh -i <sandbox>/id_ed25519 -p <port>
-//!     -o BatchMode=yes -o StrictHostKeyChecking=accept-new
-//!     -o UserKnownHostsFile=<sandbox>/known_hosts -o ConnectTimeout=5
-//!     -o LogLevel=ERROR -o IdentitiesOnly=yes  <login>@127.0.0.1
-//! ```
-//!
-//! `known_hosts` lives in the sandbox directory so recreated VMs never trip
-//! over a changed host key, and nothing leaks into the user's real file.
-//!
-//! Building blocks: [`wait_ready`] (poll until the guest sshd answers),
-//! [`exec`] (run a command, capture output), [`stream`] (pipe stdin through
-//! a remote shell, line by line — used for the agent install script and for
-//! file uploads via `cat >`), plus the [`INSTALL_SH`] bootstrap that turns a
-//! freshly booted cloud VM into a machine with the hi-derola agent built
-//! from source at `~/.cargo/bin/hi-derola`.
-
 use crate::sandbox::silent;
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -31,10 +7,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-/// guest-side bootstrap: system build tools (when root or passwordless sudo
-/// is available — the wizard's root flag maps to exactly that), rustup, then
-/// `cargo install` of hi-derola from the public repository. Every meaningful
-/// step echoes a `[tag]` line so the GUI log can follow along.
 pub const INSTALL_SH: &str = r#"set -e
 echo "[*] agent install started"
 if [ "$(id -u)" = "0" ]; then
@@ -70,12 +42,8 @@ cargo install --path "$HOME/hi-derola-src" --force || { echo "[x] cargo install 
 echo "[ok] agent installed: $HOME/.cargo/bin/hi-derola"
 "#;
 
-/// one-off probe run right after the guest sshd answers: is the agent
-/// binary already there (survived an app/VM restart) and which source
-/// version built it
 pub const PROBE_SH: &str = r#"if [ -x "$HOME/.cargo/bin/hi-derola" ]; then echo AGENT_PRESENT; sed -n "s/^version *= *\"\(.*\)\"/version:\1/p" "$HOME/hi-derola-src/Cargo.toml" 2>/dev/null | head -n 1; fi"#;
 
-/// locate the host ssh client (PATH first, then the Windows system copy)
 pub fn find_ssh() -> Option<PathBuf> {
     if let Some(p) = crate::sandbox::find_binary("ssh") {
         return Some(p);
@@ -91,14 +59,13 @@ pub fn find_ssh() -> Option<PathBuf> {
     None
 }
 
-/// everything the ssh argv needs to reach one sandbox or remote host
 #[derive(Debug, Clone)]
 pub struct SshTarget {
     pub key: PathBuf,
     pub known_hosts: PathBuf,
     pub port: u16,
     pub user: String,
-    /// hostname or ip; sandboxes default to the qemu loopback
+
     pub host: String,
 }
 
@@ -113,7 +80,6 @@ impl SshTarget {
         }
     }
 
-    /// a target for an arbitrary remote host (own key file pair in `dir`)
     pub fn remote(dir: &Path, host: &str, port: u16, user: &str) -> Self {
         Self {
             host: host.to_string(),
@@ -122,9 +88,6 @@ impl SshTarget {
     }
 }
 
-/// argv for one ssh invocation; `remote` is appended after `--` (empty for
-/// an interactive login shell). `force_pty` adds -t so the guest TUI gets a
-/// terminal when a remote command is given.
 pub fn ssh_argv(t: &SshTarget, force_pty: bool, remote: &[&str]) -> Vec<String> {
     let mut a: Vec<String> = vec![
         "-i".into(),
@@ -155,8 +118,6 @@ pub fn ssh_argv(t: &SshTarget, force_pty: bool, remote: &[&str]) -> Vec<String> 
     a
 }
 
-/// the full ssh argv for a user-visible terminal window (interactive shell,
-/// or the agent TUI when `agent` is set)
 pub fn terminal_cmdline(t: &SshTarget, agent: bool) -> Vec<String> {
     ssh_argv(
         t,
@@ -169,13 +130,10 @@ pub fn terminal_cmdline(t: &SshTarget, agent: bool) -> Vec<String> {
     )
 }
 
-/// true while the ssh child should keep running
 fn cancelled(cancel: &AtomicBool) -> bool {
     cancel.load(Ordering::Relaxed)
 }
 
-/// poll the guest sshd until it answers (or the deadline/cancel hits);
-/// returns the seconds the wait took (for the "booted in Ns" badge)
 pub fn wait_ready(
     bin: &Path,
     t: &SshTarget,
@@ -202,7 +160,7 @@ pub fn wait_ready(
                 started.elapsed().as_secs()
             ));
         }
-        // ~2s between attempts, cancel-checked
+
         for _ in 0..20 {
             if cancelled(cancel) {
                 return Err("cancelled".to_string());
@@ -219,8 +177,6 @@ pub struct SshOut {
     pub stderr: String,
 }
 
-/// run one remote command through the guest shell and capture the output;
-/// reader threads keep the pipes drained so chatty commands cannot deadlock
 pub fn exec(
     bin: &Path,
     t: &SshTarget,
@@ -286,11 +242,6 @@ pub fn exec(
     })
 }
 
-/// pipe `stdin_data` through a remote shell command ("sh -s" for the install
-/// script, "cat > file" for uploads), forwarding every output line to
-/// `on_line` as it arrives. Returns the remote exit code. `timeout` kills
-/// the child when elapsed (Duration::ZERO = wait forever — the agent
-/// install runs for many minutes and must not be cut short).
 pub fn stream(
     bin: &Path,
     t: &SshTarget,
@@ -311,17 +262,20 @@ pub fn stream(
         base.stdin(Stdio::null());
     }
     let mut child = base.spawn().map_err(|e| format!("spawn ssh: {e}"))?;
+    let mut stdin_err: Option<std::sync::mpsc::Receiver<String>> = None;
     if let Some(data) = stdin_data {
         let mut stdin = child.stdin.take().expect("stdin piped");
-        stdin
-            .write_all(data)
-            .map_err(|e| format!("ssh stdin: {e}"))?;
-        // dropped here -> the remote command sees EOF
+        let data = data.to_vec();
+        let (etx, erx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let res = stdin.write_all(&data).and_then(|_| stdin.flush());
+            if let Err(e) = res {
+                let _ = etx.send(e.to_string());
+            }
+        });
+        stdin_err = Some(erx);
     }
 
-    // both pipes -> one channel of lines (interleaving between them is fine
-    // for a progress log); the loop ends when both pumps disconnect, which
-    // happens after the remote side closed its stdout/stderr
     let started = Instant::now();
     let (tx, rx) = mpsc::channel::<String>();
     fn pump<R: Read + Send + 'static>(pipe: R, tx: mpsc::Sender<String>) {
@@ -353,6 +307,13 @@ pub fn stream(
             let _ = child.wait();
             return Err("cancelled".to_string());
         }
+        if let Some(erx) = &stdin_err {
+            if let Ok(e) = erx.try_recv() {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("ssh stdin: {e}"));
+            }
+        }
         match rx.recv_timeout(Duration::from_millis(100)) {
             Ok(line) => on_line(&line),
             Err(mpsc::RecvTimeoutError::Timeout) => {
@@ -378,7 +339,6 @@ pub struct AgentProbe {
     pub version: Option<String>,
 }
 
-/// check the guest for an already-installed agent binary
 pub fn probe_agent(bin: &Path, t: &SshTarget, cancel: &AtomicBool) -> Result<AgentProbe, String> {
     let out = exec(bin, t, PROBE_SH, Duration::from_secs(15), cancel)?;
     if out.code != 0 {
@@ -402,7 +362,6 @@ fn parse_probe(stdout: &str) -> AgentProbe {
     }
 }
 
-/// quote one argv element for an intermediate `cmd /C start` line
 #[cfg(windows)]
 fn win_quote(s: &str) -> String {
     if s.is_empty() {
@@ -414,10 +373,6 @@ fn win_quote(s: &str) -> String {
     }
 }
 
-/// launch a terminal window with an interactive ssh session into the VM;
-/// windows prefers Windows Terminal (proper conpty, scrollback, fonts) and
-/// falls back to the classic `cmd /C start` console host, unix tries the
-/// usual terminal emulators
 pub fn spawn_terminal(bin: &Path, ssh_args: &[String]) -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -437,7 +392,7 @@ pub fn spawn_terminal(bin: &Path, ssh_args: &[String]) -> Result<(), String> {
                     });
                     return Ok(());
                 }
-                Err(_) => {} // broken app-execution alias etc. — try cmd next
+                Err(_) => {}
             }
         }
         let line = ssh_args
@@ -472,7 +427,7 @@ pub fn spawn_terminal(bin: &Path, ssh_args: &[String]) -> Result<(), String> {
             let Some(term) = crate::sandbox::find_binary(name) else {
                 continue;
             };
-            // `-e` for the classic emulators, `--` for gnome-terminal
+
             let sep = if *name == "gnome-terminal" {
                 "--"
             } else {
@@ -492,7 +447,7 @@ pub fn spawn_terminal(bin: &Path, ssh_args: &[String]) -> Result<(), String> {
                     });
                     return Ok(());
                 }
-                Err(_) => continue, // wrong -e dialect etc. — try the next one
+                Err(_) => continue,
             }
         }
         Err("no terminal emulator found on the host".to_string())
@@ -569,14 +524,13 @@ mod tests {
         let p = parse_probe("AGENT_PRESENT\nversion:0.1.0\n");
         assert!(p.present);
         assert_eq!(p.version.as_deref(), Some("0.1.0"));
-        // whitespace / \r tolerant
+
         let p = parse_probe("AGENT_PRESENT\r\nversion: 1.2.3\r\n");
         assert_eq!(p.version.as_deref(), Some("1.2.3"));
         let p = parse_probe("");
         assert!(!p.present);
         assert_eq!(p.version, None);
-        // version line without AGENT_PRESENT cannot happen, but must not
-        // fabricate a present flag
+
         let p = parse_probe("version:9.9.9");
         assert!(!p.present);
         assert_eq!(p.version.as_deref(), Some("9.9.9"));

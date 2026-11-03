@@ -50,7 +50,7 @@ impl Default for AgentCfg {
 const COMPACT_KEEP_TOKENS: usize = 15_000;
 const COMPACT_MIN_MSGS: usize = 8;
 const COMPACT_TOOL_CLIP: usize = 1_250;
-/// separator between the original first user message and the compaction summary
+
 const SUMMARY_MARKER: &str =
     "\n\n---\nSummary of the earlier conversation (dropped to fit the context window):\n";
 const IMG_TOKEN_EST: usize = 1_500;
@@ -72,8 +72,6 @@ fn effective_limit(cfg: &AgentCfg, model: &str) -> u64 {
     }
 }
 
-/// headroom kept from the context window before proactive compaction:
-/// the configured absolute buffer, or a quarter of the window (legacy default)
 fn compact_headroom(cfg: &CompactionCfg, ctx_limit: u64) -> u64 {
     if cfg.buffer > 0 {
         cfg.buffer as u64
@@ -82,8 +80,6 @@ fn compact_headroom(cfg: &CompactionCfg, ctx_limit: u64) -> u64 {
     }
 }
 
-/// proactive compaction trigger; overflow recovery and manual /compact
-/// are gated separately and stay available when this returns false
 fn auto_compact_due(cfg: &CompactionCfg, ctx_limit: u64, used: u64, est: u64) -> bool {
     if !cfg.auto || ctx_limit == 0 {
         return false;
@@ -91,7 +87,6 @@ fn auto_compact_due(cfg: &CompactionCfg, ctx_limit: u64, used: u64, est: u64) ->
     used.max(est) > ctx_limit.saturating_sub(compact_headroom(cfg, ctx_limit))
 }
 
-/// keep budget for compact_split: configured value, or the built-in default
 fn effective_keep(keep: usize) -> usize {
     if keep == 0 {
         COMPACT_KEEP_TOKENS
@@ -100,9 +95,6 @@ fn effective_keep(keep: usize) -> usize {
     }
 }
 
-/// shrink max_tokens so the reply fits in the remaining context window;
-/// never grows a user-configured cap, provider defaults stay intact when
-/// the context limit is unknown
 fn clamp_output(configured: Option<u32>, ctx_limit: u64, prompt_tokens: u64) -> Option<u32> {
     if ctx_limit == 0 {
         return configured;
@@ -116,11 +108,8 @@ fn clamp_output(configured: Option<u32>, ctx_limit: u64, prompt_tokens: u64) -> 
     Some(room.min(u32::MAX as u64) as u32)
 }
 
-/// tool outputs older than the protected window are replaced with short
-/// placeholders between turns, so big one-shot outputs (logs, dumps) do not
-/// ride along in the context forever; mirrors opencode 2.0 compaction.prune
 const PRUNE_PROTECT_TOKENS: usize = 40_000;
-/// outputs of these tools carry instructions the model may still need verbatim
+
 const PRUNE_PROTECTED_TOOLS: [&str; 1] = ["skill"];
 const PRUNE_MARKER: &str = "[pruned tool output";
 
@@ -128,8 +117,7 @@ fn prune_tool_outputs(msgs: &mut [Message], cfg: &CompactionCfg) -> bool {
     if !cfg.prune {
         return false;
     }
-    // only content older than the second-to-last user turn is fair game:
-    // the current and the previous exchange always stay verbatim
+
     let mut turns = 0;
     let mut start = None;
     for (i, m) in msgs.iter().enumerate().rev() {
@@ -144,7 +132,7 @@ fn prune_tool_outputs(msgs: &mut [Message], cfg: &CompactionCfg) -> bool {
     let Some(start) = start else {
         return false;
     };
-    // tool names live on the assistant message that requested the call
+
     let mut names = std::collections::HashMap::new();
     for m in msgs.iter() {
         for c in &m.tool_calls {
@@ -164,7 +152,7 @@ fn prune_tool_outputs(msgs: &mut [Message], cfg: &CompactionCfg) -> bool {
         if m.role != Role::Tool {
             continue;
         }
-        // an earlier pass already pruned beyond this point — stop the walk
+
         if m.content.starts_with(PRUNE_MARKER) {
             break;
         }
@@ -209,7 +197,7 @@ pub async fn run(
     let mut overflow_retries = 0usize;
     let mut continues = 0usize;
     let mut used: u64 = 0;
-    // server instructions from initialize ride the system prompt once per run
+
     let m0 = mcp.lock().unwrap().clone();
     if let Some(m) = &m0 {
         let block = crate::mcp::instructions_block(&m.instructions(&cfg.perm).await);
@@ -326,8 +314,7 @@ pub async fn run(
             let _ = tx.send(ApiEvent::Note(format!(
                 "output was cut off by the token limit, continuing ({continues}/{MAX_CONTINUES})"
             )));
-            // truncated tool calls are dropped: their args would be broken JSON
-            // and an unanswered tool_use would corrupt the transcript
+
             msgs.push(Message::new(Role::Assistant, reply.text.clone()));
             msgs.push(Message::new(Role::User, CONTINUE_PROMPT));
             req.messages = msgs.clone();
@@ -357,9 +344,7 @@ pub async fn run(
             .map_err(|_| anyhow!("closed"))?;
             let plan_block =
                 cfg.plan && matches!(call.name.as_str(), "write_file" | "edit" | "apply_patch");
-            // bash routed into an attached sandbox is checked (and saved by
-            // "always allow") under the separate "sandbox" permission, so VM
-            // bash can be allowed without loosening the host bash rule
+
             let perm_tool = if call.name == "bash" && crate::sandbox::shell_route().is_some() {
                 "sandbox"
             } else {
@@ -558,7 +543,6 @@ pub async fn run(
                 let p = v["path"].as_str().unwrap_or("").to_string();
                 if !p.is_empty() && crate::files::is_image(&p) {
                     if crate::sandbox::shell_route().is_some() {
-                        // the image lives inside the VM — fetch it over ssh
                         let p2 = p.clone();
                         match tokio::task::spawn_blocking(move || {
                             crate::sandbox::guest_read_image(&p2)
@@ -702,6 +686,9 @@ fn run_bash_background(
         } else if st.is_none() {
             let _ = crate::bg::kill(&id2);
             crate::bg::finish(&id2, None);
+            let _ = tx2.send(ApiEvent::Note(format!(
+                "background task {id2} failed (timeout): {desc2}"
+            )));
             format!("Background task {id2} ({desc2}) timed out and was stopped. Output:\n{out}")
         } else {
             let tail = if code == Some(0) {
@@ -740,10 +727,6 @@ fn run_bash_background(
     )
 }
 
-/// background bash inside the attached sandbox VM: the command becomes a
-/// remote nohup task (own process group, guest log file, .code file with the
-/// exit status); a watcher polls the log over ssh every ~2s and reports
-/// completion through the same queue/wake plumbing as local background bash
 async fn run_bash_background_vm(
     v: &Value,
     tx: &UnboundedSender<ApiEvent>,
@@ -815,8 +798,6 @@ async fn run_bash_background_vm(
                     }
                 }
                 _ => {
-                    // ssh stopped answering — the VM is gone; the tail we
-                    // already have is the best result available
                     ssh_gone = true;
                     break;
                 }
@@ -824,8 +805,6 @@ async fn run_bash_background_vm(
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
         }
         if exit_code.is_some() {
-            // the process died between the log read and the liveness check —
-            // one last drain for the final bytes
             if let Ok(Ok(p)) = tokio::task::spawn_blocking({
                 let sandbox = sandbox.clone();
                 let log = log.clone();
@@ -896,30 +875,52 @@ async fn pump_bg<R: tokio::io::AsyncRead + Unpin>(
     buf: Arc<Mutex<String>>,
     tx: UnboundedSender<ApiEvent>,
 ) {
+    let emit = |s: &str| {
+        {
+            let mut g = buf.lock().unwrap();
+            g.push_str(s);
+            if g.len() > 256 * 1024 {
+                let mut cut = g.len() - 256 * 1024;
+                while cut < g.len() && !g.is_char_boundary(cut) {
+                    cut += 1;
+                }
+                g.drain(..cut);
+            }
+        }
+        crate::bg::append(&id, s);
+        let _ = tx.send(ApiEvent::BgOut {
+            id: id.clone(),
+            chunk: s.to_string(),
+        });
+    };
     let mut b = [0u8; 4096];
+    let mut carry: Vec<u8> = Vec::new();
     loop {
         match r.read(&mut b).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                let s = String::from_utf8_lossy(&b[..n]).to_string();
-                {
-                    let mut g = buf.lock().unwrap();
-                    g.push_str(&s);
-                    if g.len() > 256 * 1024 {
-                        let mut cut = g.len() - 256 * 1024;
-                        while cut < g.len() && !g.is_char_boundary(cut) {
-                            cut += 1;
-                        }
-                        g.drain(..cut);
+                carry.extend_from_slice(&b[..n]);
+                let safe = match std::str::from_utf8(&carry) {
+                    Ok(_) => carry.len(),
+                    Err(e) => e.valid_up_to(),
+                };
+                if safe == 0 {
+                    if carry.len() > 4 {
+                        let s = String::from_utf8_lossy(&carry).to_string();
+                        carry.clear();
+                        emit(&s);
                     }
+                    continue;
                 }
-                crate::bg::append(&id, &s);
-                let _ = tx.send(ApiEvent::BgOut {
-                    id: id.clone(),
-                    chunk: s,
-                });
+                let s = String::from_utf8_lossy(&carry[..safe]).to_string();
+                carry.drain(..safe);
+                emit(&s);
             }
         }
+    }
+    if !carry.is_empty() {
+        let s = String::from_utf8_lossy(&carry).to_string();
+        emit(&s);
     }
 }
 
@@ -945,7 +946,6 @@ async fn ask_user(args: &str, tx: &UnboundedSender<ApiEvent>) -> Result<String> 
     ))
 }
 
-/// the plan file lives in the project: <cwd>/.hi-derola/plan.md
 fn plan_path_in(root: &Path) -> PathBuf {
     root.join(".hi-derola").join("plan.md")
 }
@@ -977,7 +977,6 @@ async fn plan_exit(tx: &UnboundedSender<ApiEvent>) -> Result<(String, bool)> {
     plan_exit_in(&root, tx).await
 }
 
-/// ask the user to approve leaving plan mode; returns (tool result, plan turned off)
 async fn plan_exit_in(root: &Path, tx: &UnboundedSender<ApiEvent>) -> Result<(String, bool)> {
     let args = json!({
         "questions": [{
@@ -1081,7 +1080,6 @@ fn build_sub_req(
     }
 }
 
-/// resolve + launch a subagent call from the tool loop (fresh or continued)
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_subagent(
     provider: Arc<dyn Provider>,
@@ -1148,9 +1146,6 @@ async fn dispatch_subagent(
     }
 }
 
-/// Build the request for a subagent run. When session_id refers to a stored child
-/// of this session the conversation is continued, otherwise a fresh one starts.
-/// Returns (request, session id, read_only).
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_sub_req(
     agent: Option<&str>,
@@ -1182,8 +1177,6 @@ pub fn resolve_sub_req(
     }
 }
 
-/// Spawn a background subagent outside of the tool loop (subagent tool with background=true
-/// and manual @agent invocations from the UIs). Returns the task id.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_standalone_subagent(
     provider: Arc<dyn Provider>,
@@ -1334,13 +1327,12 @@ fn run_subagent<'a>(
                 sub_cfg,
             ));
         let res = fut.await;
-        let _ = fwd.await; // fix: abort could drop the queued Done before it was captured
+        let _ = fwd.await;
         if let Err(e) = res {
             return Err(e);
         }
         let text = result.lock().unwrap().take();
-        // persist the subagent conversation under a fixed id so the model can
-        // continue it later via the session_id argument
+
         if let Some(msgs) = messages.lock().unwrap().take() {
             if !msgs.is_empty() {
                 let st = crate::sessions::StoredSession {
@@ -1383,8 +1375,7 @@ async fn wrap_up(
         Role::User,
         "The tool call limit has been reached. Stop making changes and write a short final summary: what was done, what was changed, what remains.",
     ));
-    // keep tool definitions so the cached system+tools prefix stays intact;
-    // tool calls from here on are answered with an error instead of executing
+
     req.messages = msgs.clone();
     let mut text = String::new();
     for _ in 0..3 {
@@ -1432,8 +1423,6 @@ fn msg_tokens(m: &Message) -> usize {
     chars / 4 + m.images.len() * IMG_TOKEN_EST
 }
 
-/// token-budgeted split: keep the newest messages within `keep_tokens`,
-/// boundary snapped forward past Tool results so call/result pairs stay together
 fn compact_split(msgs: &[Message], keep_tokens: usize) -> Option<usize> {
     if msgs.len() < COMPACT_MIN_MSGS || msgs.first()?.role != Role::User {
         return None;
@@ -1496,8 +1485,6 @@ fn transcript(msgs: &[Message]) -> String {
     t
 }
 
-/// Manual compaction entry point for /compact in the UIs.
-/// `keep` = [agent.compaction].keep (0 falls back to the default).
 pub async fn compact_session(
     provider: Arc<dyn Provider>,
     req: &ChatRequest,
@@ -1520,8 +1507,7 @@ async fn compact(
     };
     let text = transcript(&msgs[1..cut]);
     let kept = msgs.len() - cut;
-    // summary left by a previous compaction lives in the first user message;
-    // on re-compaction it must be merged, not dropped or duplicated
+
     let prior = prior_summary(&msgs[0].content).map(str::to_string);
     const SUMMARY_RULES: &str = "Sections: Objective; Requirements; Decisions; Work State (Completed / Active / Blocked); Next Move; Relevant Files (up to 15, one line each); Important Context.\n\
          Rules: dense facts only, no fluff; keep file paths, commands and error messages exact; do not restate coding conventions from AGENTS.md (they are provided to the next agent separately); at most 600 words.";
@@ -1600,7 +1586,6 @@ async fn compact(
     true
 }
 
-/// summary text left by a previous compaction in the first user message, if any
 fn prior_summary(content: &str) -> Option<&str> {
     content
         .split_once(SUMMARY_MARKER)
@@ -1608,8 +1593,6 @@ fn prior_summary(content: &str) -> Option<&str> {
         .filter(|s| !s.is_empty())
 }
 
-/// attach `summary` to the first user message, replacing any previous summary
-/// so repeated compactions do not accumulate stale summaries
 fn apply_summary(first: &mut Message, summary: &str) {
     if let Some(i) = first.content.find(SUMMARY_MARKER) {
         first.content.truncate(i);
@@ -1661,13 +1644,13 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("hiderola-plan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        // an empty plan is rejected
+
         assert!(plan_write_in(&tmp, r#"{"plan": "  "}"#).is_err());
         let out = plan_write_in(&tmp, "{\"plan\": \"# goal\\n- step 1\\n- step 2\"}").unwrap();
         assert!(out.contains("3 lines"), "{out}");
         let saved = std::fs::read_to_string(plan_path_in(&tmp)).unwrap();
         assert!(saved.contains("step 1"));
-        // a second call overwrites the file
+
         plan_write_in(&tmp, "{\"plan\": \"# v2\"}").unwrap();
         assert!(std::fs::read_to_string(plan_path_in(&tmp))
             .unwrap()
@@ -1692,29 +1675,24 @@ mod tests {
             h.await.unwrap().unwrap()
         }
 
-        // approved but nothing saved yet -> stays in plan mode
         let (msg, off) = run(tmp.clone(), "Start building").await;
         assert!(!off);
         assert!(msg.contains("no plan file"), "{msg}");
 
-        // with a plan file -> plan mode off
         std::fs::create_dir_all(tmp.join(".hi-derola")).unwrap();
         std::fs::write(tmp.join(".hi-derola").join("plan.md"), "# plan\n").unwrap();
         let (msg, off) = run(tmp.clone(), "Start building").await;
         assert!(off, "{msg}");
         assert!(msg.contains("now OFF"));
 
-        // keep planning
         let (msg, off) = run(tmp.clone(), "Keep planning").await;
         assert!(!off);
         assert!(msg.contains("keep planning"), "{msg}");
 
-        // free-text feedback reaches the model
         let (msg, off) = run(tmp.clone(), "also cover the migration path").await;
         assert!(!off);
         assert!(msg.contains("migration path"), "{msg}");
 
-        // dismissed
         let (_, off) = run(tmp.clone(), "").await;
         assert!(!off);
 
@@ -1723,7 +1701,6 @@ mod tests {
 
     #[test]
     fn split_and_overflow() {
-        // 6 messages < COMPACT_MIN_MSGS -> never split
         let msgs = vec![
             m(Role::User, "task"),
             m(Role::Assistant, "a1"),
@@ -1733,12 +1710,12 @@ mod tests {
             m(Role::Assistant, "a3"),
         ];
         assert_eq!(compact_split(&msgs, 100), None);
-        // 13 messages of 40 chars (10 tokens each), budget 50 tokens -> keep last 5
+
         let long: Vec<Message> = std::iter::once(m(Role::User, "task"))
             .chain((0..12).map(|_| m(Role::Assistant, &"x".repeat(40))))
             .collect();
         assert_eq!(compact_split(&long, 50), Some(8));
-        // boundary must not orphan a tool result: snap forward past Tool
+
         let body = "y".repeat(40);
         let orphan: Vec<Message> = std::iter::once(m(Role::User, "task"))
             .chain((0..6).map(|_| m(Role::Assistant, &body)))
@@ -1748,7 +1725,7 @@ mod tests {
         let cut = compact_split(&orphan, 50).unwrap();
         assert_eq!(cut, 8);
         assert_eq!(orphan[cut].role, Role::Assistant);
-        // a single message larger than the budget still leaves one kept
+
         let huge: Vec<Message> = std::iter::once(m(Role::User, "task"))
             .chain((0..7).map(|_| m(Role::Assistant, "small")))
             .chain(std::iter::once(m(Role::Assistant, &"z".repeat(40_000))))
@@ -1765,41 +1742,40 @@ mod tests {
         let mut c = CompactionCfg::default();
         assert!(c.auto);
         assert_eq!(c.keep, 15_000);
-        // buffer=0 -> a quarter of the window (legacy 75% trigger)
+
         assert_eq!(compact_headroom(&c, 200_000), 50_000);
         assert!(!auto_compact_due(&c, 200_000, 150_000, 0));
         assert!(auto_compact_due(&c, 200_000, 150_001, 0));
-        // the estimate counts too when no usage was observed yet
+
         assert!(!auto_compact_due(&c, 200_000, 0, 150_000));
         assert!(auto_compact_due(&c, 200_000, 0, 150_001));
-        // auto off -> never proactive (overflow recovery / /compact still work)
+
         c.auto = false;
         assert!(!auto_compact_due(&c, 200_000, 500_000, 0));
         c.auto = true;
-        // unknown window -> no proactive compaction
+
         assert!(!auto_compact_due(&c, 0, 500_000, 0));
-        // absolute buffer overrides the quarter
+
         c.buffer = 20_000;
         assert_eq!(compact_headroom(&c, 200_000), 20_000);
         assert!(!auto_compact_due(&c, 200_000, 180_000, 0));
         assert!(auto_compact_due(&c, 200_000, 180_001, 0));
-        // keep=0 falls back to the built-in default
+
         assert_eq!(effective_keep(0), 15_000);
         assert_eq!(effective_keep(30_000), 30_000);
     }
 
     #[test]
     fn output_fitting() {
-        // unknown window -> untouched
         assert_eq!(clamp_output(None, 0, 90_000), None);
         assert_eq!(clamp_output(Some(4_096), 0, 90_000), Some(4_096));
-        // plenty of room -> untouched (even the provider default)
+
         assert_eq!(clamp_output(None, 200_000, 10_000), None);
-        // configured cap larger than the remaining room -> shrunk to the floor
+
         assert_eq!(clamp_output(Some(16_000), 10_000, 9_900), Some(1_024));
-        // user cap smaller than the room -> untouched
+
         assert_eq!(clamp_output(Some(2_000), 200_000, 100_000), Some(2_000));
-        // no configured cap, tight room -> shrunk default
+
         assert_eq!(clamp_output(None, 8_192, 7_900), Some(1_024));
         assert_eq!(clamp_output(None, 100_000, 86_000), Some(1_100));
     }
@@ -1814,13 +1790,11 @@ mod tests {
 
     #[test]
     fn summary_merge() {
-        // plain first message -> no prior summary
         assert_eq!(prior_summary("fix the parser"), None);
         assert_eq!(prior_summary(""), None);
-        // a marker with an empty body is not a summary
+
         assert_eq!(prior_summary("task\n\n---\nSummary of the earlier conversation (dropped to fit the context window):\n  "), None);
 
-        // first compaction attaches the summary after the original task text
         let mut first = m(Role::User, "fix the parser");
         apply_summary(&mut first, "Objective: fix the parser");
         assert!(first.content.starts_with("fix the parser\n\n---\nSummary"));
@@ -1830,7 +1804,6 @@ mod tests {
             Some("Objective: fix the parser")
         );
 
-        // second compaction REPLACES the old summary instead of accumulating
         apply_summary(&mut first, "Objective: fix the parser\nWork State: done");
         assert_eq!(first.content.matches(SUMMARY_MARKER).count(), 1);
         assert!(first.content.starts_with("fix the parser\n\n---\nSummary"));
@@ -1839,16 +1812,15 @@ mod tests {
             prior_summary(&first.content),
             Some("Objective: fix the parser\nWork State: done")
         );
-        // the original task text survives every re-compaction
+
         assert!(prior_summary(&first.content).is_some());
         assert!(first.content.split_once(SUMMARY_MARKER).unwrap().0 == "fix the parser");
 
-        // a merged first message keeps compact_split happy: role stays User
         let msgs: Vec<Message> = std::iter::once(first)
             .chain((0..12).map(|_| m(Role::Assistant, &"x".repeat(40))))
             .collect();
         assert!(compact_split(&msgs, 50).is_some());
-        // and the prior summary never leaks into the transcript being summarized
+
         let cut = compact_split(&msgs, 50).unwrap();
         let t = transcript(&msgs[1..cut]);
         assert!(!t.contains("Objective: fix the parser"));
@@ -1877,8 +1849,8 @@ mod tests {
 
     #[test]
     fn prune_replaces_old_tool_outputs() {
-        let big = "a".repeat(200_000); // ~50k tokens
-                                       // the last two user turns (t2..t3) are protected: only tool1 is old
+        let big = "a".repeat(200_000);
+
         let mut msgs = vec![
             m(Role::User, "turn one"),
             call("c1", "bash"),
@@ -1901,7 +1873,6 @@ mod tests {
         assert_eq!(msgs[5].content, big, "the previous exchange stays verbatim");
         assert_eq!(msgs[0].content, "turn one");
 
-        // with four turns both outputs are older than the protected window
         let mut msgs = vec![
             m(Role::User, "t1"),
             call("c1", "bash"),
@@ -1922,8 +1893,8 @@ mod tests {
 
     #[test]
     fn prune_protects_recent_outputs() {
-        let big = "a".repeat(200_000); // ~50k tokens
-                                       // one exchange only: nothing is older than the last two user turns
+        let big = "a".repeat(200_000);
+
         let mut msgs = vec![
             m(Role::User, "turn one"),
             call("c1", "bash"),
@@ -1935,7 +1906,7 @@ mod tests {
             &compaction(true, 40_000, 20_000)
         ));
         assert_eq!(msgs[2].content, big);
-        // a tool output newer than the second-to-last user turn is off limits
+
         let mut msgs = vec![
             m(Role::User, "turn one"),
             m(Role::User, "turn two"),
@@ -1952,7 +1923,7 @@ mod tests {
 
     #[test]
     fn prune_respects_min_gate_and_switch() {
-        let mid = "a".repeat(100_000); // ~25k tokens
+        let mid = "a".repeat(100_000);
         let mut msgs = vec![
             m(Role::User, "t1"),
             call("c1", "bash"),
@@ -1962,17 +1933,16 @@ mod tests {
             tool_msg("c2", "", &mid),
             m(Role::User, "t3"),
         ];
-        // protect 20k -> the old output is a candidate freeing ~25k, but the
-        // 30k gate is not met -> nothing commits
+
         assert!(!prune_tool_outputs(
             &mut msgs,
             &compaction(true, 20_000, 30_000)
         ));
         assert_eq!(msgs[2].content, mid);
-        // prune = false disables the pass entirely
+
         assert!(!prune_tool_outputs(&mut msgs, &compaction(false, 0, 0)));
         assert_eq!(msgs[2].content, mid);
-        // min = 0 commits as soon as anything crosses protect
+
         assert!(prune_tool_outputs(&mut msgs, &compaction(true, 20_000, 0)));
         assert!(msgs[2].content.starts_with(PRUNE_MARKER));
         assert_eq!(msgs[5].content, mid);
@@ -1990,12 +1960,11 @@ mod tests {
             m(Role::User, "t2"),
             m(Role::User, "t3"),
         ];
-        // skill output is protected, the bash one is the only candidate
+
         assert!(prune_tool_outputs(&mut msgs, &compaction(true, 40_000, 0)));
         assert_eq!(msgs[2].content, big, "skill outputs stay verbatim");
         assert!(msgs[4].content.starts_with(PRUNE_MARKER));
 
-        // a second pass stops at the marker: older history is left alone
         let mut msgs = vec![
             m(Role::User, "t0"),
             call("c0", "bash"),
@@ -2010,7 +1979,6 @@ mod tests {
         assert_eq!(msgs[2].content, big, "walk stops at the marker");
         assert_eq!(msgs[6].content, big);
 
-        // fewer than two user turns -> nothing is prunable yet
         let mut msgs = vec![
             m(Role::User, "only turn"),
             call("c", "bash"),

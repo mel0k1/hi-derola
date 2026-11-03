@@ -64,17 +64,16 @@ pub struct App {
     pub confirm_feedback: bool,
     pub attachments: Vec<(String, String)>,
     pub streaming: Option<usize>,
-    /// live streaming crew replies: entry index + author name, one per
-    /// in-flight member (bg workers and the inline member can parallel-stream)
+
     pub crew_stream: Vec<(usize, String)>,
-    /// crew runner task; separate from chat inflight so chat stays usable
+
     pub crew_task: Option<tokio::task::JoinHandle<()>>,
     pub reasoning: Option<usize>,
     pub tokens_in: u64,
     pub tokens_out: u64,
     pub tokens_cached: u64,
     pub cost: f64,
-    /// one row per api request, priced with the model that served it
+
     pub usage: Vec<crate::usage::UsageRow>,
     pub should_quit: bool,
     pub status: String,
@@ -85,7 +84,7 @@ pub struct App {
     hist_idx: usize,
     draft: String,
     mcp: McpSlot,
-    /// live session id mirrored for mcp tools/call _meta passthrough
+
     mcp_session: Arc<std::sync::RwLock<String>>,
     tx: mpsc::UnboundedSender<ApiEvent>,
 }
@@ -110,7 +109,6 @@ fn fmt_age(secs: u64) -> String {
     }
 }
 
-/// human bytes for download progress in /sandbox listings (MiB until 1 GiB)
 fn fmt_mib(bytes: u64) -> String {
     let mib = bytes as f64 / (1024.0 * 1024.0);
     if mib >= 1024.0 {
@@ -120,8 +118,6 @@ fn fmt_mib(bytes: u64) -> String {
     }
 }
 
-/// resolve a sandbox by exact/prefix id or by (substring) name — shared by
-/// every /sandbox subcommand that takes an <id|name> argument
 fn find_sandbox(
     m: &crate::sandbox::SandboxManager,
     key: &str,
@@ -187,16 +183,13 @@ impl App {
             mcp: Arc::new(Mutex::new(None)),
             tx,
         };
-        // a shell route left over from an earlier session of this process
-        // re-applies its sandbox addendum
+
         if crate::sandbox::shell_route().is_some() {
             app.refresh_system_prompt();
         }
         app
     }
 
-    /// rebuild the system prompt: base (venue + model + AGENTS.md) plus the
-    /// sandbox addendum while the bash tool is routed into a VM
     fn refresh_system_prompt(&mut self) {
         self.session.system = crate::base_prompt("in the user's terminal", &self.model);
         if let Some(add) = crate::sandbox::shell_route_addendum() {
@@ -205,10 +198,6 @@ impl App {
         }
     }
 
-    /// switch the provider profile at runtime (or drop back to the base
-    /// [provider] section with None): rebuild the provider from the effective
-    /// config, refresh model/status/system prompt, persist the choice;
-    /// a failed build or a missing key keeps the previous profile
     fn apply_profile(&mut self, name: Option<String>) {
         let prev = self.cfg.provider.active.clone();
         self.cfg.provider.active = name.clone();
@@ -240,9 +229,6 @@ impl App {
         }
     }
 
-    /// /sandbox — the sandbox tab for the terminal: list, lifecycle, quick
-    /// create and the bash route attach/detach (GUI parity lives in the
-    /// sandbox tab of the window)
     fn sandbox_command(&mut self, arg: &str) {
         const USAGE: &str = "usage: /sandbox [list] · /sandbox start|stop|attach|detach <id|name> · /sandbox fetch|push <id|name> <path> [dest] · /sandbox term <id|name> [agent] · /sandbox fwd <id|name> add <host-port> <guest-port> [guest-host] | list | del <host-port> · /sandbox new <name> [kind] [key=value...]";
         let m = crate::sandbox::SandboxManager::global();
@@ -414,7 +400,7 @@ impl App {
                     self.info("usage: /sandbox push <id|name> <host-path> [vm-path]");
                     return;
                 };
-                // a relative path in the VM means the VM user's home
+
                 let vm_path = parts.next().map(str::to_string).unwrap_or_else(|| {
                     host_path
                         .rsplit(['/', '\\'])
@@ -574,8 +560,7 @@ impl App {
                 let mut disk_gib = None;
                 let mut ram_mib = None;
                 let mut cpus = None;
-                // root defaults on for the TUI: the in-VM agent needs
-                // passwordless sudo to install itself
+
                 let mut root = true;
                 for a in &rest[1..] {
                     if let Some(v) = a.strip_prefix("ram=") {
@@ -650,7 +635,6 @@ impl App {
         }
     }
 
-    /// client hooks for mcp: workspace root (cwd) + sampling via our provider
     fn mcp_hooks(&self) -> mcp::McpHooks {
         let eff = self.cfg.effective_provider();
         mcp::McpHooks::workspace(std::env::current_dir().ok())
@@ -706,8 +690,6 @@ impl App {
         }
     }
 
-    /// drop one live crew streaming entry (the final reply replaces it);
-    /// the other tracked entries get their indexes fixed up
     fn flush_crew_stream_author(&mut self, author: &str) {
         let Some(pos) = self.crew_stream.iter().position(|(_, a)| a == author) else {
             return;
@@ -790,9 +772,6 @@ impl App {
             ApiEvent::Confirm { name, args, rx } => {
                 self.flush_stream();
                 if self.confirm.is_some() {
-                    // one prompt at a time: the chat run and a crew tool-member
-                    // can both ask — the newcomer gets an explicit soft-deny
-                    // instead of orphaning the first oneshot
                     let _ = rx.send(crate::provider::ConfirmReply {
                         approved: false,
                         feedback: "another permission prompt is already open — try again".into(),
@@ -892,7 +871,7 @@ impl App {
                 self.tokens_in += input;
                 self.tokens_out += output;
                 self.tokens_cached += cached;
-                let disc = if self.cfg.provider.kind == "anthropic" {
+                let disc = if self.cfg.effective_provider().kind == "anthropic" {
                     0.1
                 } else {
                     0.5
@@ -908,7 +887,6 @@ impl App {
                 });
             }
             ApiEvent::Bell => {
-                // crew finished: terminal bell (visible note already went out)
                 let _ = std::io::Write::write_all(&mut std::io::stderr(), b"\x07");
             }
             ApiEvent::Done { text, messages } => {
@@ -940,7 +918,6 @@ impl App {
             }
             ApiEvent::Wake => {}
             ApiEvent::Submit(text) => {
-                // normally intercepted by the main loop; from inside a run it steers
                 self.queue.lock().unwrap().push(text);
             }
         }
@@ -951,8 +928,7 @@ impl App {
         if self.session.messages.is_empty() {
             return;
         }
-        // keep gui-written fields (subagent parent, change review) and the
-        // original creation date when the same session is saved again
+
         let prev = crate::sessions::load(&self.sid).ok();
         let st = crate::sessions::StoredSession {
             id: self.sid.clone(),
@@ -1324,7 +1300,7 @@ impl App {
             self.status = self.status_line();
             return;
         }
-        // manual subagent invocation: "@explore find the parser"
+
         let eff = self.cfg.effective_provider();
         if let Some((agent_name, rest)) = crate::agents::split_mention(&text) {
             self.input.clear();
@@ -1429,7 +1405,6 @@ impl App {
         self.start_run(inflight);
     }
 
-    /// submit text as a user message and start a run (mcp prompts, Submit events)
     pub fn submit_text(
         &mut self,
         text: String,
@@ -2062,7 +2037,7 @@ impl App {
                     self.info(format!("/crew open|resume <id> — {USAGE}"));
                     return;
                 };
-                // exact id, else unique prefix match over saved crews
+
                 let resolved = if crate::crew::load(id).is_ok() {
                     Some(id.to_string())
                 } else {
@@ -2428,7 +2403,6 @@ impl App {
                     return;
                 }
                 let target = if arg.is_empty() {
-                    // default to the latest main session, not a subagent child
                     crate::sessions::list()
                         .into_iter()
                         .find(|s| s.parent.is_none())
@@ -2527,8 +2501,7 @@ impl App {
                 } else {
                     let mut parts = arg.split_whitespace();
                     let name = parts.next().unwrap_or("").to_string();
-                    // a pasted authorization code resumes a pending flow
-                    // (works after a restart — the verifier is persisted)
+
                     let code = parts.next().map(|s| s.to_string());
                     let cfgs = self.cfg.mcp.clone();
                     let hooks = self.mcp_hooks();
@@ -2602,7 +2575,7 @@ impl App {
                             Ok(sum) => format!("mcp {name}: connected ({sum})"),
                             Err(e) => format!("error: {e:#}"),
                         },
-                        // no live client yet: start one with this server
+
                         None => {
                             let (client, mut logs) =
                                 mcp::connect_all(std::slice::from_ref(&cfg), &hooks).await;
@@ -3127,7 +3100,10 @@ impl App {
                 } else {
                     arg.to_string()
                 };
-                let md = crate::commands::export_markdown("", &self.session.messages);
+                let md = crate::commands::export_markdown(
+                    self.title.as_deref().unwrap_or("hi-derola session"),
+                    &self.session.messages,
+                );
                 match std::fs::write(&path, md) {
                     Ok(_) => self.info(format!("exported to {path}")),
                     Err(e) => self.info(format!("error: {e:#}")),

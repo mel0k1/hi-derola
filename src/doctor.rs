@@ -1,9 +1,3 @@
-//! /doctor — one-shot environment self-check. With the sandbox feature ssh
-//! became a hard requirement, so one command answers "what works here":
-//! provider/config, the ssh client, qemu + accel, lsp servers, post-edit
-//! formatters, live mcp states and the sandbox inventory. The report is a
-//! plain text block (TUI note now, a tauri command can reuse `run` later).
-
 use crate::fmt::find_on_path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,7 +25,6 @@ impl Check {
     }
 }
 
-/// the pieces doctor needs from the live app (never the api key itself)
 pub struct DoctorInput {
     pub provider_kind: String,
     pub model: String,
@@ -39,8 +32,6 @@ pub struct DoctorInput {
     pub config_path: String,
 }
 
-/// blocking environment checks: PATH scans plus a couple of instant
-/// `--version` spawns — run off the async workers (spawn_blocking)
 pub fn collect(input: &DoctorInput) -> Vec<Check> {
     vec![
         config_check(input),
@@ -99,8 +90,6 @@ fn ssh_version(bin: &std::path::Path) -> String {
     }
 }
 
-/// `ssh -V` prints to stderr: "OpenSSH_9.7p1 Debian-7, OpenSSL ..." — the
-/// first comma token is the version
 fn parse_ssh_version_text(text: &str) -> String {
     let first = text
         .lines()
@@ -121,7 +110,6 @@ fn qemu_check() -> Check {
     let q = crate::sandbox::detect_qemu();
     if q.ok() {
         Check {
-            // tcg is the pure-software fallback: VMs boot but crawl
             status: if q.accel.as_deref() == Some("tcg") {
                 Status::Warn
             } else {
@@ -177,8 +165,6 @@ fn lsp_check() -> Check {
     }
 }
 
-/// formatter binaries used after write_file/edit (ruff/black are py
-/// alternatives, prettier can also come from node_modules/.bin)
 const FMT_TOOLS: &[&str] = &[
     "rustfmt",
     "gofmt",
@@ -211,7 +197,6 @@ fn fmt_check() -> Check {
     }
 }
 
-/// live mcp states → one doctor line (a thin summary over /mcpstatus)
 pub fn mcp_check(entries: &[crate::mcp::McpStatusEntry], configured: usize) -> Check {
     if configured == 0 {
         return Check {
@@ -241,7 +226,6 @@ pub fn mcp_check(entries: &[crate::mcp::McpStatusEntry], configured: usize) -> C
     }
 }
 
-/// sandbox inventory plus where the bash route currently points
 pub fn sandbox_check() -> Check {
     let m = crate::sandbox::SandboxManager::global();
     let list = m.list();
@@ -285,8 +269,6 @@ pub fn render(checks: &[Check]) -> String {
     out
 }
 
-/// full report: blocking env checks off the async workers, then the live mcp
-/// states and the sandbox inventory
 pub async fn run(
     input: DoctorInput,
     mcp: crate::mcp::McpSlot,

@@ -32,7 +32,6 @@ pub(crate) fn image_mime(ext: &str) -> &'static str {
     }
 }
 
-/// Read an image file and return (mime, base64) for vision messages.
 pub fn read_image(path: &str) -> Result<(String, String)> {
     let meta = std::fs::metadata(path).map_err(|e| anyhow::anyhow!("{path}: {e}"))?;
     if meta.len() > MAX_IMAGE_BYTES {
@@ -50,7 +49,6 @@ pub fn read_image(path: &str) -> Result<(String, String)> {
     Ok((mime, b64))
 }
 
-/// Split a "data:<mime>;base64,<payload>" attachment back into (mime, base64).
 pub fn split_data_url(s: &str) -> Option<(String, String)> {
     let rest = s.strip_prefix("data:")?;
     let (mime, payload) = rest.split_once(";base64,")?;
@@ -75,8 +73,15 @@ pub fn apply(block: &WriteBlock) -> Result<usize> {
             std::fs::create_dir_all(parent).map_err(|e| anyhow::anyhow!("{}: {e}", block.path))?;
         }
     }
-    std::fs::write(path, &block.content).map_err(|e| anyhow::anyhow!("{}: {e}", block.path))?;
+    write_atomic(path, &block.content).map_err(|e| anyhow::anyhow!("{}: {e}", block.path))?;
     Ok(block.content.lines().count())
+}
+
+pub(crate) fn write_atomic(path: &std::path::Path, content: &str) -> std::io::Result<()> {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let tmp = path.with_file_name(format!(".{name}.hiderola-tmp"));
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, path)
 }
 
 pub fn norm(p: &str) -> String {
@@ -90,7 +95,6 @@ pub fn norm(p: &str) -> String {
 const MAX_WALK: usize = 8000;
 const MAX_DEPTH: usize = 24;
 
-/// Walk files under `dir`, respecting .gitignore/.ignore and skipping hidden entries.
 pub fn walk_files(dir: &str, out: &mut Vec<String>) {
     let walker = ignore::WalkBuilder::new(dir)
         .max_depth(Some(MAX_DEPTH))
@@ -125,24 +129,27 @@ pub fn mentions_in(base: &std::path::Path, text: &str) -> (String, Vec<String>, 
     let mut blocks = String::new();
     let mut attached = Vec::new();
     let mut missing = Vec::new();
-    let bytes = text.as_bytes();
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
     let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] != b'@' || (i > 0 && (bytes[i - 1] as char).is_alphanumeric()) {
+    while i < chars.len() {
+        let (_, ch) = chars[i];
+        if ch != '@' || (i > 0 && chars[i - 1].1.is_alphanumeric()) {
             i += 1;
             continue;
         }
         let start = i + 1;
         let mut end = start;
-        while end < bytes.len() {
-            let c = bytes[end] as char;
+        while end < chars.len() {
+            let c = chars[end].1;
             if c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '\\' | '~' | '+') {
                 end += 1;
             } else {
                 break;
             }
         }
-        if let Some(p) = token_path(&text[start..end]) {
+        let tok_start = chars.get(start).map(|(p, _)| *p).unwrap_or(text.len());
+        let tok_end = chars.get(end).map(|(p, _)| *p).unwrap_or(text.len());
+        if let Some(p) = token_path(&text[tok_start..tok_end]) {
             let full = if p.starts_with('~') {
                 if p == "~" {
                     dirs::home_dir().unwrap_or_else(|| base.to_path_buf())

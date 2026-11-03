@@ -19,7 +19,7 @@ pub struct ToolSpec {
 pub struct Reply {
     pub text: String,
     pub calls: Vec<ToolCall>,
-    /// the provider cut the response short (finish_reason length / stop_reason max_tokens)
+
     pub truncated: bool,
 }
 
@@ -49,27 +49,26 @@ pub enum ApiEvent {
         rx: tokio::sync::oneshot::Sender<String>,
     },
     Todo(String),
-    /// plan mode flipped at runtime (plan_exit approval): true = on, false = off
+
     Plan(bool),
     BgOut {
         id: String,
         chunk: String,
     },
-    /// a crew member spoke (multi-agent session); the frontends route it to
-    /// the crew panel / log
+
     Crew {
         id: String,
         author: String,
         role: String,
         content: String,
     },
-    /// streaming delta from a crew member's in-progress reply
+
     CrewChunk {
         id: String,
         author: String,
         delta: String,
     },
-    /// crew finished (status done) — the frontends ring a bell / notify
+
     Bell,
     Done {
         text: String,
@@ -77,7 +76,7 @@ pub enum ApiEvent {
     },
     Failed(String),
     Wake,
-    /// submit text as a user message and start a run (e.g. an mcp prompt)
+
     Submit(String),
 }
 
@@ -85,7 +84,7 @@ pub enum ApiEvent {
 pub struct ConfirmReply {
     pub approved: bool,
     pub feedback: String,
-    /// approve and save a wildcard allow-rule for this tool into the config
+
     pub always: bool,
 }
 
@@ -273,19 +272,19 @@ pub async fn sse_lines(
     mut resp: reqwest::Response,
     mut on_line: impl FnMut(&str) -> Result<()>,
 ) -> Result<()> {
-    let mut buf = String::new();
+    let mut buf: Vec<u8> = Vec::new();
     loop {
         let Some(bytes) = resp.chunk().await? else {
             break;
         };
-        buf.push_str(&String::from_utf8_lossy(&bytes));
-        while let Some(pos) = buf.find('\n') {
-            let line: String = buf.drain(..pos + 1).collect();
-            on_line(line.trim_end())?;
+        buf.extend_from_slice(&bytes);
+        while let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = buf.drain(..pos + 1).collect();
+            on_line(String::from_utf8_lossy(&line).trim_end())?;
         }
     }
     if !buf.is_empty() {
-        on_line(buf.trim_end())?;
+        on_line(String::from_utf8_lossy(&buf).trim_end())?;
     }
     Ok(())
 }
@@ -296,7 +295,6 @@ mod tests {
     use std::io::{Read, Write};
     use tokio::sync::mpsc::unbounded_channel;
 
-    /// one-shot HTTP/1.1 server: serves one canned response per connection
     fn spawn_server(responses: Vec<String>) -> std::net::SocketAddr {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
@@ -340,7 +338,7 @@ mod tests {
         .await
         .unwrap();
         assert!(resp.status().is_success());
-        // both retry-after hints (50 ms each) were honored
+
         assert!(started.elapsed() >= std::time::Duration::from_millis(100));
         drop(tx);
         let mut notes = Vec::new();
