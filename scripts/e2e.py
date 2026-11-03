@@ -17,19 +17,16 @@ WORKDIR = tempfile.mkdtemp(prefix="hiderola-e2e-")
 PORT = 18971
 failures = []
 
-
 def check(name, cond):
     print(("PASS " if cond else "FAIL ") + name)
     if not cond:
         failures.append(name)
-
 
 def make_crlf_file():
     p = os.path.join(WORKDIR, "app.txt")
     with open(p, "wb") as f:
         f.write(b"value = 1\r\nname = demo\r\nend\r\n")
     return p
-
 
 SCENARIO = {"edit_done": False, "steer_started": False, "steer_done": False,
             "ask_done": False, "fetch_done": False, "sub_done": False,
@@ -45,7 +42,6 @@ SCENARIO = {"edit_done": False, "steer_started": False, "steer_done": False,
             "sub_fresh": False, "sub_sid": "",
             "resume_done": False}
 
-
 def sse_response(handler, chunks, finish="stop"):
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream")
@@ -58,7 +54,6 @@ def sse_response(handler, chunks, finish="stop"):
     handler.wfile.write(b"data: [DONE]\n\n")
     handler.wfile.flush()
 
-
 def tool_call_chunks(name, args):
     return [
         {"role": "assistant", "content": ""},
@@ -67,7 +62,6 @@ def tool_call_chunks(name, args):
         {"tool_calls": [{"index": 0, "function": {"arguments": args}}]},
         {},
     ]
-
 
 class Mock(BaseHTTPRequestHandler):
     def log_message(self, *a):
@@ -378,10 +372,8 @@ class Mock(BaseHTTPRequestHandler):
             return
         respond([{"role": "assistant", "content": "ALL_DONE"}])
 
-
 def strip(s):
     return ANSI.sub("", s)
-
 
 def run_pty():
     bin_path = os.path.abspath("target/debug/hi-derola")
@@ -604,7 +596,6 @@ def run_pty():
     os.waitpid(pid, 0)
     os.close(fd)
     return strip(out), out
-
 
 with open(os.path.join(WORKDIR, "README.md"), "w") as f:
     f.write("readme content for mention\n")

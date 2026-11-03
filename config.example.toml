@@ -1,98 +1,19 @@
-# hi-derola config
-# path: ~/.config/hi-derola/config.toml
+
 
 [provider]
-# openai (any openai-compatible endpoint) | anthropic
+
 type = "openai"
 
-# any model of the provider
 model = "anthropic/claude-sonnet-4.5"
 
-# optional: override endpoint, e.g. openrouter
 base_url = "https://openrouter.ai/api/v1"
 
-# api key, or env HI_DEROLA_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY
-# can also be set in the GUI settings
 api_key = ""
 
-# optional response limit
 max_tokens = 4096
 
-# stream response tokens as they arrive
 stream = true
 
-# optional sampling params
-# temperature = 0.7
-# top_p = 0.9
-
-# provider profiles: named presets switched with /profile <name> in the chat
-# (fields present in a profile override the [provider] section, everything
-# else is inherited — a profile can be as small as a model override or as
-# complete as a whole second provider; /profile alone lists them, the choice
-# is saved here as provider.active; /profile none returns to the base section)
-# [profiles.cheap]
-# model = "anthropic/claude-3.5-haiku"
-# [profiles.local]
-# type = "openai"
-# model = "qwen3:8b"
-# base_url = "http://localhost:11434/v1"
-# api_key = "ollama"
-
-# mcp servers, tools exposed as mcp__<name>__<tool>, calls ask y/n/a
-# local server over stdio
-# [[mcp]]
-# name = "fs"
-# command = "npx"
-# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
-
-# remote server over streamable http (a legacy http + sse server is
-# detected automatically and used as fallback)
-# [[mcp]]
-# name = "search"
-# type = "remote"
-# url = "https://example.com/mcp"
-# headers = { Authorization = "Bearer ..." }
-# oauth: browser authorization (PKCE), tokens cached in the data dir
-# oauth = true — or a table to pin client_id/client_secret/scope/redirect_uri
-# [mcp.oauth]
-# client_id = "hi-derola"
-# scope = "read write"
-# auth_server_metadata_url = "https://as.example.com/.well-known/oauth-authorization-server"
-#   (pins the authorization server metadata url — the 401 probe and
-#   protected-resource discovery are skipped entirely)
-# sampling = false refuses sampling/createMessage from this server
-# (by default a sampling request runs a one-shot completion on your
-# provider with the configured model; each request is noted in the chat)
-# logging = false drops notifications/message log entries from this server
-# (everything lands in a 500-entry ring buffer — /mcplog shows the recent
-# tail, warning and above also pop into the chat; /mcplog set <server|all>
-# <level> sets the minimum level via logging/setLevel)
-# elicitation = false declines elicitation/create from this server
-# (by default the request surfaces as a question prompt — tui ask flow or
-# gui dialog; esc/skip cancels, the server gets decline/cancel)
-# keepalive = 30 pings the server every 30s; alive/unresponsive transitions
-# are noted in the chat once per flip (absent or 0 = off)
-# timeout = 300 legacy blanket override for every phase of this server
-# startup_timeout = 60 limits connect + initialize (default 30s)
-# catalog_timeout = 60 limits tools/resources/prompts discovery, re-lists,
-# resource reads and prompt fetches (default 30s)
-# execution_timeout = 43200 limits tools/call (default 3600s; a call that
-# reports progress keeps sliding, a silent one hits the deadline)
-# enabled = false skips this server at startup; /mcpconnect refuses it
-# until it is re-enabled
-# cwd = "/path/to/dir" sets the working directory of a local (stdio) server
-# protocol_version picks the initialize handshake: "legacy" (default) keeps
-# the classic per-transport versions (2024-11-05 stdio / 2025-03-26 http,
-# roots advertised, server answer trusted), "auto" offers 2026-07-28 (roots
-# capability dropped, server answer validated), any other value pins exactly
-# that version (roots dropped when the pin is 2026-07-28 or newer)
-# protocol_version = "auto"
-# servers can also be added at runtime from the chat:
-# /mcpadd <name> <url|command...> (saved here), /mcpconnect <name> reconnects,
-# /mcpdisconnect <name> drops the live connection without touching the config
-
-# gui hotkeys, combos: enter, escape, tab, ctrl+x, shift+enter, alt+f, comma...
-# set to "none" to disable, unknown keys fall back to defaults
 [keys]
 send = "enter"
 newline = "shift+enter"
@@ -105,88 +26,23 @@ toggle_thinking = "ctrl+t"
 toggle_sidebar = "ctrl+b"
 toggle_theme = "ctrl+shift+t"
 
-# interface
 [ui]
-# dark (default) | light
-# theme = "light"
 
-# agent loop
 [agent]
-# model context budget in tokens, compaction starts at 75%
-# 0 = auto: taken from the built-in model catalog (90% of the context window)
+
 context_limit = 0
-# tool rounds per message, then the model is asked to wrap up
+
 max_rounds = 15
-# max chars of a single tool result kept in the context
+
 output_budget = 32768
-# how many levels of subagent-in-subagent are allowed (1 = the main agent can spawn subagents)
+
 subagent_depth = 1
-# shell used by the bash tool: program name or full path
-# cmd / powershell / pwsh get their own flag, anything else gets -c
-# shell = "C:\\Program Files\\Git\\bin\\bash.exe"
-# global default tools/call deadline in seconds for every mcp server that
-# does not set its own execution_timeout (per-server values win)
-# mcp_timeout = 120
 
-# context compaction tuning
-# [agent.compaction]
-# proactive compaction when the conversation approaches the window
-# (overflow recovery and manual /compact always stay available)
-# auto = true
-# headroom before proactive compaction triggers, in tokens
-# 0 = a quarter of the context window (compaction at ~75%)
-# buffer = 0
-# tokens of the most recent messages kept verbatim when compacting
-# keep = 15000
-# prune stale tool outputs between turns (big one-shot outputs become short
-# placeholders, the newest ~40k tokens of tool output stay verbatim)
-# prune = true
-# prune_protect = 40000
-# prune_min = 20000
-
-# language server integration: diagnostics fed back after write_file/edit,
-# plus the lsp tool for code navigation (hover, definition, references,
-# implementation, document/workspace symbols)
-# servers auto-detected on PATH: rust-analyzer, pyright/basedpyright/pylsp,
-# typescript-language-server, gopls, clangd
 [lsp]
 enabled = true
 
-# run a formatter on the file after write_file/edit
-# rust: rustfmt, go: gofmt, web: prettier (node_modules/.bin/prettier or PATH)
 [formatters]
 enabled = true
 
-# custom JS tools: drop .js files into .hi-derola/tools/ (this project)
-# or ~/.config/hi-derola/tools/ (global); each file exports
-#   module.exports = { name, description, parameters, execute(input) }
-# and becomes a regular tool the model can call; runs in the confined
-# boa sandbox (no fs/network/process access), list with /jstools
-
-# tool permissions: allow | ask | deny
-# missing tool defaults to: write_file/edit/bash/mcp ask, read-only tools (incl. webfetch/codesearch/subagent) allow
-# built-in protections (overridable by rules below):
-#   read_file on secret files (.env, .env.local, prod.env; *.env.example stays allowed) -> ask
-#   read/edit/list outside the working directory -> ask
 [permissions]
-# edit = "ask"
-# write_file = "ask"
-# bash = "ask"
-# bash inside an attached VM sandbox (routed over ssh), independent of bash
-# sandbox = "allow"
-# mcp = "ask"
-# webfetch = "ask"
-# codesearch = "ask"
-# subagent = "ask"
 
-# wildcard rules, first match wins
-# pattern matches the command for bash, the path for edit/write_file, the tool name for mcp
-# [[permissions.rules]]
-# tool = "bash"
-# pattern = "git *"
-# permission = "allow"
-
-# [[permissions.rules]]
-# tool = "bash"
-# pattern = "rm *"
-# permission = "deny"

@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # the repo is rustfmt-clean; keep it that way
+
   fmt:
     runs-on: ubuntu-latest
     steps:
@@ -24,7 +24,6 @@ jobs:
       - name: fmt
         run: cargo fmt --check
 
-  # the core crate (TUI + agent): tests run on linux without system deps
   core:
     runs-on: ubuntu-latest
     steps:
@@ -34,7 +33,6 @@ jobs:
       - name: test
         run: cargo test --quiet
 
-  # the vanilla js frontend: syntax gate only, no build step by design
   ui:
     runs-on: ubuntu-latest
     steps:
@@ -47,8 +45,6 @@ jobs:
           node --check ui/app.js
           node --check ui/mock.js
 
-  # the tauri shell never compiles in a bare sandbox; catch gui breakage on
-  # windows (the platform the app is actually built and shipped from)
   gui:
     runs-on: windows-latest
     steps:
