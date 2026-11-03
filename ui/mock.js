@@ -503,7 +503,7 @@
   commands.host_exec = async () => ({ code: 0, stdout: "mock", stderr: "" });
   commands.skills_list = async () => ({ skills: [{ name: "review", description: "Review code like a senior", path: "/mock/review/SKILL.md", enabled: true }] });
   commands.skills_toggle = async () => {};
-  commands.skills_install = async () => "installed \"mock\" — 2 skills discovered";
+  commands.skills_install = async () => "installed \"mock\": 2 skills discovered";
   commands.crew_state = async () => ({ none: true, running: false });
   commands.crew_list = async () => ({ crews: [], running: false });
   commands.crew_new = async () => ({ none: true });

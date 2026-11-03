@@ -243,7 +243,7 @@ async function openSession(id) {
     });
   }
   if ((st.queue || []).length) {
-    note(`${st.queue.length} queued message(s) restored from the previous run — they will steer the next run`);
+    note(`${st.queue.length} queued message(s) restored from the previous run; they will steer the next run`);
   }
   renderSessions();
 }
@@ -1234,7 +1234,7 @@ function openAsk(args) {
           const sel = document.createElement("select");
           const empty = document.createElement("option");
           empty.value = "";
-          empty.textContent = req ? "— pick —" : "— none —";
+          empty.textContent = req ? "(pick)" : "(none)";
           sel.appendChild(empty);
           def.enum.forEach((v, k) => {
             const o = document.createElement("option");
@@ -1513,7 +1513,7 @@ function fillMcpList() {
   const box = $("s-mcp");
   const list = (CFG && CFG.mcp) || [];
   if (!list.length) {
-    box.textContent = "no servers yet — add one below or edit config.toml [[mcp]]";
+    box.textContent = "no servers yet: add one below or edit config.toml [[mcp]]";
     box.style.whiteSpace = "pre-wrap";
     return;
   }
@@ -1648,7 +1648,7 @@ async function toggleMcpRes(m, btn, row) {
       rowEl.style.cssText = "display:flex;gap:4px;align-items:center;max-width:100%";
       const b = el("button", "ghost", {
         text: r.name || r.uri,
-        title: (r.description ? r.description + " — " : "") + r.uri + (r.mime ? " (" + r.mime + ")" : "")
+        title: (r.description ? r.description + ": " : "") + r.uri + (r.mime ? " (" + r.mime + ")" : "")
       });
       b.style.cssText = itemStyle + ";flex:1;min-width:0";
       b.onclick = async () => {
@@ -1656,7 +1656,7 @@ async function toggleMcpRes(m, btn, row) {
         try {
           const out = await invoke("mcp_read_resource", { server: r.server, uri: r.uri });
           if (out.text.length > 100000) {
-            note(`resource too big for the input (${out.text.length} chars) — ask the agent to read ${r.uri} via mcp_resource`);
+            note(`resource too big for the input (${out.text.length} chars); ask the agent to read ${r.uri} via mcp_resource`);
           } else {
             $("input").value = out.text;
             $("input").focus();
@@ -1667,7 +1667,7 @@ async function toggleMcpRes(m, btn, row) {
           b.disabled = false;
         }
       };
-      const sb = el("button", "ghost", { title: "toggle subscription — resource updates land in the chat" });
+      const sb = el("button", "ghost", { title: "toggle subscription: resource updates land in the chat" });
       sb.textContent = subSet.has(r.server + "|" + r.uri) ? "unsub" : "sub";
       sb.style.cssText = "padding:0 8px;font-size:11px;flex:none";
       sb.onclick = async () => {
@@ -1694,7 +1694,7 @@ async function toggleMcpRes(m, btn, row) {
     for (const t of tl) {
       const b = el("button", "ghost", {
         text: t.name || t.uri_template,
-        title: (t.description ? t.description + " — " : "") + t.uri_template + (t.mime ? " (" + t.mime + ")" : "")
+        title: (t.description ? t.description + ": " : "") + t.uri_template + (t.mime ? " (" + t.mime + ")" : "")
       });
       b.style.cssText = itemStyle;
       b.onclick = () => {
@@ -1794,7 +1794,7 @@ function openSettings() {
   $("s-model-status").textContent = "";
   if (p.active) {
     $("s-msg").textContent =
-      `profile "${p.active}" is active — its fields override the values below (switch with /profile in the chat)`;
+      `profile "${p.active}" is active; its fields override the values below (switch with /profile in the chat)`;
   } else {
     $("s-msg").textContent = "";
   }
@@ -2019,25 +2019,25 @@ const SBX_IMAGES = [
     id: "debian-trixie-std",
     label: "Debian 13 (trixie) standard",
     size: "~800 MiB download",
-    hint: "the full generic cloud image — more packages on board than the minimal one, same cloud-init seed and ssh wiring",
+    hint: "the full generic cloud image: more packages on board than the minimal one, same cloud-init seed and ssh wiring",
   },
   {
     id: "ubuntu-24.04",
     label: "Ubuntu 24.04 LTS minimal",
     size: "~300 MiB download",
-    hint: "Canonical's trimmed cloud image — smaller and quicker to boot than the standard server image; the cloud-init seed works out of the box",
+    hint: "Canonical's trimmed cloud image: smaller and quicker to boot than the standard server image; the cloud-init seed works out of the box",
   },
   {
     id: "ubuntu-24.04-std",
     label: "Ubuntu 24.04 LTS standard",
     size: "~650 MiB download",
-    hint: "the standard server cloud image — ships the full server toolset; the cloud-init seed works out of the box",
+    hint: "the standard server cloud image: ships the full server toolset; the cloud-init seed works out of the box",
   },
   {
     id: "custom",
     label: "own image",
     size: "no download",
-    hint: "an .iso boots as install media; a qcow2 / raw disk image boots directly (no seed — you configure the login yourself)",
+    hint: "an .iso boots as install media; a qcow2 / raw disk image boots directly (no seed: you configure the login yourself)",
   },
 ];
 
@@ -2162,7 +2162,7 @@ function renderSbxQemu() {
     box.innerHTML = `<span class="ic sm">${icon("check")}</span> qemu ${esc(v)} &middot; accel: ${esc(q.accel || "tcg")} &middot; qemu-img ok`;
   } else {
     box.className = "sbx-qemu warn";
-    box.innerHTML = `<span class="ic sm">${icon("warn")}</span> <span>QEMU not found — install it (<b>winget install Software.QEMU</b> or <b>choco install qemu</b>, then restart the app) and the sandbox tab comes alive.</span>`;
+    box.innerHTML = `<span class="ic sm">${icon("warn")}</span> <span>QEMU not found: install it (<b>winget install Software.QEMU</b> or <b>choco install qemu</b>, then restart the app) and the sandbox tab comes alive.</span>`;
   }
 }
 
@@ -2171,7 +2171,7 @@ function renderSbxList() {
   box.replaceChildren();
   if (!SBX.list.length) {
     const empty = el("div", "sbx-empty");
-    empty.innerHTML = `no sandboxes yet — create one and keep the host clean.<br/>the agent works inside the VM while your files stay untouched.`;
+    empty.innerHTML = `no sandboxes yet: create one and keep the host clean.<br/>the agent works inside the VM while your files stay untouched.`;
     box.appendChild(empty);
     return;
   }
@@ -2279,7 +2279,7 @@ function sbxCard(s) {
     const fw = el("div", "sbx-meta sbx-forwards");
     s.spec.forwards.forEach((f) => {
       const chip = el("span", "sbx-kind", `127.0.0.1:${f.host_port} → ${f.guest_host}:${f.guest_port}`);
-      chip.title = "extra port forward (applies on VM start) — click to remove";
+      chip.title = "extra port forward (applies on VM start), click to remove";
       chip.style.cursor = "pointer";
       chip.onclick = () =>
         invoke("sandbox_fwd_del", { id: s.spec.id, hostPort: f.host_port })
@@ -2337,7 +2337,7 @@ function sbxSshBlock(s) {
     wrap.appendChild(row);
   } else if (info.state === "failed") {
     const row = el("div", "sbx-ssh failed");
-    row.innerHTML = `<span class="ic sm">${icon("warn")}</span> ssh failed — ${esc(info.error || "unknown error")}`;
+    row.innerHTML = `<span class="ic sm">${icon("warn")}</span> ssh failed: ${esc(info.error || "unknown error")}`;
     row.title = "reboot the VM (stop / start) or check qemu.log";
     wrap.appendChild(row);
   } else if (info.state === "ready") {
@@ -2348,13 +2348,13 @@ function sbxSshBlock(s) {
     const ag = info.agent || {};
     const agRow = el("div", "sbx-agent");
     if (ag.state === "unknown") {
-      agRow.innerHTML = `<span class="hint">the agent is not installed in this VM yet${s.spec.root ? "" : " — installing needs root, enable \"allow root\" at creation"}</span>`;
+      agRow.innerHTML = `<span class="hint">the agent is not installed in this VM yet${s.spec.root ? "" : " (installing needs root: enable \"allow root\" at creation"}</span>`;
     } else if (ag.state === "installing") {
       agRow.innerHTML = `<span class="sbx-agent-state">installing agent\u2026</span>`;
     } else if (ag.state === "installed") {
       agRow.innerHTML = `<span class="ic sm">${icon("check")}</span> agent${ag.version ? ` v${esc(ag.version)}` : ""} ready inside the VM`;
     } else if (ag.state === "failed") {
-      agRow.innerHTML = `<span class="ic sm">${icon("warn")}</span> install failed — ${esc(ag.error || "error")}`;
+      agRow.innerHTML = `<span class="ic sm">${icon("warn")}</span> install failed: ${esc(ag.error || "error")}`;
     }
     wrap.appendChild(agRow);
 
@@ -2527,7 +2527,7 @@ function renderWizardStep2(body) {
   rootLab.appendChild(chk);
   rootLab.insertAdjacentHTML(
     "beforeend",
-    `<span>allow root inside the sandbox <span class="hint">(passwordless sudo — the in-VM agent needs it to install itself)</span></span>`
+    `<span>allow root inside the sandbox <span class="hint">(passwordless sudo: the in-VM agent needs it to install itself)</span></span>`
   );
   body.appendChild(rootLab);
   sbxwNav(body, 2);
@@ -2557,7 +2557,7 @@ function renderWizardStep3(body) {
   const hint = el("div", "hint sbxw-hint");
   hint.textContent =
     ["debian-trixie", "debian-trixie-std", "ubuntu-24.04", "ubuntu-24.04-std"].includes(SBXW.kind)
-      ? "downloads the official cloud image and generates a cloud-init seed (your login + a generated ssh key); the first boot sets the user up and the card shows when ssh is ready — then you can open a terminal, install the agent inside, or attach the chat to this VM (the attach button on the card, or /sandbox attach in the TUI)"
+      ? "downloads the official cloud image and generates a cloud-init seed (your login + a generated ssh key); the first boot sets the user up and the card shows when ssh is ready, then you can open a terminal, install the agent inside, or attach the chat to this VM (the attach button on the card, or /sandbox attach in the TUI)"
       : "boots from your file as-is; the VM opens its own window, guest ssh is forwarded to the host port above";
   body.appendChild(hint);
 
@@ -2571,7 +2571,7 @@ function renderWizardStep3(body) {
       return;
     }
     if (!sbxwLoginOk()) {
-      showSbxMsg('login must be a-z, digits, "-" or "_" — starting with a letter, not "root"');
+      showSbxMsg('login must be a-z, digits, "-" or "_", starting with a letter, not "root"');
       SBXW.step = 2;
       renderWizard();
       return;
@@ -2622,7 +2622,7 @@ function sbxwNav(body, step, primaryBtn) {
         return;
       }
       if (SBXW.step === 2 && !sbxwLoginOk()) {
-        showSbxMsg('login must be a-z, digits, "-" or "_" — starting with a letter, not "root"');
+        showSbxMsg('login must be a-z, digits, "-" or "_", starting with a letter, not "root"');
         return;
       }
       showSbxMsg("");
@@ -2707,7 +2707,7 @@ function renderHosts() {
   const box = $("hosts-list");
   box.replaceChildren();
   if (!HOSTS.list.length) {
-    box.appendChild(el("div", "sbx-empty", "no remote hosts yet — add one and attach it to move the agent's bash and file tools to your server."));
+    box.appendChild(el("div", "sbx-empty", "no remote hosts yet: add one and attach it to move the agent's bash and file tools to your server."));
     return;
   }
   for (const h of HOSTS.list) box.appendChild(hostCard(h));
@@ -2811,7 +2811,7 @@ function renderSkills() {
   const box = $("skills-list");
   box.replaceChildren();
   if (!SKILLS.list.length) {
-    box.appendChild(el("div", "sbx-empty", "no skills found — clone a collection above, or drop a folder with SKILL.md into .hi-derola/skills/"));
+    box.appendChild(el("div", "sbx-empty", "no skills found: clone a collection above, or drop a folder with SKILL.md into .hi-derola/skills/"));
     return;
   }
   for (const sk of SKILLS.list) {
@@ -2820,7 +2820,7 @@ function renderSkills() {
     cb.type = "checkbox";
     cb.checked = !!sk.enabled;
     cb.className = "skill-toggle";
-    cb.title = sk.enabled ? "enabled — click to disable" : "disabled — click to enable";
+    cb.title = sk.enabled ? "enabled: click to disable" : "disabled: click to enable";
     cb.onchange = async () => {
       try {
         await invoke("skills_toggle", { name: sk.name, enabled: cb.checked });
@@ -2913,7 +2913,7 @@ function renderCrew() {
     $("crew-presets").classList.remove("hidden");
     refreshCrewSaved();
     refreshCrewPresets(true);
-    list.appendChild(el("div", "sbx-empty", "no active crew — create one: a goal and a few members. agents talk in rounds, @Name steers the next speaker, a DONE: line finishes the goal."));
+    list.appendChild(el("div", "sbx-empty", "no active crew. create one: a goal and a few members. agents talk in rounds, @Name steers the next speaker, a DONE: line finishes the goal."));
     return;
   }
   head.classList.remove("hidden");
@@ -2968,7 +2968,7 @@ function renderCrew() {
       } else {
         limit = crewParseLimit(t);
         if (limit === undefined) {
-          showPanelMsg("crew-msg", `bad limit "${t}" — use 200000, 200k or off`);
+          showPanelMsg("crew-msg", `bad limit "${t}": use 200000, 200k or off`);
           return;
         }
       }
@@ -3024,9 +3024,9 @@ function renderCrewMemory() {
   if (box.classList.contains("hidden") || !CREW.state) return;
   box.replaceChildren();
   const mem = CREW.state.memory || [];
-  box.appendChild(el("div", "sbx-label", `memory — ${mem.length} memo(s), injected into every member prompt`));
+  box.appendChild(el("div", "sbx-label", `memory: ${mem.length} memo(s), injected into every member prompt`));
   if (!mem.length) {
-    box.appendChild(el("div", "sbx-empty", "empty — agents add entries with a MEMO: line, you can type one below"));
+    box.appendChild(el("div", "sbx-empty", "empty. agents add entries with a MEMO: line, you can type one below"));
     return;
   }
   mem.forEach((m, i) => {
@@ -3150,7 +3150,7 @@ function crewFlushLive() {
 let crewTitleTimer = null;
 
 function crewNotifyDone() {
-  note("crew finished — goal marked done");
+  note("crew finished, goal marked done");
   if (!$("crew-view").classList.contains("hidden")) {
     invoke("crew_state").then((s) => {
       CREW.state = s.none ? null : s;
@@ -3162,7 +3162,7 @@ function crewNotifyDone() {
   if (crewTitleTimer) clearInterval(crewTitleTimer);
   let n = 0;
   crewTitleTimer = setInterval(() => {
-    document.title = n % 2 === 0 ? "\u2714 crew DONE — Hi!Derola" : prev;
+    document.title = n % 2 === 0 ? "\u2714 crew DONE: Hi!Derola" : prev;
     if (++n >= 6) {
       clearInterval(crewTitleTimer);
       crewTitleTimer = null;
@@ -3248,7 +3248,7 @@ async function refreshCrewSaved(force) {
   try {
     const d = await invoke("crew_list");
     box.replaceChildren();
-    box.appendChild(el("div", "sbx-label", "saved crews — click to resume"));
+    box.appendChild(el("div", "sbx-label", "saved crews: click to resume"));
     if (!d.crews.length) {
       box.appendChild(el("div", "sbx-empty", "no saved crews yet"));
       return;
@@ -3497,7 +3497,7 @@ $("h-save").onclick = async () => {
     $("hosts-form").classList.add("hidden");
     await refreshHosts();
     const key = await invoke("host_pubkey", { id: st.id });
-    showPanelMsg("hosts-msg", `host "${st.name}" saved — install this key on the host, then check:\n${key}`);
+    showPanelMsg("hosts-msg", `host "${st.name}" saved: install this key on the host, then check:\n${key}`);
   } catch (e) {
     showPanelMsg("hosts-msg", String(e));
   }
@@ -3658,11 +3658,11 @@ function showMention() {
       const r = await invoke("list_agents").catch(() => ({ agents: [] }));
       MAGENTS = (r.agents || []).map((a) => ({
         v: a.name,
-        label: a.description ? a.name + " — " + a.description : a.name,
+        label: a.description ? a.name + ": " + a.description : a.name,
         agent: true,
       }));
-      MAGENTS.push({ v: "general", label: "general — full tool access", agent: true });
-      MAGENTS.push({ v: "explore", label: "explore — read-only exploration", agent: true });
+      MAGENTS.push({ v: "general", label: "general: full tool access", agent: true });
+      MAGENTS.push({ v: "explore", label: "explore: read-only exploration", agent: true });
     }
     if (seq !== mentionSeq) return;
     const q = t.query.toLowerCase();
@@ -3891,7 +3891,7 @@ window.addEventListener("keydown", (e) => {
     renderTodoCard(st.todos || "");
     PLAN = !!st.plan;
     applyPlan();
-    if (!st.has_provider) note("no api key yet — press ctrl+comma or click the sliders icon to add one");
+    if (!st.has_provider) note("no api key yet: press ctrl+comma or click the sliders icon to add one");
     applyStatus();
   } catch (e) {
     note("init failed: " + e);

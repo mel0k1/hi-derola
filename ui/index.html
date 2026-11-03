@@ -10,7 +10,7 @@
 
   <aside id="sidebar">
     <div class="sb-head">
-      <div class="logo"><span class="ic" data-icon="spark"></span>Hi!<span>Derola</span></div>
+      <div class="logo"><img src="logo.png" alt="" class="logo-img" draggable="false" />Hi!<span>Derola</span></div>
     </div>
     <button id="btn-new" class="new-chat"><span class="ic" data-icon="plus"></span>new chat</button>
     <div class="sb-label">history</div>
@@ -44,7 +44,7 @@
     <main id="chat">
       <div id="chat-col">
         <div id="welcome">
-          <div class="w-logo"><img src="logo.png" alt="Hi!Derola" draggable="false" /></div>
+          <div class="w-logo"><img src="logo.png" alt="Hi!Derola" width="76" height="76" draggable="false" /></div>
           <div class="w-brand">Hi!<span>Derola</span></div>
           <div class="w-tag">a fast coding assistant in pure rust</div>
           <div class="w-hint">ask anything &middot; attach files with <span class="ic sm" data-icon="paperclip"></span> &middot; /help for commands</div>
@@ -57,7 +57,7 @@
         <div class="sbx-head">
           <div>
             <div class="sbx-title"><span class="ic" data-icon="box"></span>sandbox</div>
-            <div class="sbx-sub">disposable QEMU machines &mdash; move the agent and the code off your host</div>
+            <div class="sbx-sub">disposable QEMU machines: the agent and the code stay off your host</div>
           </div>
           <button id="sbx-new" class="accent"><span class="ic sm" data-icon="plus"></span> new sandbox</button>
         </div>
@@ -82,7 +82,7 @@
         <div class="sbx-head">
           <div>
             <div class="sbx-title"><span class="ic" data-icon="server"></span>remote hosts</div>
-            <div class="sbx-sub">your servers over ssh &mdash; attach one and the agent works there (bash, files, undo/redo, background tasks)</div>
+            <div class="sbx-sub">your servers over ssh: attach one and the agent works there (bash, files, undo/redo, background tasks)</div>
           </div>
           <button id="hosts-add" class="accent"><span class="ic sm" data-icon="plus"></span> add host</button>
         </div>
@@ -96,7 +96,7 @@
             <button id="h-save" class="accent">save &amp; generate key</button>
             <button id="h-cancel" class="ghost">cancel</button>
           </div>
-          <div class="hint">a key pair is generated per host &mdash; add the shown public key to the host's authorized_keys, then run check</div>
+          <div class="hint">a key pair is generated per host: add the shown public key to the host's authorized_keys, then run check</div>
         </div>
         <div id="hosts-list"></div>
       </div>
@@ -107,7 +107,7 @@
         <div class="sbx-head">
           <div>
             <div class="sbx-title"><span class="ic" data-icon="skill"></span>skills</div>
-            <div class="sbx-sub">any folder with SKILL.md (project <span class="mono">.hi-derola/skills/</span> or global <span class="mono">~/.config/hi-derola/skills/</span>) &mdash; recursive, model-agnostic, toggleable</div>
+            <div class="sbx-sub">any folder with SKILL.md (project <span class="mono">.hi-derola/skills/</span> or global <span class="mono">~/.config/hi-derola/skills/</span>), recursive, model-agnostic, toggleable</div>
           </div>
           <button id="skills-refresh" class="accent"><span class="ic sm" data-icon="check"></span> rescan</button>
         </div>
@@ -116,7 +116,7 @@
           <label class="hosts-line">git install <input id="skills-url" placeholder="https://github.com/addyosmani/agent-skills.git" spellcheck="false" /></label>
           <div class="row-inline">
             <button id="skills-install" class="accent"><span class="ic sm" data-icon="download"></span> clone &amp; register</button>
-            <span class="hint">a shallow clone into the global skills dir &mdash; every SKILL.md inside is discovered</span>
+            <span class="hint">a shallow clone into the global skills dir; every SKILL.md inside is discovered</span>
           </div>
         </div>
         <div id="skills-list"></div>
@@ -128,7 +128,7 @@
         <div class="sbx-head">
           <div>
             <div class="sbx-title"><span class="ic" data-icon="crew"></span>crew</div>
-            <div class="sbx-sub">several AI agents in one session &mdash; they coordinate via @Name, a DONE: line finishes the goal; tokens counted per member, optional tools and token limits</div>
+            <div class="sbx-sub">several AI agents in one session: they coordinate via @Name, a DONE: line finishes the goal; tokens counted per member, optional tools and token limits</div>
           </div>
           <button id="crew-new" class="accent"><span class="ic sm" data-icon="plus"></span> new crew</button>
         </div>
