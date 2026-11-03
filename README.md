@@ -1,5 +1,7 @@
 # hi-derola
 
+<p align="center"><img src="assets/logo.png" width="140" alt="Hi!Derola" /></p>
+
 [![ci](https://github.com/mel0k1/hi-derola/actions/workflows/ci.yml/badge.svg)](https://github.com/mel0k1/hi-derola/actions/workflows/ci.yml)
 
 A high-performance, lightweight chat and autonomous coding assistant written in pure Rust.
