@@ -1,4 +1,4 @@
-/* dev preview bridge: emulates the tauri backend when running outside the app */
+
 (function () {
   if (window.__TAURI__) return;
 
@@ -325,7 +325,8 @@
       const t = text.trim();
       if (!t) return { cmd: true, note: "" };
       if (t.startsWith("/")) {
-        const [cmd, arg] = [t.slice(1).split(" ")[0], t.slice(t.indexOf(" ") + 1)];
+        const sp = t.indexOf(" ");
+        const [cmd, arg] = [t.slice(1, sp < 0 ? undefined : sp), sp < 0 ? "" : t.slice(sp + 1)];
         switch (cmd) {
           case "help":
           case "h":
@@ -491,7 +492,6 @@
     },
   };
 
-  /* new panels: minimal mock data so the dev preview renders them */
   commands.host_list = async () => ({ hosts: [], attached: null });
   commands.host_add = async (a) => ({ id: "h-mock", name: a.name || "host", label: `${a.user || "root"}@${a.host || "host"}:${a.port || 22}`, state: "new", error: null, checked: null, agent: null });
   commands.host_del = async () => {};

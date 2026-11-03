@@ -38,8 +38,6 @@ let renderTimer = null;
 let think = null;
 let tokens = { in: 0, out: 0, cost: 0 };
 
-/* icons */
-
 const ICONS = {
   spark: '<path d="M12 2l2.4 7.2L22 12l-7.6 2.8L12 22l-2.4-7.2L2 12l7.6-2.8z"/>',
   menu: '<path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/>',
@@ -78,8 +76,6 @@ document.querySelectorAll(".ic[data-icon]").forEach((n) => {
   n.innerHTML = icon(n.dataset.icon);
 });
 
-/* keys config */
-
 const KEY_ACTIONS = [
   ["send", "send message"],
   ["newline", "insert newline"],
@@ -111,8 +107,6 @@ Object.assign(DEFAULT_KEYS, {
   palette: "ctrl+k",
 });
 
-/* theme */
-
 function setTheme(name, persist) {
   const t = name === "light" ? "light" : "dark";
   document.body.dataset.theme = t;
@@ -131,8 +125,6 @@ function togglePlan() {
   invoke("set_plan", { on: PLAN }).catch(() => {});
   note(PLAN ? "plan mode on: read-only research" : "plan mode off");
 }
-
-/* sidebar */
 
 function toggleSidebar() {
   const sb = $("sidebar");
@@ -171,6 +163,10 @@ function renderSessions() {
     del.onclick = (e) => {
       e.stopPropagation();
       if (del.classList.contains("confirm")) {
+        if (waiting) {
+          note("stop the current run before deleting this chat");
+          return;
+        }
         invoke("delete_session", { id: s.id }).catch((err) => note(String(err)));
       } else {
         del.classList.add("confirm");
@@ -238,7 +234,14 @@ async function openSession(id) {
       $("chat-col").appendChild(t);
     }
   }
-  if (st.transcript.length) autoscroll();
+  if (st.transcript.length) {
+    autoscroll();
+  } else {
+    $("chat-col").innerHTML = WELCOME_HTML;
+    $("chat-col").querySelectorAll(".ic[data-icon]").forEach((n) => {
+      n.innerHTML = icon(n.dataset.icon);
+    });
+  }
   if ((st.queue || []).length) {
     note(`${st.queue.length} queued message(s) restored from the previous run — they will steer the next run`);
   }
@@ -263,8 +266,6 @@ function clearChat() {
   tokens = { in: 0, out: 0, cost: 0 };
   applyStatus();
 }
-
-/* helpers */
 
 function fmtTokens(n) {
   return n < 1000 ? String(n) : (n / 1000).toFixed(1) + "k";
@@ -311,7 +312,10 @@ function autoscroll() {
 function el(tag, cls, text) {
   const e = document.createElement(tag);
   if (cls) e.className = cls;
-  if (text !== undefined) e.textContent = text;
+  if (text !== undefined) {
+    const t = text && typeof text === "object" ? text.text : text;
+    if (t !== undefined) e.textContent = t;
+  }
   return e;
 }
 
@@ -330,8 +334,6 @@ function addMsg(cls, text) {
 }
 
 const note = (s) => addMsg("note", s);
-
-/* markdown */
 
 function esc(s) {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -448,8 +450,6 @@ function md(src) {
   return html;
 }
 
-/* streaming */
-
 function ensureStream() {
   clearWelcome();
   if (!streamBody) {
@@ -463,7 +463,10 @@ function ensureStream() {
 }
 
 function renderStream() {
-  if (streamBody) streamBody.innerHTML = md(streamRaw);
+  if (streamBody) {
+    streamBody.innerHTML = md(streamRaw);
+    autoscroll();
+  }
 }
 
 function ensureThink() {
@@ -502,8 +505,6 @@ function addDiff(container, rows) {
   autoscroll();
 }
 
-/* attachments */
-
 function chipName(p) {
   const base = p.replace(/\s*\(\d+ entries?\)\s*$/, "").replace(/[\\/]+$/, "");
   return base.split(/[\\/]/).pop() || p;
@@ -525,8 +526,6 @@ function renderChips(list) {
     box.appendChild(c);
   });
 }
-
-/* file browser */
 
 async function browse(path) {
   let d;
@@ -584,11 +583,32 @@ function closeFiles() {
   $("input").focus();
 }
 
-/* session review */
-
 function trackChanges(ev) {
   const paths = ev.paths || [];
   if (!paths.length || !ev.diff || !ev.diff.length) return;
+  const per = [];
+  let cur = null;
+  let ca = 0;
+  let cd = 0;
+  const flush = () => {
+    if (cur !== null) {
+      per.push([cur, ca, cd]);
+      cur = null;
+      ca = 0;
+      cd = 0;
+    }
+  };
+  for (const r of ev.diff) {
+    if (r.tag === 0 && typeof r.text === "string" && r.text.startsWith("--- ")) {
+      flush();
+      const label = r.text.slice(4).trim();
+      if (paths.includes(label)) cur = label;
+      continue;
+    }
+    if (r.tag === 1) ca++;
+    else if (r.tag === 2) cd++;
+  }
+  flush();
   let adds = 0;
   let dels = 0;
   for (const r of ev.diff) {
@@ -596,17 +616,20 @@ function trackChanges(ev) {
     else if (r.tag === 2) dels++;
   }
   if (!adds && !dels) return;
-  if (paths.length === 1) {
-    const p = paths[0];
-    const old = CHANGES[p] || { adds: 0, dels: 0, rows: null };
-    CHANGES[p] = { adds: old.adds + adds, dels: old.dels + dels, rows: ev.diff };
-  } else {
-    for (const p of paths) {
+  if (per.length > 1) {
+    for (const [p, a, d] of per) {
+      if (!a && !d) continue;
       const old = CHANGES[p] || { adds: 0, dels: 0, rows: null };
-      CHANGES[p] = { adds: old.adds + adds, dels: old.dels + dels, rows: null };
+      CHANGES[p] = { adds: old.adds + a, dels: old.dels + d, rows: null };
     }
     const key = "__patch__" + Date.now() + "_" + Math.random().toString(36).slice(2, 6);
     CHANGES[key] = { adds, dels, rows: ev.diff, label: `${ev.name}: ${ev.detail}` };
+  } else {
+    const p = per.length === 1 ? per[0][0] : paths[0];
+    const a = per.length === 1 ? per[0][1] : adds;
+    const d = per.length === 1 ? per[0][2] : dels;
+    const old = CHANGES[p] || { adds: 0, dels: 0, rows: null };
+    CHANGES[p] = { adds: old.adds + a, dels: old.dels + d, rows: ev.diff };
   }
   renderReviewBadge();
   if (reviewOpen) renderReviewList();
@@ -739,8 +762,6 @@ function closeReview() {
   $("input").focus();
 }
 
-/* command palette */
-
 function paletteBuildItems() {
   const items = [];
   const cmds = [
@@ -845,8 +866,6 @@ function runPalette() {
   it.run();
 }
 
-/* events */
-
 async function handleEvent(ev) {
   switch (ev.t) {
     case "chunk": {
@@ -887,10 +906,6 @@ async function handleEvent(ev) {
       break;
     case "note": {
       if (ev.s) {
-        if (streamRaw !== null) {
-          streamRaw = null;
-          streamBody = null;
-        }
         note(ev.s);
         const m = ev.s.match(/task (bg-\d+) (finished|failed|was killed|killed)/);
         if (m) endBg(m[1]);
@@ -1010,8 +1025,6 @@ async function handleEvent(ev) {
   }
 }
 
-/* sending */
-
 async function doSend() {
   const input = $("input");
   const text = input.value.trim();
@@ -1059,8 +1072,6 @@ async function runCmd(text) {
   }
 }
 
-/* model select */
-
 function fillModelSelect() {
   const sel = $("model-select");
   sel.replaceChildren();
@@ -1076,8 +1087,6 @@ $("model-select").onchange = async (e) => {
   const v = e.target.value;
   if (v && v !== MODEL) runCmd("/model " + v);
 };
-
-/* confirm */
 
 function resolveConfirm(ok, always = false) {
   confirmOpen = false;
@@ -1111,8 +1120,6 @@ $("c-feedback").onkeydown = (e) => {
   }
 };
 
-/* todo card */
-
 function renderTodoCard(text) {
   const old = document.querySelector("#chat-col .todo-card");
   if (old) old.remove();
@@ -1124,8 +1131,6 @@ function renderTodoCard(text) {
   $("chat-col").appendChild(m);
   autoscroll();
 }
-
-/* background task live output */
 
 function bgAppend(id, chunk) {
   let card = document.querySelector(`#chat-col .bg-live[data-id="${id}"]`);
@@ -1159,16 +1164,10 @@ function endBg(id) {
   if (k) k.remove();
 }
 
-/* plan mode */
-
 function applyPlan() {
   $("btn-plan").classList.toggle("on", PLAN);
 }
 
-/* ask */
-
-// a question may carry a raw json schema (mcp elicitation): render one
-// control per property instead of a single free-text input
 function elicitForm(q) {
   const props = q.schema && q.schema.properties;
   if (!props || typeof props !== "object") return null;
@@ -1251,7 +1250,7 @@ function openAsk(args) {
           if (def.default !== undefined) record(def.default);
           ctl.appendChild(sel);
         } else if (def.type === "array" && Array.isArray(def.items && def.items.enum) && def.items.enum.length) {
-          // multiselect: checkbox group, the answer is an array of enum values
+
           const inames = Array.isArray(def.items.enumNames) ? def.items.enumNames : [];
           const box = el("div", "f-multi");
           const chosen = new Set();
@@ -1355,7 +1354,7 @@ function composeAsk() {
     const q = qs[i];
     const form = forms[i];
     if (form) {
-      // schema form: submit a json object, empty required fields block submit
+
       for (const name of form.names) {
         const v = form.vals[name];
         const missing =
@@ -1395,7 +1394,7 @@ function composeAsk() {
 
 function submitAsk() {
   const text = composeAsk();
-  if (text === null) return; // required fields are highlighted, stay open
+  if (text === null) return;
   closeAsk();
   invoke("answer", { text });
   note(text ? "answered" : "no answer given");
@@ -1416,8 +1415,6 @@ function skipAsk() {
 
 $("a-submit").onclick = () => submitAsk();
 $("a-skip").onclick = () => skipAsk();
-
-/* settings */
 
 function comboToText(c) {
   if (!c) return "";
@@ -1539,8 +1536,7 @@ function fillMcpList() {
         } catch (e) {
           const msg = String(e);
           note(msg);
-          // the flow started (verifier persisted) but the callback never
-          // came: offer to finish with a pasted code
+
           if (msg.includes("mcpauth") && msg.includes("<code")) {
             const url = msg.split("\n").find((l) => l.startsWith("http"));
             if (url) window.open(url, "_blank");
@@ -1582,7 +1578,6 @@ function closePromptForm(det) {
   if (f) f.remove();
 }
 
-/* inline form with one input per prompt argument (required ones starred) */
 function buildPromptArgsForm(p, onRun) {
   const box = el("div", "prmargs");
   box.style.cssText = "display:flex;flex-direction:column;gap:2px;align-items:flex-start;margin:2px 0 0 8px";
@@ -1703,8 +1698,7 @@ async function toggleMcpRes(m, btn, row) {
       });
       b.style.cssText = itemStyle;
       b.onclick = () => {
-        // templates need real values in place of the braces: drop the read
-        // command into the input so the user fills them in
+
         $("input").value = "/mcpread " + t.server + " " + t.uri_template;
         $("input").focus();
       };
@@ -1716,8 +1710,7 @@ async function toggleMcpRes(m, btn, row) {
       const b = el("button", "ghost", { text: p.name, title: p.description || p.name });
       b.style.cssText = itemStyle;
       b.onclick = async () => {
-        // prompts that declare arguments open an inline form instead of
-        // silently running with empty args
+
         if (p.arguments && p.arguments.length) {
           if (b.nextElementSibling && b.nextElementSibling.classList.contains("prmargs")) {
             b.nextElementSibling.remove();
@@ -1855,8 +1848,6 @@ $("s-mcp-reconnect").onclick = async () => {
   }
 };
 
-/* add / remove mcp servers right from settings */
-
 function parseKVLines(text, sep) {
   const out = {};
   for (const line of (text || "").split("\n")) {
@@ -1943,7 +1934,7 @@ $("sa-save").onclick = async () => {
 };
 
 async function removeMcpServer(name, btn) {
-  // two clicks: first arms, second deletes (same pattern as session delete)
+
   if (!btn.classList.contains("confirm")) {
     btn.classList.add("confirm");
     btn.innerHTML = icon("check");
@@ -1980,8 +1971,7 @@ function buildCfgPayload() {
       temperature: num("s-temperature"),
       top_p: num("s-top-p"),
       stream: $("s-stream").checked,
-      // provider profiles are managed in config.toml (/profile in the chat);
-      // pass them through untouched so saving settings keeps them
+
       active: (CFG && CFG.provider && CFG.provider.active) || null,
     },
     profiles: (CFG && CFG.profiles) || undefined,
@@ -1990,6 +1980,8 @@ function buildCfgPayload() {
     ui: { theme: document.body.dataset.theme },
     agent: (CFG && CFG.agent) || undefined,
     permissions: (CFG && CFG.permissions) || undefined,
+    lsp: (CFG && CFG.lsp) || undefined,
+    formatters: (CFG && CFG.formatters) || undefined,
   };
 }
 
@@ -2015,8 +2007,6 @@ $("s-save").onclick = async () => {
 
 $("s-cancel").onclick = closeSettings;
 $("settings-close").onclick = closeSettings;
-
-/* sandbox tab: local QEMU VMs for isolated agent work */
 
 const SBX_IMAGES = [
   {
@@ -2051,7 +2041,6 @@ const SBX_IMAGES = [
   },
 ];
 
-/* kinds that no longer appear in the wizard but may exist on disk */
 const SBX_LEGACY_LABELS = { nixos: "NixOS minimal (legacy)" };
 
 function closeOtherViews(except) {
@@ -2094,7 +2083,7 @@ function toggleSandboxView(force) {
   $("inputbar").classList.toggle("hidden", on);
   $("btn-sandbox").classList.toggle("on", on);
   if (on) {
-    SBX.qemu = null; // re-detect every time the tab opens (QEMU may be installed meanwhile)
+    SBX.qemu = null;
     closeWizard();
     showSbxMsg("");
     refreshSandbox();
@@ -2232,7 +2221,6 @@ function sbxCard(s) {
     card.appendChild(line);
   }
 
-  // ssh + agent block: the backend only attaches s.ssh for cloud-init kinds
   const seed = !!s.ssh;
   if (seed && s.state === "running") card.appendChild(sbxSshBlock(s));
 
@@ -2340,8 +2328,6 @@ function sbxCard(s) {
   return card;
 }
 
-/* ssh readiness + in-VM agent state for one running cloud sandbox */
-
 function sbxSshBlock(s) {
   const wrap = el("div", "sbx-ssh-wrap");
   const info = s.ssh;
@@ -2397,7 +2383,7 @@ function sbxTerminal(s, agent = false) {
 }
 
 function sbxDelete(s, btn) {
-  // two clicks: first arms, second deletes (same pattern as mcp servers)
+
   if (!btn.classList.contains("confirm")) {
     btn.classList.add("confirm");
     btn.innerHTML = icon("check");
@@ -2411,8 +2397,6 @@ function sbxDelete(s, btn) {
     .then(refreshSandbox)
     .catch((e) => showSbxMsg(String(e)));
 }
-
-/* sandbox wizard: image -> resources -> create */
 
 function openWizard() {
   const used = new Set(SBX.list.map((s) => s.spec.ssh_port));
@@ -2652,8 +2636,6 @@ function sbxwNav(body, step, primaryBtn) {
   body.appendChild(row);
 }
 
-/* buttons */
-
 $("btn-settings").onclick = openSettings;
 $("btn-sandbox").onclick = () => toggleSandboxView();
 $("sbx-new").onclick = () => {
@@ -2695,8 +2677,6 @@ $("palette-input").addEventListener("keydown", (e) => {
   }
 });
 
-/* ================= remote hosts / skills / crew panels ================= */
-
 let HOSTS = { list: [], attached: null };
 let SKILLS = { list: [] };
 let CREW = { state: null, usage: null, live: null };
@@ -2707,8 +2687,6 @@ function showPanelMsg(id, text) {
   box.textContent = text || "";
   box.classList.toggle("hidden", !text);
 }
-
-/* ---------- hosts ---------- */
 
 function toggleHostsView() {
   togglePanelView("hosts-view", "btn-hosts", refreshHosts);
@@ -2815,8 +2793,6 @@ function hostCard(h) {
   return card;
 }
 
-/* ---------- skills ---------- */
-
 function toggleSkillsView() {
   togglePanelView("skills-view", "btn-skills", refreshSkills);
 }
@@ -2863,8 +2839,6 @@ function renderSkills() {
     box.appendChild(row);
   }
 }
-
-/* ---------- crew ---------- */
 
 function toggleCrewView() {
   togglePanelView("crew-view", "btn-crew", () => {
@@ -3016,8 +2990,6 @@ function renderCrew() {
   renderCrewGraph();
 }
 
-/* per-member retry: re-run one member's turn now (revives errored/limit-stopped) */
-
 function retryChipBtn(m) {
   const b = el("span", "chip-retry", "\u21bb");
   b.title = "re-run this member's turn now (revives an errored or limit-stopped member)";
@@ -3034,8 +3006,6 @@ function retryChipBtn(m) {
   };
   return b;
 }
-
-/* long-term memory: list + memo input; entries ride in crew state */
 
 function toggleCrewMemory() {
   const box = $("crew-memory");
@@ -3125,9 +3095,6 @@ function renderCrewFeed() {
   list.scrollTop = list.scrollHeight;
 }
 
-/* live streaming bubbles for in-flight crew replies — one per member,
-   bg workers and the inline member can stream in parallel */
-
 let crewLiveTimer = null;
 
 function crewLiveKey(id, author) {
@@ -3180,8 +3147,6 @@ function crewFlushLive() {
   document.querySelectorAll(".crew-live").forEach((n) => n.remove());
 }
 
-/* crew finished: system notification + title flash (bell event) */
-
 let crewTitleTimer = null;
 
 function crewNotifyDone() {
@@ -3226,8 +3191,6 @@ function crewNotifyDone() {
     } catch {}
   })();
 }
-
-/* @mention graph: nodes on a circle, edge weight = stroke width */
 
 function crewGraphSvg(graph) {
   const nodes = ["you", ...(CREW.state ? CREW.state.members.map((m) => m.name) : [])];
@@ -3278,8 +3241,6 @@ function renderCrewGraph() {
   if (!svg) return;
   box.insertAdjacentHTML("beforeend", svg);
 }
-
-/* saved crews (resume list) */
 
 async function refreshCrewSaved(force) {
   const box = $("crew-saved");
@@ -3346,8 +3307,6 @@ function toggleCrewSaved() {
   $("crew-saved-btn").classList.toggle("active", active);
   if (active) refreshCrewSaved(true);
 }
-
-/* crew presets: save the active shape, spawn fresh crews from it */
 
 async function refreshCrewPresets(force) {
   const box = $("crew-presets");
@@ -3446,8 +3405,6 @@ async function showCrewUsage() {
   }
 }
 
-/* ---------- sandbox fetch + forwards prompts ---------- */
-
 function sbxFetchPrompt(s) {
   const vmPath = prompt(`file path inside the VM ${s.spec.name}:`, "~/README.md");
   if (!vmPath) return;
@@ -3472,8 +3429,6 @@ function sbxFwdPrompt(s) {
     .then(refreshSandbox)
     .catch((e) => showSbxMsg(String(e)));
 }
-
-/* ---------- bindings ---------- */
 
 $("btn-hosts").onclick = () => toggleHostsView();
 $("btn-skills").onclick = () => toggleSkillsView();
@@ -3660,7 +3615,6 @@ $("crew-addbtn").onclick = async () => {
   }
 };
 
-
 $("files-close").onclick = closeFiles;
 $("files-up").onclick = () => filesParent && browse(filesParent);
 $("files-here").onclick = async () => {
@@ -3668,15 +3622,11 @@ $("files-here").onclick = async () => {
   closeFiles();
 };
 
-/* input */
-
 function autosize() {
   const input = $("input");
   input.style.height = "auto";
   input.style.height = Math.min(input.scrollHeight, 220) + "px";
 }
-
-/* file mentions */
 
 let MFILES = null;
 let MAGENTS = null;
@@ -3757,11 +3707,12 @@ function renderMention() {
 function completeMention() {
   if (!mention) return;
   const input = $("input");
-  const path = mention.items[mention.idx];
+  const it = mention.items[mention.idx];
+  const v = it && typeof it === "object" ? it.v : it;
   const start = mention.from;
   const end = mention.to;
-  input.value = input.value.slice(0, start) + "@" + path + " " + input.value.slice(end);
-  const caret = start + path.length + 2;
+  input.value = input.value.slice(0, start) + "@" + v + " " + input.value.slice(end);
+  const caret = start + v.length + 2;
   input.setSelectionRange(caret, caret);
   hideMention();
   autosize();
@@ -3775,8 +3726,6 @@ $("input").addEventListener("input", () => {
 });
 $("input").addEventListener("click", hideMention);
 
-/* hotkeys */
-
 window.addEventListener("keydown", (e) => {
   if (askOpen) {
     if (e.key === "Escape") {
@@ -3789,6 +3738,14 @@ window.addEventListener("keydown", (e) => {
     return;
   }
   if (confirmOpen) {
+    const typing = e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA");
+    if (typing) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        resolveConfirm(false);
+      }
+      return;
+    }
     const c = comboFromEvent(e);
     if (!c) return;
     if (c.name === "y" && !c.ctrl && !c.alt && !c.meta) {
@@ -3911,8 +3868,6 @@ window.addEventListener("keydown", (e) => {
     openPalette();
   }
 });
-
-/* init */
 
 (async function init() {
   await listen("ev", (e) => handleEvent(e.payload));

@@ -24,8 +24,7 @@ pub struct Shared {
     confirm: Mutex<Option<(oneshot::Sender<ConfirmReply>, String, String)>>,
     ask: Mutex<Option<oneshot::Sender<String>>>,
     inflight: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
-    /// crew runner task; kept apart from chat inflight so a running crew
-    /// never blocks new chat messages
+
     crew_task: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     tokens: Mutex<(u64, u64)>,
     cost: Mutex<f64>,
@@ -33,7 +32,7 @@ pub struct Shared {
     todos: Mutex<Vec<Todo>>,
     attachments: Mutex<Vec<(String, String)>>,
     mcp: McpSlot,
-    /// live session id mirrored for mcp tools/call _meta passthrough
+
     mcp_session: Arc<RwLock<String>>,
     allow_all: Arc<AtomicBool>,
     plan: AtomicBool,
@@ -46,8 +45,7 @@ pub struct Shared {
 
 fn system_prompt(model: &str) -> String {
     let mut s = hi_derola::base_prompt("on the user's machine", model);
-    // while a sandbox VM is attached (the sandbox tab attach button), the
-    // bash AND file tools run inside it — the model must know that
+
     if let Some(add) = sandbox::shell_route_addendum() {
         s.push_str("\n\n");
         s.push_str(&add);
@@ -287,31 +285,58 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                     paths,
                 } => {
                     if !paths.is_empty() {
-                        let mut adds = 0u64;
-                        let mut dels = 0u64;
+                        let mut per: Vec<(String, u64, u64)> = Vec::new();
+                        let mut cur: Option<String> = None;
+                        let mut ca = 0u64;
+                        let mut cd = 0u64;
                         for r in &diff {
+                            if r.tag == 0 && r.text.starts_with("--- ") {
+                                if let Some(label) = cur.take() {
+                                    per.push((label, ca, cd));
+                                    ca = 0;
+                                    cd = 0;
+                                }
+                                let label = r.text[4..].trim().to_string();
+                                if paths.iter().any(|p| *p == label) {
+                                    cur = Some(label);
+                                }
+                                continue;
+                            }
                             match r.tag {
-                                1 => adds += 1,
-                                2 => dels += 1,
+                                1 => ca += 1,
+                                2 => cd += 1,
                                 _ => {}
                             }
                         }
-                        if adds > 0 || dels > 0 {
-                            let mut ch = sh.changes.lock().unwrap();
-                            for p in &paths {
-                                if let Some(rec) = ch.iter_mut().find(|r| &r.path == p) {
-                                    rec.adds += adds;
-                                    rec.dels += dels;
-                                } else {
-                                    ch.push(SessionChange {
-                                        path: p.clone(),
-                                        adds,
-                                        dels,
-                                    });
+                        if let Some(label) = cur.take() {
+                            per.push((label, ca, cd));
+                        }
+                        if per.is_empty() {
+                            let mut adds = 0u64;
+                            let mut dels = 0u64;
+                            for r in &diff {
+                                match r.tag {
+                                    1 => adds += 1,
+                                    2 => dels += 1,
+                                    _ => {}
                                 }
                             }
-                            persist(&sh);
+                            per.push((paths[0].clone(), adds, dels));
                         }
+                        let mut ch = sh.changes.lock().unwrap();
+                        for (p, adds, dels) in per {
+                            if let Some(rec) = ch.iter_mut().find(|r| r.path == p) {
+                                rec.adds += adds;
+                                rec.dels += dels;
+                            } else {
+                                ch.push(SessionChange {
+                                    path: p,
+                                    adds,
+                                    dels,
+                                });
+                            }
+                        }
+                        persist(&sh);
                     }
                     json!({
                         "t": "tool", "name": name, "detail": detail, "diff": diff_json(diff),
@@ -320,9 +345,6 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                 }
                 ApiEvent::Confirm { name, args, rx } => {
                     if sh.confirm.lock().unwrap().is_some() {
-                        // one prompt at a time — a second concurrent ask (chat
-                        // run vs crew tool-member) gets an explicit soft-deny
-                        // instead of orphaning the first oneshot
                         let _ = rx.send(hi_derola::provider::ConfirmReply {
                             approved: false,
                             feedback: "another permission prompt is already open — try again"
@@ -627,7 +649,6 @@ async fn stop(sh: State<'_, Arc<Shared>>, app: AppHandle) -> Result<(), String> 
     Ok(())
 }
 
-/// client hooks for mcp: workspace root (cwd) + sampling via our provider
 fn mcp_hooks(
     cfg: &Config,
     tx: mpsc::UnboundedSender<ApiEvent>,
@@ -672,7 +693,6 @@ async fn mcp_auth(
     let hooks = mcp_hooks(&cfg, sh.tx.clone(), sh.mcp_session.clone());
     let cfgs = cfg.mcp;
     let mut logs = vec![match code {
-        // a pasted authorization code resumes the pending flow
         Some(code) => mcpauth::finish_auth(&name, &cfgs, &code).await,
         None => mcpauth::authorize_flow(&name, &cfgs).await,
     }
@@ -806,8 +826,6 @@ async fn mcp_get_prompt(
     }
 }
 
-// ---- sandbox: local QEMU VMs for isolated agent work ----
-
 #[tauri::command]
 async fn sandbox_detect() -> Result<sandbox::QemuInfo, String> {
     tokio::task::spawn_blocking(sandbox::detect_qemu)
@@ -815,15 +833,11 @@ async fn sandbox_detect() -> Result<sandbox::QemuInfo, String> {
         .map_err(|e| format!("{e}"))
 }
 
-/// rebuild the live session system prompt after attach/detach so the model
-/// immediately sees (or loses) the sandbox addendum — same as the TUI refresh
 fn refresh_session_prompt(sh: &Shared) {
     let model = sh.cfg.lock().unwrap().provider.model.clone();
     sh.session.lock().unwrap().system = system_prompt(&model);
 }
 
-/// route the bash + file tools of the chat into a running sandbox VM
-/// (the gui counterpart of the TUI `/sandbox attach`)
 #[tauri::command]
 async fn sandbox_attach(sh: State<'_, Arc<Shared>>, id: String) -> Result<String, String> {
     let m = sandbox::SandboxManager::global();
@@ -857,7 +871,6 @@ async fn sandbox_attach(sh: State<'_, Arc<Shared>>, id: String) -> Result<String
     ))
 }
 
-/// stop routing the chat tools into the VM (back to the host)
 #[tauri::command]
 async fn sandbox_detach(sh: State<'_, Arc<Shared>>) -> Result<(), String> {
     if sandbox::shell_route().is_none() {
@@ -887,8 +900,6 @@ async fn sandbox_create(spec: sandbox::NewSandbox) -> Result<sandbox::SandboxSta
         .map_err(|e| format!("{e:#}"))
 }
 
-/// action: start | stop | delete; start/stop return the fresh status,
-/// delete returns null (the caller refreshes the list)
 #[tauri::command]
 async fn sandbox_action(id: String, action: String) -> Result<Value, String> {
     let m = sandbox::SandboxManager::global().clone();
@@ -903,7 +914,6 @@ async fn sandbox_action(id: String, action: String) -> Result<Value, String> {
     .map_err(|e| format!("{e:#}"))
 }
 
-/// run one command inside a running sandbox VM over ssh
 #[tauri::command]
 async fn sandbox_ssh_exec(
     id: String,
@@ -920,8 +930,6 @@ async fn sandbox_ssh_exec(
     .map_err(|e| format!("{e:#}"))
 }
 
-/// install (or reinstall) the agent inside the VM: config upload +
-/// rustup + cargo install, progress streamed through sandbox_list
 #[tauri::command]
 async fn sandbox_agent_install(id: String) -> Result<sandbox::SandboxStatus, String> {
     let m = sandbox::SandboxManager::global().clone();
@@ -931,8 +939,6 @@ async fn sandbox_agent_install(id: String) -> Result<sandbox::SandboxStatus, Str
         .map_err(|e| format!("{e:#}"))
 }
 
-/// open a new terminal window with an interactive ssh session into the VM
-/// (plain shell, or the agent TUI when agent = true)
 #[tauri::command]
 async fn sandbox_ssh_terminal(id: String, agent: bool) -> Result<(), String> {
     let m = sandbox::SandboxManager::global().clone();
@@ -1251,10 +1257,6 @@ fn note(s: impl Into<String>) -> Value {
     json!({"cmd": true, "note": s.into()})
 }
 
-/// switch the provider profile at runtime (or drop back to the base
-/// [provider] section with None): rebuild the provider from the effective
-/// config and persist the choice; a failed build or a missing key keeps
-/// the previous profile — the TUI twin lives in app.rs::apply_profile
 fn apply_profile(sh: &Arc<Shared>, app: &AppHandle, name: Option<String>) -> Value {
     let mut cfg = sh.cfg.lock().unwrap();
     let prev = cfg.provider.active.clone();
@@ -1682,7 +1684,7 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
             if arg.is_empty() {
                 note("usage: /file <path>")
             } else if hi_derola::files::is_image(arg) {
-                // images ride as data urls, same as the file-dialog attach
+
                 match hi_derola::files::read_image(arg) {
                     Ok((mime, data)) => {
                         let content = format!("data:{mime};base64,{data}");
@@ -1732,7 +1734,7 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
                 });
                 note(format!("setting mcp log level {level}..."))
             } else {
-                // logs() is a sync snapshot of the ring buffer, no spawn needed
+
                 let filter = parts.first().copied().unwrap_or("");
                 let Some(c) = sh.mcp.lock().unwrap().clone() else {
                     return note("mcp is not configured");
@@ -1870,8 +1872,7 @@ fn command(sh: &Arc<Shared>, app: &AppHandle, line: &str) -> Value {
 fn dispatch_prompt(sh: &Arc<Shared>, app: &AppHandle, text: String) -> Value {
     if sh.inflight.lock().unwrap().is_some() {
         sh.queue.lock().unwrap().push(text);
-        // the queue is durable: it lives in the session file, so a crash
-        // cannot lose messages typed while the agent was busy
+
         persist(sh);
         let _ = sh.tx.send(ApiEvent::Note(
             "queued: will run after the current task".into(),
@@ -1899,7 +1900,7 @@ async fn send(sh: State<'_, Arc<Shared>>, app: AppHandle, text: String) -> Resul
     if text.starts_with('/') {
         return Ok(command(&sh, &app, &text));
     }
-    // manual subagent invocation: "@explore find the parser"
+
     if let Some((agent_name, rest)) = hi_derola::agents::split_mention(&text) {
         let Some(provider) = sh.provider.lock().unwrap().clone() else {
             return Err("no api key: open settings and add one".into());
@@ -2011,8 +2012,6 @@ async fn send(sh: State<'_, Arc<Shared>>, app: AppHandle, text: String) -> Resul
     Ok(json!({"cmd": false}))
 }
 
-// ------------------------------------------------------------ vm port forwards
-
 #[tauri::command]
 async fn sandbox_fwd_add(
     id: String,
@@ -2038,10 +2037,6 @@ async fn sandbox_fwd_del(id: String, host_port: u16) -> Result<sandbox::SandboxS
         .map_err(|e| format!("{e:#}"))
 }
 
-// ---------------------------------------------------- fetch with save dialog
-
-/// copy a file out of a running sandbox VM and save it wherever the user
-/// picks in a native save dialog; returns the chosen path
 #[tauri::command]
 async fn sandbox_fetch_vm(id: String, vm_path: String) -> Result<String, String> {
     let name = vm_path
@@ -2075,8 +2070,6 @@ async fn sandbox_fetch_vm(id: String, vm_path: String) -> Result<String, String>
         .map_err(|e| format!("save failed: {e}"))?;
     Ok(handle.file_name())
 }
-
-// ------------------------------------------------------------ remote hosts
 
 fn host_status_json(h: hosts::HostStatus) -> Value {
     json!({
@@ -2192,8 +2185,6 @@ async fn host_exec(id: String, command: String) -> Result<Value, String> {
         .map_err(|e| format!("{e:#}"))
 }
 
-// ------------------------------------------------------------ skills
-
 #[tauri::command]
 async fn skills_list() -> Result<Value, String> {
     let all = tokio::task::spawn_blocking(|| skills::discover_all())
@@ -2225,8 +2216,6 @@ async fn skills_install(url: String) -> Result<String, String> {
         .map_err(|e| format!("{e}"))?
         .map_err(|e| format!("{e:#}"))
 }
-
-// ------------------------------------------------------------ crew
 
 fn crew_active_id(sh: &Shared) -> Option<String> {
     sh.crew.lock().unwrap().clone().or_else(crew::active)
@@ -2332,8 +2321,6 @@ async fn crew_forget(sh: State<'_, Arc<Shared>>, n: usize) -> Result<Value, Stri
     crew::state_json(&id).map_err(|e| format!("{e:#}"))
 }
 
-/// spawn the crew runner; rounds = 1 for a manual step, higher for auto
-/// (the auto loop stops early on the first DONE line)
 fn crew_run(sh: &Arc<Shared>, rounds: usize, auto: bool) -> Result<(), String> {
     let Some(id) = crew_active_id(sh) else {
         return Err("no active crew".into());
@@ -2342,8 +2329,7 @@ fn crew_run(sh: &Arc<Shared>, rounds: usize, auto: bool) -> Result<(), String> {
         return Err("crew is already running".into());
     }
     let cfg = sh.cfg.lock().unwrap().clone();
-    // preflight up front: surface bad profiles/keys as a command error
-    // instead of a mid-round system note
+
     if let Err(e) = crew::preflight_id(&id, &cfg) {
         return Err(format!("{e:#}"));
     }
