@@ -282,7 +282,7 @@ function UserItem({ item }: { item: Extract<ChatItem, { kind: "user" }> }) {
   return (
     <div className="group/msg relative my-3 flex flex-col items-end" onContextMenu={(e) => msgMenu(e, item.text)}>
       <div
-        className="msg-in max-w-[85%] rounded-[20px] bg-bubble px-4 py-2.5 text-[14px] leading-[22px] whitespace-pre-wrap break-words text-foreground"
+        className="msg-in max-w-[85%] rounded-[20px] bg-bubble px-4 py-2.5 leading-[1.57] whitespace-pre-wrap break-words text-foreground"
         onClick={mdClickHandler}
         dangerouslySetInnerHTML={{ __html: maskUserText(item.text) }}
       />
@@ -353,9 +353,15 @@ export function ChatView() {
   const transcript = useStore((s) => s.transcript);
   const streamText = useStore((s) => s.streamText);
   const autoscrollFlag = useStore((s) => s.autoscrollFlag);
+  const scrollJump = useStore((s) => s.scrollJump);
   const phase = useStore((s) => s.phase);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [away, setAway] = useState(false);
+  // dsh use-scroll-follow: refs keep the streaming ticks honest — while the
+  // reader is away (>320px from the tail) new content never yanks the view;
+  // a smooth jump suppresses autoscroll until it lands
+  const awayRef = useRef(false);
+  const jumpingRef = useRef(false);
 
   const lastBotId = useMemo(() => {
     for (let i = transcript.length - 1; i >= 0; i--) {
@@ -370,14 +376,25 @@ export function ChatView() {
   };
 
   useEffect(() => {
-    scrollBottom();
+    if (!awayRef.current) scrollBottom();
   }, [autoscrollFlag]);
+
+  // hard jumps: session opened, new chat, user sent a message
+  useEffect(() => {
+    jumpingRef.current = false;
+    awayRef.current = false;
+    setAway(false);
+    scrollBottom();
+  }, [scrollJump]);
 
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const onScroll = () => {
-      setAway(el.scrollHeight - el.scrollTop - el.clientHeight > 320);
+      const d = el.scrollHeight - el.scrollTop - el.clientHeight;
+      if (jumpingRef.current && d < 40) jumpingRef.current = false;
+      awayRef.current = d > 320;
+      setAway(d > 320);
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
@@ -390,7 +407,7 @@ export function ChatView() {
       {empty ? (
         <Welcome />
       ) : (
-        <div className="mx-auto w-full max-w-[768px] flex-1 px-5 pt-4 pb-2">
+        <div className="mx-auto w-full max-w-[768px] flex-1 px-5 pt-4 pb-2" style={{ fontSize: "var(--chat-font, 14px)" }}>
           {transcript.map((it) => (
             <Item key={it.id} item={it} canRetry={it.kind === "bot" && it.id === lastBotId && phase === "idle"} />
           ))}
@@ -412,7 +429,9 @@ export function ChatView() {
               <button
                 onClick={() => {
                   const el = scrollRef.current;
-                  if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+                  if (!el) return;
+                  jumpingRef.current = true;
+                  el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
                 }}
                 className="flex size-8 items-center justify-center rounded-full bg-card text-muted-foreground shadow-panel transition-colors duration-150 hover:text-foreground active:scale-95"
               >

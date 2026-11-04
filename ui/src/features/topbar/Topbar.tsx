@@ -1,7 +1,8 @@
 import { Icon } from "@/lib/icons";
 import { Hint, keyChips } from "@/lib/hint";
 import { changesTotals, useStore } from "@/store/app";
-import { cn } from "@/lib/utils";
+import { sessionToMarkdown } from "@/lib/sessionMd";
+import { copyText, cn } from "@/lib/utils";
 
 export function Topbar() {
   const view = useStore((s) => s.view);
@@ -11,6 +12,7 @@ export function Topbar() {
   const changes = useStore((s) => s.changes);
   const sessions = useStore((s) => s.sessions);
   const sid = useStore((s) => s.sid);
+  const transcript = useStore((s) => s.transcript);
   const openReview = useStore((s) => s.openReview);
   const runCmd = useStore((s) => s.runCmd);
   const keys = useStore((s) => s.keys);
@@ -21,6 +23,14 @@ export function Topbar() {
 
   const iconBtn =
     "flex size-8 items-center justify-center rounded-[8px] text-tertiary transition-all duration-100 hover:bg-accent hover:text-foreground active:scale-95";
+
+  // dsh session-log-export: the whole transcript on the clipboard as markdown
+  const copySessionMd = () => {
+    const t = sessions.find((s) => s.id === sid)?.title || "session";
+    void copyText(sessionToMarkdown(t, transcript)).then((ok) => {
+      useStore.getState().toast(ok ? "session copied as markdown" : "copy failed");
+    });
+  };
 
   return (
     <header className="flex h-12 flex-none items-center gap-1 border-b-[0.5px] border-hairline px-2.5">
@@ -70,6 +80,13 @@ export function Topbar() {
               <Icon name="redo" className="[&>svg]:size-4" />
             </button>
           </Hint>
+          {transcript.length > 0 && (
+            <Hint label="copy session as markdown">
+              <button onClick={copySessionMd} className={iconBtn}>
+                <Icon name="copy" className="[&>svg]:size-4" />
+              </button>
+            </Hint>
+          )}
         </>
       )}
       <Hint label="command palette" keys={keyChips(keys.palette)}>

@@ -48,6 +48,7 @@
   --ease-dsh: cubic-bezier(0.4, 0, 0.2, 1);
   --radius: 12px;
   --chat-you: var(--bubble);
+  --chat-font: 14px;
   --font-mono: "SF Mono", "JetBrains Mono", "Fira Code", "Cascadia Mono", Consolas, "Liberation Mono", Menlo, monospace;
   --font-sans:
     -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
@@ -336,8 +337,8 @@
 
 .md {
   word-break: break-word;
-  font-size: 14px;
-  line-height: 24px;
+  font-size: var(--chat-font, 14px);
+  line-height: 1.714;
 }
 .md > :first-child {
   margin-top: 0;
@@ -608,8 +609,8 @@
 }
 .md .md-table-scroll table {
   border-collapse: collapse;
-  font-size: 13px;
-  line-height: 20px;
+  font-size: 0.93em;
+  line-height: 1.44;
 }
 .md .md-table-fill table {
   width: 100%;
@@ -629,6 +630,29 @@
 .md img {
   border-radius: 12px;
   max-height: 360px;
+}
+
+/* dsh markdown images: tile opens the ImageLightbox with the original resolution */
+.md .md-img {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0.5rem 0;
+  border-radius: 12px;
+  cursor: zoom-in;
+}
+.md .md-img img {
+  display: block;
+  max-width: 100%;
+}
+@media (hover: hover) {
+  .md .md-img:hover img {
+    opacity: 0.92;
+  }
+}
+.md .md-img:focus-visible {
+  outline: 1.5px solid var(--info);
+  outline-offset: 2px;
 }
 
 /* ---------- diffs ---------- */

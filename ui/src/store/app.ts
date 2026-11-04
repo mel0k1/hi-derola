@@ -200,6 +200,11 @@ interface Store {
   removeItem: (id: number) => void;
   clearWelcomeItems: () => void;
   autoscrollFlag: number;
+  // hard jumps bypass the scroll-follow gate: session open, new chat, send
+  scrollJump: number;
+  // dsh FontSizeRow: chat text size in px, applied via --chat-font
+  chatFont: number;
+  setChatFont: (px: number) => void;
 
   refreshSessions: () => Promise<void>;
   openSession: (id: string) => Promise<void>;
@@ -406,6 +411,18 @@ export const useStore = create<Store>((set, get) => ({
   },
 
   autoscrollFlag: 0,
+  scrollJump: 0,
+  chatFont: (() => {
+    const v = Math.min(18, Math.max(12, Math.round(Number(localStorage.getItem("hiderola.chatfont")) || 14)));
+    document.documentElement.style.setProperty("--chat-font", v + "px");
+    return v;
+  })(),
+  setChatFont: (px) => {
+    const v = Math.min(18, Math.max(12, Math.round(px)));
+    localStorage.setItem("hiderola.chatfont", String(v));
+    document.documentElement.style.setProperty("--chat-font", v + "px");
+    set({ chatFont: v });
+  },
   toasts: [],
   toast: (s) => {
     const id = nextId();
@@ -487,6 +504,7 @@ export const useStore = create<Store>((set, get) => ({
       transcript: items,
       streamText: null,
       autoscrollFlag: get().autoscrollFlag + 1,
+      scrollJump: get().scrollJump + 1,
     });
     if ((st.queue || []).length) {
       get().note(`${(st.queue || []).length} queued message(s) restored from the previous run; they will steer the next run`);
@@ -508,6 +526,7 @@ export const useStore = create<Store>((set, get) => ({
         transcript: [],
         streamText: null,
         autoscrollFlag: get().autoscrollFlag + 1,
+        scrollJump: get().scrollJump + 1,
       });
     }
     invoke("new_session").catch((e) => get().note(String(e)));
@@ -521,6 +540,7 @@ export const useStore = create<Store>((set, get) => ({
     set((s) => ({
       transcript: [...s.transcript, { kind: "user", id: myId, text: t }],
       autoscrollFlag: s.autoscrollFlag + 1,
+      scrollJump: s.scrollJump + 1,
     }));
     set({ waiting: true, phase: "sending" });
     let res: { cmd?: boolean; note?: string };
@@ -1071,6 +1091,7 @@ export const useStore = create<Store>((set, get) => ({
           queue: [],
           phase: "idle",
           view: "chat",
+          scrollJump: get().scrollJump + 1,
         });
         break;
       case "done": {

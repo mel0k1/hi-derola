@@ -527,6 +527,8 @@ export function SettingsDialog() {
   const setModels = useStore((s) => s.setModels);
   const saveSettings = useStore((s) => s.saveSettings);
   const note = useStore((s) => s.note);
+  const chatFont = useStore((s) => s.chatFont);
+  const setChatFont = useStore((s) => s.setChatFont);
 
   const [sec, setSec] = useState("general");
   const [form, setForm] = useState<Record<string, unknown>>({});
@@ -720,6 +722,38 @@ export function SettingsDialog() {
                   <Label htmlFor="s-stream" className="text-[13px]">stream responses</Label>
                 </div>
                 <div className="text-[11.5px] text-muted-foreground">part of the saved form — press save to apply</div>
+                {/* dsh FontSizeRow: stepper over --chat-font, applied live */}
+                <div className="flex items-center gap-2.5 pt-1">
+                  <span className="text-[13px]">chat font size</span>
+                  <div className="ml-auto flex items-center gap-1">
+                    <button
+                      aria-label="decrease chat font size"
+                      disabled={chatFont <= 12}
+                      onClick={() => setChatFont(chatFont - 1)}
+                      className="flex h-7 w-7 items-center justify-center rounded-[8px] text-[15px] text-muted-foreground transition-colors duration-100 hover:bg-accent hover:text-foreground active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      −
+                    </button>
+                    <span className="w-10 text-center font-mono text-[12px] text-foreground">{chatFont}px</span>
+                    <button
+                      aria-label="increase chat font size"
+                      disabled={chatFont >= 18}
+                      onClick={() => setChatFont(chatFont + 1)}
+                      className="flex h-7 w-7 items-center justify-center rounded-[8px] text-[15px] text-muted-foreground transition-colors duration-100 hover:bg-accent hover:text-foreground active:scale-95 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      +
+                    </button>
+                    {chatFont !== 14 && (
+                      <button
+                        onClick={() => setChatFont(14)}
+                        className="ml-1 text-[11.5px] text-caption transition-colors duration-100 hover:text-foreground"
+                      >
+                        reset
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="text-[11.5px] text-muted-foreground">scales messages and markdown, stored locally, applied instantly</div>
               </section>
             </div>
           )}

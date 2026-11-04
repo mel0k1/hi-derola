@@ -2,6 +2,7 @@ import { copyText } from "@/lib/utils";
 import { invoke } from "@/lib/tauri";
 import { useStore } from "@/store/app";
 import { openContextMenu } from "@/lib/menu";
+import { openLightbox } from "@/lib/lightbox";
 import { KEYBLOCK_RE, esc, maskedFor, maskSegments } from "@/lib/secrets";
 import { iconSvg } from "@/lib/icons";
 
@@ -10,6 +11,12 @@ function inline(s: string, blocks: string[]) {
     .replace(/`([^`\n]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
     .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<i>$2</i>")
+    // images before links, so ![alt](url) is not eaten by the link rule;
+    // the tile opens the dsh ImageLightbox with the original resolution
+    .replace(
+      /!\[([^\]]*)\]\((https?:[^)\s]+)\)/g,
+      '<span class="md-img" role="button" tabindex="0" data-src="$2" data-alt="$1"><img src="$2" alt="$1" loading="lazy" draggable="false"></span>',
+    )
     .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
   // dsh secret rule: credentials masked last so markup protects href/code, eye toggles reveal
   return maskSegments(out, blocks, true);
@@ -236,6 +243,11 @@ export function md(src: string) {
 // shared with plain-text renderers that embed the same markup (user bubbles)
 export function mdClickHandler(e: React.MouseEvent<HTMLElement>) {
   const target = e.target as HTMLElement;
+  const imgTile = target.closest(".md-img");
+  if (imgTile) {
+    openLightbox(imgTile.getAttribute("data-src") || "", imgTile.getAttribute("data-alt") || "");
+    return;
+  }
   const eye = target.closest("button.md-eye");
   if (eye) {
     const box = eye.closest(".md-secret");
@@ -286,6 +298,23 @@ export function mdClickHandler(e: React.MouseEvent<HTMLElement>) {
 
 // dsh open-in-app url menu: open externally or copy the link
 export function mdContextMenu(e: React.MouseEvent<HTMLElement>) {
+  const imgTile = (e.target as HTMLElement).closest(".md-img");
+  if (imgTile) {
+    const src = imgTile.getAttribute("data-src") || "";
+    if (!/^https?:/.test(src)) return;
+    openContextMenu(e, [
+      { id: "open-img", label: "Open Image", icon: "globe", onSelect: () => invoke("open_url", { url: src }).catch(() => {}) },
+      {
+        id: "copy-img",
+        label: "Copy Image Address",
+        icon: "link",
+        onSelect: () => {
+          void copyText(src).then((ok) => ok && useStore.getState().toast("copied"));
+        },
+      },
+    ]);
+    return;
+  }
   const anchor = (e.target as HTMLElement).closest("a");
   if (!anchor) return;
   const href = anchor.getAttribute("href") || "";

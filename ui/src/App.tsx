@@ -19,6 +19,7 @@ import { useStore } from "@/store/app";
 import { comboFromEvent, parseCombo, sameCombo } from "@/lib/keys";
 import { invoke, listenRaw } from "@/lib/tauri";
 import { ContextMenuHost } from "@/lib/menu";
+import { LightboxHost } from "@/lib/lightbox";
 import { Icon } from "@/lib/icons";
 
 function DropOverlay({ show }: { show: boolean }) {
@@ -54,11 +55,19 @@ function stopSequence(event: KeyboardEvent, st: ReturnType<typeof useStore.getSt
 export default function App() {
   const view = useStore((s) => s.view);
   const init = useStore((s) => s.init);
+  const sessions = useStore((s) => s.sessions);
+  const sid = useStore((s) => s.sid);
   const [dragOver, setDragOver] = useState(false);
 
   useEffect(() => {
     init();
   }, [init]);
+
+  // dsh DocumentTitle: the active session title mirrors into the window title
+  useEffect(() => {
+    const t = view === "chat" ? sessions.find((x) => x.id === sid)?.title || "" : view === "sandbox" ? "Sandbox" : view === "hosts" ? "Remote hosts" : view === "skills" ? "Skills" : "Crew";
+    document.title = t && t !== "new chat" ? `${t} — Hi!Derola` : "Hi!Derola";
+  }, [view, sessions, sid]);
 
   // native drag & drop: tauri webview events carry real file paths
   useEffect(() => {
@@ -235,6 +244,7 @@ export default function App() {
       <PaletteDialog />
       <Toasts />
       <ContextMenuHost />
+      <LightboxHost />
       <DropOverlay show={dragOver} />
       <QuitDialog />
     </div>
