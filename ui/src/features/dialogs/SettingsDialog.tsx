@@ -800,6 +800,16 @@ export function SettingsDialog() {
                   />
                 ))}
               </div>
+              {/* dsh ShortcutsRow: the settings entry to the full reference dialog */}
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => useStore.setState({ hotkeysOpen: true })}
+                  className="h-8 rounded-[10px] bg-secondary px-3 text-[12.5px] text-foreground transition-colors duration-100 hover:bg-muted"
+                >
+                  open quick reference
+                </button>
+                <span className="text-[11.5px] text-muted-foreground">{keys.shortcuts || "none"}</span>
+              </div>
               <div className="text-[11.5px] text-muted-foreground">click a shortcut to record a new combination · escape cancels recording · undo restores the default, x clears it</div>
             </div>
           )}

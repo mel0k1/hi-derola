@@ -11,6 +11,7 @@ export const KEY_ACTIONS: [string, string][] = [
   ["redo", "redo file changes"],
   ["toggle_thinking", "toggle thinking"],
   ["palette", "command palette"],
+  ["shortcuts", "open shortcut reference"],
 ];
 
 export const DEFAULT_KEYS: Record<string, string> = Object.fromEntries(KEY_ACTIONS.map(([k]) => [k, ""]));
@@ -27,6 +28,7 @@ Object.assign(DEFAULT_KEYS, {
   redo: "ctrl+shift+z",
   toggle_thinking: "ctrl+t",
   palette: "ctrl+k",
+  shortcuts: "ctrl+/",
 });
 
 export type EffKeys = Record<string, string>;

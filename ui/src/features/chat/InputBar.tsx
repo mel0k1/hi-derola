@@ -46,6 +46,47 @@ const SLASH_HINTS: Record<string, string> = {
   "/help": "show commands and tools",
 };
 
+// dsh slash menu icons: a quiet glyph per command family
+const SLASH_ICONS: Record<string, string> = {
+  file: "file",
+  model: "spark",
+  models: "list",
+  profile: "sliders",
+  plan: "eye",
+  undo: "undo",
+  redo: "redo",
+  init: "pencil",
+  compact: "list",
+  export: "download",
+  sessions: "list",
+  resume: "play",
+  mcpauth: "server",
+  mcpres: "server",
+  mcpstatus: "server",
+  mcpread: "server",
+  mcpadd: "server",
+  mcpconnect: "server",
+  mcpdisconnect: "server",
+  mcplog: "server",
+  jstools: "terminal",
+  doctor: "check",
+  update: "download",
+  usage: "list",
+  sandbox: "box",
+  host: "server",
+  skills: "skill",
+  crew: "crew",
+  clear: "trash",
+  quit: "x",
+  help: "command",
+};
+
+const SLASH_LIST = Object.entries(SLASH_HINTS).map(([name, hint]) => ({
+  name,
+  hint,
+  icon: SLASH_ICONS[name.slice(1)] ?? "command",
+}));
+
 interface MentionState {
   items: MentionItem[];
   idx: number;
@@ -351,19 +392,70 @@ export function InputBar() {
   const phase = useStore((s) => s.phase);
   const keys = useStore((s) => s.keys);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const slashRef = useRef<HTMLDivElement>(null);
   const [mention, setMention] = useState<MentionState | null>(null);
   const [hasText, setHasText] = useState(false);
   const [ghost, setGhost] = useState<{ token: string; hint: string } | null>(null);
+  const [slash, setSlash] = useState<{ items: typeof SLASH_LIST; idx: number } | null>(null);
 
   const updateGhost = () => {
     const el = inputRef.current;
     if (!el) {
       setGhost(null);
+      setSlash(null);
       return;
     }
-    const m = el.value.match(/^\/([a-z0-9_-]*)[ \t]*$/i);
+    const v = el.value;
+    // dsh slash menu: while the draft is a slash token still being typed
+    // (no space yet), matching commands list above the composer
+    const mm = v.match(/^\/([a-z0-9_-]*)$/i);
+    if (mm) {
+      const q = mm[1].toLowerCase();
+      const items = SLASH_LIST.filter((c) => c.name.slice(1).startsWith(q));
+      setSlash(items.length ? { items, idx: 0 } : null);
+    } else {
+      setSlash(null);
+    }
+    // ghost hint once the token is complete and a space follows
+    const m = v.match(/^\/([a-z0-9_-]*)[ \t]+$/i);
     const hint = m ? SLASH_HINTS["/" + m[1].toLowerCase()] : undefined;
     setGhost(m && hint ? { token: m[0], hint } : null);
+  };
+
+  // dsh menu dismissal: pointer outside the card and the composer closes it
+  useEffect(() => {
+    if (!slash) return;
+    const onDown = (e: PointerEvent) => {
+      const t = e.target as Node;
+      if (slashRef.current?.contains(t)) return;
+      if (slashRef.current?.closest("[data-composer-card]")?.contains(t)) return;
+      setSlash(null);
+    };
+    document.addEventListener("pointerdown", onDown, true);
+    return () => document.removeEventListener("pointerdown", onDown, true);
+  }, [slash]);
+
+  // focus stays in the textarea (combobox), so keyboard moves never scroll
+  // the highlighted row into view — do it here, dsh MenuView
+  useEffect(() => {
+    if (!slash) return;
+    slashRef.current?.querySelector('[aria-selected="true"]')?.scrollIntoView({ block: "nearest" });
+  }, [slash]);
+
+  // accept a highlighted command: token settles into the draft with a
+  // trailing space, which hands over to the ghost args hint
+  const acceptSlash = (sl: { items: typeof SLASH_LIST; idx: number }, i: number) => {
+    const el = inputRef.current;
+    const c = sl.items[i];
+    if (!el || !c) return;
+    el.value = c.name + " ";
+    const caret = el.value.length;
+    el.setSelectionRange(caret, caret);
+    setSlash(null);
+    autosize();
+    updateGhost();
+    setHasText(true);
+    el.focus();
   };
 
   const autosize = () => {
@@ -430,9 +522,25 @@ export function InputBar() {
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const el = inputRef.current;
     if (!el) return;
+    // dsh slash menu: combobox pattern — the textarea keeps focus, arrows
+    // walk the shared highlight, enter/tab settle, escape dismisses
+    if (slash) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Tab" || e.key === "Enter" || e.key === "Escape") {
+        e.preventDefault();
+        // stop the window handler: enter must not send the draft, escape
+        // must not count as a stop-sequence press
+        e.stopPropagation();
+        if (e.key === "ArrowDown") setSlash({ ...slash, idx: (slash.idx + 1) % slash.items.length });
+        else if (e.key === "ArrowUp") setSlash({ ...slash, idx: (slash.idx - 1 + slash.items.length) % slash.items.length });
+        else if (e.key === "Tab" || e.key === "Enter") acceptSlash(slash, slash.idx);
+        else setSlash(null);
+        return;
+      }
+    }
     if (mention) {
       if (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Tab" || e.key === "Enter" || e.key === "Escape") {
         e.preventDefault();
+        e.stopPropagation();
         if (e.key === "ArrowDown") setMention({ ...mention, idx: (mention.idx + 1) % mention.items.length });
         else if (e.key === "ArrowUp") setMention({ ...mention, idx: (mention.idx - 1 + mention.items.length) % mention.items.length });
         else if (e.key === "Tab" || e.key === "Enter") completeMention(mention, mention.idx);
@@ -451,6 +559,7 @@ export function InputBar() {
       el.value = "";
       setHasText(false);
       setGhost(null);
+      setSlash(null);
       autosize();
       hideMention();
       return;
@@ -472,6 +581,7 @@ export function InputBar() {
     el.value = "";
     setHasText(false);
     setGhost(null);
+    setSlash(null);
     autosize();
     hideMention();
     el.focus();
@@ -482,6 +592,43 @@ export function InputBar() {
       <QueueDock />
       <Chips />
       <div className="relative">
+        {/* dsh slash menu: candidate list anchored above the composer card,
+            edge to edge; name left, description right-aligned; the textarea
+            keeps focus (combobox) so rows are mousedown-handled */}
+        {slash && (
+          <div
+            ref={slashRef}
+            data-slash-menu=""
+            className="absolute bottom-full left-0 right-0 z-40 mb-1 flex max-h-[400px] animate-in fade-in slide-in-from-bottom-1 flex-col overflow-hidden rounded-[16px] border-[0.5px] border-hairline bg-glass p-1 shadow-panel backdrop-blur-[40px] backdrop-saturate-150 duration-150"
+          >
+            <div className="flex-none px-2 pt-1.5 pb-1 text-[11px] leading-[15px] text-caption">commands</div>
+            <div role="listbox" aria-label="slash commands" className="min-h-0 overflow-y-auto">
+              {slash.items.map((c, i) => (
+                <button
+                  key={c.name}
+                  type="button"
+                  role="option"
+                  aria-selected={i === slash.idx}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    acceptSlash(slash, i);
+                  }}
+                  onMouseMove={() => {
+                    if (i !== slash.idx) setSlash({ ...slash, idx: i });
+                  }}
+                  className={cn(
+                    "flex min-h-[34px] w-full items-center gap-1.5 rounded-[10px] px-2 py-1.5 text-left text-[13px] leading-[20px] text-foreground transition-colors duration-100",
+                    i === slash.idx && "bg-accent"
+                  )}
+                >
+                  <Icon name={c.icon} className="flex-none text-tertiary [&>svg]:size-3.5" />
+                  <span className="max-w-[40%] flex-none truncate">{c.name}</span>
+                  <span className="min-w-0 flex-1 truncate text-right text-[12px] leading-[18px] text-caption">{c.hint}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         {mention && (
           <div className="absolute bottom-full left-0 z-40 mb-2.5 max-h-64 min-w-72 max-w-[26rem] animate-in fade-in slide-in-from-bottom-1 overflow-y-auto rounded-[16px] border-[0.5px] border-hairline bg-glass p-1.5 shadow-panel backdrop-blur-[40px] backdrop-saturate-150 duration-150">
             {mention.items.map((p, i) => (
@@ -511,7 +658,7 @@ export function InputBar() {
           </div>
         )}
         {/* composer card, dsh InputBar: 28px radius, soft elevation, blue caret */}
-        <div className="flex flex-col gap-0.5 rounded-[28px] bg-card px-2 pt-2 pb-1.5 shadow-[0_0_0_0.5px_var(--border),0_4px_16px_rgba(0,0,0,0.04),0_0_24px_rgba(0,0,0,0.03)]">
+        <div data-composer-card="" className="flex flex-col gap-0.5 rounded-[28px] bg-card px-2 pt-2 pb-1.5 shadow-[0_0_0_0.5px_var(--border),0_4px_16px_rgba(0,0,0,0.04),0_0_24px_rgba(0,0,0,0.03)]">
           <textarea
             id="chat-input"
             ref={inputRef}

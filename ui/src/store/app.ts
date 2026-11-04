@@ -142,6 +142,7 @@ interface Store {
   } | null;
   files: { open: boolean; data: DirList | null; parent: string | null };
   settingsOpen: boolean;
+  hotkeysOpen: boolean;
   quitAsk: boolean;
   reviewOpen: boolean;
   reviewExpanded: Set<string>;
@@ -357,6 +358,7 @@ export const useStore = create<Store>((set, get) => ({
   ask: null,
   files: { open: false, data: null, parent: null },
   settingsOpen: false,
+  hotkeysOpen: false,
   quitAsk: false,
   reviewOpen: false,
   reviewExpanded: new Set(),

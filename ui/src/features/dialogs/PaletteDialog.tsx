@@ -45,6 +45,7 @@ export function PaletteDialog() {
   items.push({ icon: "sun", label: "toggle theme", hint: "dark / light", run: () => useStore.getState().toggleTheme() });
   items.push({ icon: "box", label: "open sandbox", hint: "local VMs, isolated agent workspace", run: () => useStore.getState().setView("sandbox") });
   items.push({ icon: "sliders", label: "open settings", hint: "provider, hotkeys, mcp, permissions", run: () => useStore.setState({ settingsOpen: true }) });
+  items.push({ icon: "command", label: "keyboard shortcuts", hint: "quick reference", run: () => useStore.setState({ hotkeysOpen: true }) });
   items.push({ icon: "diff", label: "review session changes", hint: "changed files and diffs", run: () => useStore.getState().openReview() });
   items.push({ icon: "menu", label: "toggle sidebar", hint: "history panel", run: () => useStore.getState().toggleSidebar() });
   for (const s of sessions.slice(0, 15)) {

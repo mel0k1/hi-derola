@@ -10,6 +10,7 @@ import { ConfirmDialog } from "@/features/dialogs/ConfirmDialog";
 import { AskDialog } from "@/features/dialogs/AskDialog";
 import { FilesDialog } from "@/features/dialogs/FilesDialog";
 import { SettingsDialog } from "@/features/dialogs/SettingsDialog";
+import { HotkeysDialog } from "@/features/dialogs/HotkeysDialog";
 import { ReviewDialog } from "@/features/dialogs/ReviewDialog";
 import { PaletteDialog } from "@/features/dialogs/PaletteDialog";
 import { Toasts } from "@/features/dialogs/Toasts";
@@ -199,6 +200,9 @@ export default function App() {
             transcript: s.transcript.map((t) => (t.id === last.id && t.kind === "think" ? { ...t, open: !t.open } : t)),
           }));
         }
+      } else if (hit("shortcuts")) {
+        e.preventDefault();
+        useStore.setState({ hotkeysOpen: true });
       } else if (hit("palette")) {
         e.preventDefault();
         useStore.setState({ palette: { open: true, query: "", idx: 0 } });
@@ -225,6 +229,7 @@ export default function App() {
       <AskDialog />
       <FilesDialog />
       <SettingsDialog />
+      <HotkeysDialog />
       <ReviewDialog />
       <PaletteDialog />
       <Toasts />
