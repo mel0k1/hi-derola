@@ -9,12 +9,14 @@ import { useStore } from "@/store/app";
 import { KEY_ACTIONS } from "@/store/keysStore";
 import { keyChips } from "@/lib/hint";
 import { cn } from "@/lib/utils";
+import { useT } from "@/lib/i18n";
 
 // dsh fixedCommands: keys shared by the slash menu, mention popup and palette
+// (labels are i18n keys)
 const MENU_ROWS: [string, string][] = [
-  ["move menu selection", "↑ ↓"],
-  ["select highlighted item", "enter tab"],
-  ["dismiss menu or dialog", "esc"],
+  ["hk.menu_move", "↑ ↓"],
+  ["hk.menu_select", "enter tab"],
+  ["hk.menu_dismiss", "esc"],
 ];
 
 // core actions first in product order, dsh coreActionOrder
@@ -32,9 +34,9 @@ const APP_ORDER = [
 ];
 
 const GROUPS: [string, string | null][] = [
-  ["app", null],
-  ["input", "message input"],
-  ["menus", "menus"],
+  ["app", "hk.g_app"],
+  ["input", "hk.g_input"],
+  ["menus", "hk.g_menus"],
 ];
 
 interface Row {
@@ -56,6 +58,7 @@ export function HotkeysDialog() {
   const keys = useStore((s) => s.keys);
   const [query, setQuery] = useState("");
   const inputRef = useRef<HTMLInputElement>(null);
+  const t = useT();
 
   useEffect(() => {
     if (open) {
@@ -65,18 +68,18 @@ export function HotkeysDialog() {
     }
   }, [open]);
 
-  const labels = Object.fromEntries(KEY_ACTIONS);
+  const labels = Object.fromEntries(KEY_ACTIONS.map(([k]) => [k, t("hk." + k)]));
   const rows: Row[] = [];
   for (const id of APP_ORDER) {
     rows.push({ id, label: labels[id] ?? id, group: "app", pills: bindingPills(id, keys[id]) });
   }
-  for (const [id, label] of KEY_ACTIONS) {
+  for (const [id] of KEY_ACTIONS) {
     if (id === "send" || id === "newline" || id === "stop") {
-      rows.push({ id, label, group: "input", pills: bindingPills(id, keys[id]) });
+      rows.push({ id, label: labels[id] ?? id, group: "input", pills: bindingPills(id, keys[id]) });
     }
   }
-  for (const [label, keyText] of MENU_ROWS) {
-    rows.push({ id: label, label, group: "menus", pills: [keyText] });
+  for (const [key, keyText] of MENU_ROWS) {
+    rows.push({ id: key, label: t(key), group: "menus", pills: [keyText] });
   }
 
   const q = query.trim().toLowerCase();
@@ -93,10 +96,10 @@ export function HotkeysDialog() {
         className="flex h-[600px] max-h-[calc(100dvh-108px)] w-[480px] max-w-[calc(100vw-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[480px]"
       >
         <div className="relative h-[46px] flex-none pt-[22px] pb-0 pl-6 pr-[54px]">
-          <h2 className="m-0 text-[16px] font-medium leading-[24px]">Keyboard shortcuts</h2>
+          <h2 className="m-0 text-[16px] font-medium leading-[24px]">{t("hk.title")}</h2>
           <button
             type="button"
-            aria-label="close"
+            aria-label={t("a.close")}
             onClick={() => useStore.setState({ hotkeysOpen: false })}
             className="absolute top-5 right-3.5 flex size-7 items-center justify-center rounded-full text-foreground transition-colors duration-100 hover:bg-accent"
           >
@@ -109,16 +112,16 @@ export function HotkeysDialog() {
             <input
               ref={inputRef}
               value={query}
-              placeholder="search shortcuts"
+              placeholder={t("hk.search")}
               spellCheck={false}
-              aria-label="search shortcuts"
+              aria-label={t("hk.search")}
               onChange={(e) => setQuery(e.target.value)}
               className="w-full min-w-0 bg-transparent text-[13px] leading-[18px] outline-none placeholder:text-caption"
             />
             {query !== "" && (
               <button
                 type="button"
-                aria-label="clear search"
+                aria-label={t("hk.clear_search")}
                 onClick={() => {
                   setQuery("");
                   inputRef.current?.focus();
@@ -136,7 +139,7 @@ export function HotkeysDialog() {
             if (!rws.length) return null;
             return (
               <section key={group} aria-label={header ?? "application"}>
-                {header && <h3 className="mx-2 mt-4 mb-1 text-[12px] font-normal leading-[18px] text-caption">{header}</h3>}
+                {header && <h3 className="mx-2 mt-4 mb-1 text-[12px] font-normal leading-[18px] text-caption">{t(header)}</h3>}
                 <div>
                   {rws.map((row) => (
                     <div
@@ -165,7 +168,7 @@ export function HotkeysDialog() {
           })}
           {!visible.length && (
             <p className="m-1.5 text-[12px] leading-[18px] text-caption" role="status">
-              no matching shortcuts
+              {t("hk.no_match")}
             </p>
           )}
         </div>
@@ -175,9 +178,9 @@ export function HotkeysDialog() {
             onClick={() => useStore.setState({ hotkeysOpen: false, settingsOpen: true })}
             className="text-caption transition-colors duration-100 hover:text-foreground"
           >
-            customize in settings
+            {t("hk.customize")}
           </button>
-          <span className="text-caption">{bound} bindings</span>
+          <span className="text-caption">{t("hk.bindings", { n: bound })}</span>
         </div>
       </DialogContent>
     </Dialog>

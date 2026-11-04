@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { create } from "zustand";
 import { Icon } from "@/lib/icons";
+import { useT } from "@/lib/i18n";
 
 // dsh ImageLightbox: body-level full-screen viewer for the original image;
 // escape / backdrop / button close, focus moves to the close button on open
@@ -28,6 +29,7 @@ export function LightboxHost() {
   const box = useLightbox((s) => s.box);
   const close = useLightbox((s) => s.close);
   const btnRef = useRef<HTMLButtonElement>(null);
+  const t = useT();
 
   useEffect(() => {
     if (!box) return;
@@ -52,7 +54,7 @@ export function LightboxHost() {
     <div
       role="dialog"
       aria-modal="true"
-      aria-label={box.alt || "image preview"}
+      aria-label={box.alt || t("lb.title")}
       className="msg-in fixed inset-0 z-[90] flex items-center justify-center bg-black/70 p-8"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) close();
@@ -61,7 +63,7 @@ export function LightboxHost() {
       <button
         ref={btnRef}
         onClick={close}
-        aria-label="close preview"
+        aria-label={t("lb.close")}
         className="absolute top-4 right-4 flex size-9 items-center justify-center rounded-full bg-white/10 text-white/85 transition-colors duration-150 hover:bg-white/20 hover:text-white active:scale-95"
       >
         <Icon name="x" className="[&>svg]:size-4" />

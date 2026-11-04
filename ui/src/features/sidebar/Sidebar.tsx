@@ -3,13 +3,14 @@ import { Hint, keyChips } from "@/lib/hint";
 import { fmtCost, fmtRel, cn } from "@/lib/utils";
 import { useStore } from "@/store/app";
 import { invoke } from "@/lib/tauri";
+import { useT } from "@/lib/i18n";
 import { useState, type ReactNode } from "react";
 
 const TOOLS: { id: "sandbox" | "hosts" | "skills" | "crew"; icon: string; label: string; title: string }[] = [
-  { id: "sandbox", icon: "box", label: "sandbox", title: "sandbox — local QEMU VMs for isolated agent work" },
-  { id: "hosts", icon: "server", label: "remote hosts", title: "remote hosts — run the agent on your servers over ssh" },
-  { id: "skills", icon: "skill", label: "skills", title: "skills — plugin folders with SKILL.md, toggles, git install" },
-  { id: "crew", icon: "crew", label: "crew", title: "crew — several AI agents in one session" },
+  { id: "sandbox", icon: "box", label: "sb.sandbox", title: "sb.sandbox_t" },
+  { id: "hosts", icon: "server", label: "sb.hosts", title: "sb.hosts_t" },
+  { id: "skills", icon: "skill", label: "sb.skills", title: "sb.skills_t" },
+  { id: "crew", icon: "crew", label: "sb.crew", title: "sb.crew_t" },
 ];
 
 const PIN_KEY = "hiderola.pinned";
@@ -28,13 +29,14 @@ function SessionRow({ id, title, count, updated, cost, active, pinned, attention
   const waiting = useStore((s) => s.waiting);
   const note = useStore((s) => s.note);
   const refreshSessions = useStore((s) => s.refreshSessions);
+  const t = useT();
   const [confirming, setConfirming] = useState(false);
 
   return (
     <div
       role="button"
       tabIndex={0}
-      title={`${count} msgs · ${fmtRel(updated)}${cost && cost > 0 ? ` · ${fmtCost(cost)}` : ""}`}
+      title={`${count} ${t("a.msgs")} · ${fmtRel(updated)}${cost && cost > 0 ? ` · ${fmtCost(cost)}` : ""}`}
       onClick={() => openSession(id)}
       onKeyDown={(e) => e.key === "Enter" && openSession(id)}
       className={cn(
@@ -45,14 +47,14 @@ function SessionRow({ id, title, count, updated, cost, active, pinned, attention
     >
       {forked && <Icon name="branch" className="flex-none text-caption [&>svg]:size-3" />}
       <span className={cn("min-w-0 flex-1 truncate text-[13px] leading-5", active ? "font-medium text-foreground" : "text-foreground/90")}>
-        {title || "new chat"}
+        {title || t("a.new_chat")}
       </span>
-      {attention && <span className="pulse-dot size-1.5 flex-none rounded-full bg-warning" title="the agent is working here" />}
+      {attention && <span className="pulse-dot size-1.5 flex-none rounded-full bg-warning" title={t("a.working_here")} />}
       <span className={cn("flex-none font-mono text-[10.5px] text-caption transition-opacity duration-100 group-hover:opacity-0", confirming && "opacity-0")}>
         {fmtRel(updated)}
       </span>
       <button
-        title={pinned ? "unpin" : "pin"}
+        title={pinned ? t("sb.unpin") : t("sb.pin")}
         className={cn(
           "size-6 flex-none items-center justify-center rounded-[8px] text-caption transition-colors duration-100 hover:bg-accent hover:text-foreground",
           pinned ? "flex text-tertiary" : "hidden group-hover:flex",
@@ -66,7 +68,7 @@ function SessionRow({ id, title, count, updated, cost, active, pinned, attention
         <Icon name="pin" className={cn("[&>svg]:size-3.5", pinned && "text-info")} />
       </button>
       <button
-        title="delete"
+        title={t("a.delete")}
         className={cn(
           "hidden size-6 flex-none items-center justify-center rounded-[8px] text-caption transition-colors duration-100 group-hover:flex",
           confirming ? "text-destructive" : "hover:bg-accent hover:text-destructive"
@@ -75,7 +77,7 @@ function SessionRow({ id, title, count, updated, cost, active, pinned, attention
           e.stopPropagation();
           if (confirming) {
             if (waiting) {
-              note("stop the current run before deleting this chat");
+              note(t("sb.delete_warn"));
               return;
             }
             invoke("delete_session", { id })
@@ -111,6 +113,7 @@ export function Sidebar() {
   const keys = useStore((s) => s.keys);
   const waiting = useStore((s) => s.waiting);
   const openSettings = () => useStore.setState({ settingsOpen: true });
+  const t = useT();
 
   const [query, setQuery] = useState("");
   const [pins, setPins] = useState<string[]>(loadPins);
@@ -154,38 +157,38 @@ export function Sidebar() {
             className="flex h-9 w-full items-center gap-2 rounded-[12px] border-[0.5px] border-border bg-card px-3 text-[13.5px] font-medium text-foreground shadow-xs transition-colors duration-100 hover:bg-muted"
           >
             <Icon name="plus" className="text-tertiary" />
-            new chat
+            {t("a.new_chat")}
           </button>
         </div>
 
         {/* tools */}
-        <SectionLabel>tools</SectionLabel>
+        <SectionLabel>{t("sb.tools")}</SectionLabel>
         <nav className="flex flex-col gap-0.5 px-3">
-          {TOOLS.map((t) => (
+          {TOOLS.map((tool) => (
             <button
-              key={t.id}
-              title={t.title}
-              onClick={() => setView(t.id)}
+              key={tool.id}
+              title={t(tool.title)}
+              onClick={() => setView(tool.id)}
               className={cn(
                 "flex h-8 items-center gap-2.5 rounded-[12px] px-2.5 text-left text-[13px] leading-5 transition-colors duration-100 outline-none",
-                view === t.id ? "bg-accent font-medium text-foreground" : "text-foreground/85 hover:bg-accent/60"
+                view === tool.id ? "bg-accent font-medium text-foreground" : "text-foreground/85 hover:bg-accent/60"
               )}
             >
-              <Icon name={t.icon} className={view === t.id ? "text-foreground" : "text-tertiary"} />
-              {t.label}
+              <Icon name={tool.icon} className={view === tool.id ? "text-foreground" : "text-tertiary"} />
+              {t(tool.label)}
             </button>
           ))}
         </nav>
 
         {/* sessions */}
-        <SectionLabel>sessions</SectionLabel>
+        <SectionLabel>{t("sb.sessions")}</SectionLabel>
         <div className="flex-none px-3 pb-1.5">
           <div className="relative">
             <Icon name="search" className="absolute top-1/2 left-2.5 -translate-y-1/2 text-caption [&>svg]:size-3.5" />
             <input
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="search sessions"
+              placeholder={t("sb.search")}
               spellCheck={false}
               className="h-7.5 w-full rounded-[10px] bg-secondary py-1 pr-2.5 pl-8 text-[12px] outline-none placeholder:text-caption focus-visible:ring-1 focus-visible:ring-info/40"
             />
@@ -193,9 +196,9 @@ export function Sidebar() {
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-2">
           {sessions.length === 0 ? (
-            <div className="px-2.5 py-1 text-[12.5px] text-caption">no history yet</div>
+            <div className="px-2.5 py-1 text-[12.5px] text-caption">{t("sb.no_history")}</div>
           ) : ordered.length === 0 ? (
-            <div className="px-2.5 py-1 text-[12.5px] text-caption">no match</div>
+            <div className="px-2.5 py-1 text-[12.5px] text-caption">{t("sb.no_match")}</div>
           ) : (
             <div className="flex flex-col gap-0.5">
               {ordered.map((s) => (
@@ -219,7 +222,7 @@ export function Sidebar() {
 
         {/* foot */}
         <div className="flex flex-none items-center gap-0.5 border-t-[0.5px] border-hairline px-3 py-2">
-          <Hint label="toggle theme" keys={keyChips(keys.toggle_theme)} side="top">
+          <Hint label={t("sb.theme")} keys={keyChips(keys.toggle_theme)} side="top">
             <button
               onClick={toggleTheme}
               className="flex size-7 items-center justify-center rounded-[8px] text-tertiary transition-colors duration-100 hover:bg-accent hover:text-foreground"
@@ -227,7 +230,7 @@ export function Sidebar() {
               <Icon name={theme === "light" ? "moon" : "sun"} className="[&>svg]:size-4" />
             </button>
           </Hint>
-          <Hint label="settings" keys={keyChips(keys.open_settings)} side="top">
+          <Hint label={t("sb.settings")} keys={keyChips(keys.open_settings)} side="top">
             <button
               onClick={openSettings}
               className="flex size-7 items-center justify-center rounded-[8px] text-tertiary transition-colors duration-100 hover:bg-accent hover:text-foreground"
@@ -249,31 +252,31 @@ export function Sidebar() {
           collapsed ? "rail-in opacity-100" : "pointer-events-none opacity-0"
         )}
       >
-        <button title="expand sidebar" onClick={toggleSidebar} className="mb-3 flex size-9 items-center justify-center rounded-[10px] transition-colors duration-100 hover:bg-accent">
+        <button title={t("tb.show")} onClick={toggleSidebar} className="mb-3 flex size-9 items-center justify-center rounded-[10px] transition-colors duration-100 hover:bg-accent">
           <img src="/logo.png" alt="" draggable={false} className="h-6 w-6 rounded-[6px]" />
         </button>
-        <Hint label="new chat" keys={keyChips(keys.new_session)} side="right">
+        <Hint label={t("a.new_chat")} keys={keyChips(keys.new_session)} side="right">
           <button onClick={newChat} className="flex size-9 items-center justify-center rounded-[12px] text-foreground transition-colors duration-100 hover:bg-accent">
             <Icon name="plus" className="[&>svg]:size-4.5" />
           </button>
         </Hint>
         <div className="mt-3 flex flex-col items-center gap-1.5">
-          {TOOLS.map((t) => (
+          {TOOLS.map((tool) => (
             <button
-              key={t.id}
-              title={t.label}
-              onClick={() => setView(t.id)}
+              key={tool.id}
+              title={t(tool.label)}
+              onClick={() => setView(tool.id)}
               className={cn(
                 "flex size-9 items-center justify-center rounded-[12px] transition-colors duration-100",
-                view === t.id ? "bg-accent text-foreground" : "text-tertiary hover:bg-accent/60 hover:text-foreground"
+                view === tool.id ? "bg-accent text-foreground" : "text-tertiary hover:bg-accent/60 hover:text-foreground"
               )}
             >
-              <Icon name={t.icon} className="[&>svg]:size-4.5" />
+              <Icon name={tool.icon} className="[&>svg]:size-4.5" />
             </button>
           ))}
         </div>
         <span className="flex-1" />
-        <Hint label="toggle theme" keys={keyChips(keys.toggle_theme)} side="right">
+        <Hint label={t("sb.theme")} keys={keyChips(keys.toggle_theme)} side="right">
           <button
             onClick={toggleTheme}
             className="flex size-9 items-center justify-center rounded-[10px] text-tertiary transition-colors duration-100 hover:bg-accent hover:text-foreground"
@@ -281,7 +284,7 @@ export function Sidebar() {
             <Icon name={theme === "light" ? "moon" : "sun"} className="[&>svg]:size-4.5" />
           </button>
         </Hint>
-        <Hint label="settings" keys={keyChips(keys.open_settings)} side="right">
+        <Hint label={t("sb.settings")} keys={keyChips(keys.open_settings)} side="right">
           <button
             onClick={openSettings}
             className="mt-1 flex size-9 items-center justify-center rounded-[10px] text-tertiary transition-colors duration-100 hover:bg-accent hover:text-foreground"

@@ -5,6 +5,7 @@ import { Icon } from "@/lib/icons";
 import { Card, EmptyHint, PanelShell } from "@/features/panels/Panels";
 import { useStore } from "@/store/app";
 import { invoke } from "@/lib/tauri";
+import { tr, useT } from "@/lib/i18n";
 
 export function SkillsView() {
   const skills = useStore((s) => s.skills);
@@ -12,6 +13,7 @@ export function SkillsView() {
   const note = useStore((s) => s.note);
   const [url, setUrl] = useState("");
   const [busy, setBusy] = useState(false);
+  const t = useT();
 
   useEffect(() => {
     refreshSkills();
@@ -20,22 +22,22 @@ export function SkillsView() {
   return (
     <PanelShell
       icon="skill"
-      title="skills"
+      title={t("sb.skills")}
       sub={
         <>
-          any folder with SKILL.md (project <span className="font-mono text-primary">.hi-derola/skills/</span> or global{" "}
-          <span className="font-mono text-primary">~/.config/hi-derola/skills/</span>), recursive, model-agnostic, toggleable
+          {t("sk.sub")} <span className="font-mono text-primary">.hi-derola/skills/</span> {t("sk.sub2")}{" "}
+          <span className="font-mono text-primary">~/.config/hi-derola/skills/</span>, {t("sk.sub3")}
         </>
       }
       action={
         <Button size="sm" onClick={() => refreshSkills()}>
-          <Icon name="check" /> rescan
+          <Icon name="check" /> {t("sk.rescan")}
         </Button>
       }
     >
       <Card className="mb-3">
         <label className="flex items-center gap-2.5 text-[13px] text-muted-foreground">
-          git install
+          {t("sk.git_install")}
           <input
             value={url}
             onChange={(e) => setUrl(e.target.value)}
@@ -51,7 +53,7 @@ export function SkillsView() {
             onClick={async () => {
               if (!url.trim()) return;
               setBusy(true);
-              note("cloning…");
+              note(tr("sk.cloning"));
               try {
                 const msg = await invoke<string>("skills_install", { url: url.trim() });
                 setUrl("");
@@ -64,13 +66,13 @@ export function SkillsView() {
               }
             }}
           >
-            <Icon name="download" /> clone &amp; register
+            <Icon name="download" /> {t("sk.clone")}
           </Button>
-          <span className="text-[11.5px] text-muted-foreground">a shallow clone into the global skills dir; every SKILL.md inside is discovered</span>
+          <span className="text-[11.5px] text-muted-foreground">{t("sk.clone_hint")}</span>
         </div>
       </Card>
       {skills.list.length === 0 ? (
-        <EmptyHint>no skills found: clone a collection above, or drop a folder with SKILL.md into .hi-derola/skills/</EmptyHint>
+        <EmptyHint>{t("sk.empty")}</EmptyHint>
       ) : (
         <div className="flex flex-col gap-2.5">
           {skills.list.map((sk) => (

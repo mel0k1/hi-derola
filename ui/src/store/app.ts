@@ -21,6 +21,7 @@ import type {
 import { effectiveKeys, KEY_ACTIONS, type EffKeys } from "./keysStore";
 import { comboFromEvent, parseCombo, sameCombo } from "@/lib/keys";
 import { md } from "@/lib/md";
+import { tr, setLang as applyLang, getLang, type Lang } from "@/lib/i18n";
 
 export type ChatItem =
   | { kind: "user"; id: number; text: string }
@@ -139,6 +140,8 @@ interface Store {
   sid: string;
   sessions: SessionMeta[];
   theme: string;
+  // dsh locale: ui language (system resolves through navigator.language)
+  lang: Lang;
   plan: boolean;
   waiting: boolean;
   // composer button state machine: idle -> sending (spinner) -> running (stop)
@@ -192,6 +195,7 @@ interface Store {
   toasts: { id: number; text: string }[];
   toast: (s: string) => void;
   setTheme: (t: string, persist: boolean) => void;
+  setLang: (l: Lang) => void;
   toggleTheme: () => void;
   togglePlan: () => void;
   toggleSidebar: () => void;
@@ -371,6 +375,7 @@ export const useStore = create<Store>((set, get) => ({
   sid: "",
   sessions: [],
   theme: "dark",
+  lang: getLang(),
   plan: false,
   waiting: false,
   phase: "idle",
@@ -426,6 +431,10 @@ export const useStore = create<Store>((set, get) => ({
     document.documentElement.style.setProperty("--chat-font", v + "px");
     set({ chatFont: v });
   },
+  setLang: (l) => {
+    applyLang(l);
+    set({ lang: l });
+  },
   toasts: [],
   toast: (s) => {
     const id = nextId();
@@ -456,7 +465,7 @@ export const useStore = create<Store>((set, get) => ({
     const plan = !get().plan;
     set({ plan });
     invoke("set_plan", { on: plan }).catch(() => {});
-    get().note(plan ? "plan mode on: read-only research" : "plan mode off");
+    get().note(plan ? tr("in.plan_on") : tr("in.plan_off"));
   },
   toggleSidebar: () =>
     set((st) => {
@@ -503,7 +512,7 @@ export const useStore = create<Store>((set, get) => ({
       scrollJump: get().scrollJump + 1,
     });
     if ((st.queue || []).length) {
-      get().note(`${(st.queue || []).length} queued message(s) restored from the previous run; they will steer the next run`);
+      get().note(tr("ch.queue_restored", { n: (st.queue || []).length }));
     }
     get().refreshSessions();
   },
@@ -524,7 +533,7 @@ export const useStore = create<Store>((set, get) => ({
     try {
       const st = await invoke<OpenSession>("fork_session", { uptoUser: userIndex });
       get().applyOpen(st);
-      get().note("forked — this chat continues in a new session");
+      get().note(tr("ch.forked_note"));
     } catch (e) {
       get().note(String(e));
     }

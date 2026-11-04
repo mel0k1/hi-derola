@@ -21,15 +21,17 @@ import { invoke, listenRaw } from "@/lib/tauri";
 import { ContextMenuHost } from "@/lib/menu";
 import { LightboxHost } from "@/lib/lightbox";
 import { Icon } from "@/lib/icons";
+import { tr, useT } from "@/lib/i18n";
 
 function DropOverlay({ show }: { show: boolean }) {
+  const t = useT();
   if (!show) return null;
   return (
     <div className="pointer-events-none fixed inset-0 z-[70] flex items-center justify-center bg-background/60 backdrop-blur-[2px]">
       <div className="msg-in flex flex-col items-center gap-3 rounded-[24px] border-2 border-dashed border-info/50 bg-card/95 px-10 py-8 shadow-panel">
         <Icon name="download" className="text-info [&>svg]:size-8" />
-        <div className="text-[15px] font-medium">drop files or folders to attach</div>
-        <div className="text-[12px] text-caption">they will be added to your next message</div>
+        <div className="text-[15px] font-medium">{t("app.drop_files")}</div>
+        <div className="text-[12px] text-caption">{t("app.drop_hint")}</div>
       </div>
     </div>
   );
@@ -48,7 +50,7 @@ function stopSequence(event: KeyboardEvent, st: ReturnType<typeof useStore.getSt
     return false; // caller stops the run
   }
   lastStopPress = now;
-  st.toast("press the stop shortcut again to cancel");
+  st.toast(tr("app.stop_again"));
   return true;
 }
 
@@ -58,6 +60,7 @@ export default function App() {
   const sessions = useStore((s) => s.sessions);
   const sid = useStore((s) => s.sid);
   const [dragOver, setDragOver] = useState(false);
+  const lang = useStore((s) => s.lang);
 
   useEffect(() => {
     init();
@@ -65,9 +68,9 @@ export default function App() {
 
   // dsh DocumentTitle: the active session title mirrors into the window title
   useEffect(() => {
-    const t = view === "chat" ? sessions.find((x) => x.id === sid)?.title || "" : view === "sandbox" ? "Sandbox" : view === "hosts" ? "Remote hosts" : view === "skills" ? "Skills" : "Crew";
-    document.title = t && t !== "new chat" ? `${t} — Hi!Derola` : "Hi!Derola";
-  }, [view, sessions, sid]);
+    const name = view === "chat" ? sessions.find((x) => x.id === sid)?.title || "" : view === "sandbox" ? tr("sx.title") : view === "hosts" ? tr("sb.hosts") : view === "skills" ? tr("sb.skills") : tr("sb.crew");
+    document.title = name && name !== tr("a.new_chat") ? `${name} — Hi!Derola` : "Hi!Derola";
+  }, [view, sessions, sid, lang]);
 
   // native drag & drop: tauri webview events carry real file paths
   useEffect(() => {
@@ -96,7 +99,7 @@ export default function App() {
       const st = useStore.getState();
       void (async () => {
         for (const x of paths) await st.attachPath(x);
-        st.toast(`attached ${paths.length} item(s)`);
+        st.toast(tr("app.attached_n", { n: paths.length }));
       })();
     });
     return () => unsubs.forEach((u) => u());
@@ -256,13 +259,14 @@ function QuitDialog() {
   const quitAsk = useStore((s) => s.quitAsk);
   const quitHide = useStore((s) => s.quitHide);
   const quitNow = useStore((s) => s.quitNow);
+  const t = useT();
   return (
     <AlertDialog open={quitAsk}>
       <AlertDialogContent className="max-w-sm gap-3 rounded-[20px] p-5">
         <AlertDialogHeader className="gap-1.5">
-          <AlertDialogTitle className="text-[15px]">agent is still running</AlertDialogTitle>
+          <AlertDialogTitle className="text-[15px]">{t("app.still_running")}</AlertDialogTitle>
           <AlertDialogDescription className="text-[13px]">
-            quitting now interrupts the current task and its queued messages.
+            {t("app.quit_warn")}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter className="gap-2">
@@ -270,19 +274,19 @@ function QuitDialog() {
             onClick={() => useStore.setState({ quitAsk: false })}
             className="h-8 rounded-[10px] text-[12.5px]"
           >
-            stay
+            {t("app.stay")}
           </AlertDialogCancel>
           <button
             onClick={quitHide}
             className="h-8 rounded-[10px] bg-secondary px-3 text-[12.5px] font-medium text-foreground transition-colors duration-100 hover:bg-muted"
           >
-            hide to tray
+            {t("app.hide_tray")}
           </button>
           <AlertDialogAction
             onClick={quitNow}
             className="h-8 rounded-[10px] bg-destructive text-[12.5px] text-white hover:bg-destructive/90"
           >
-            quit
+            {t("app.quit")}
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

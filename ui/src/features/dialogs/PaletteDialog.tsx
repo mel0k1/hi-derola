@@ -3,6 +3,7 @@ import { Icon } from "@/lib/icons";
 import { fmtRel } from "@/lib/utils";
 import { useStore } from "@/store/app";
 import { cn } from "@/lib/utils";
+import { useT } from "@/lib/i18n";
 import { useEffect, useRef } from "react";
 
 interface PaletteItem {
@@ -12,20 +13,21 @@ interface PaletteItem {
   run: () => void;
 }
 
+// label/hint are i18n keys
 const CMDS: [string, string, string][] = [
-  ["/help", "show help", "commands help"],
-  ["/new", "new chat", "clear session"],
-  ["/compact", "compact context", "summarize shrink tokens"],
-  ["/plan", "toggle plan mode", "read-only research"],
-  ["/undo", "undo file changes", "revert"],
-  ["/redo", "redo file changes", "reapply"],
-  ["/init", "write AGENTS.md", "init project"],
-  ["/export", "export session to markdown", "save transcript"],
-  ["/models", "list provider models", "fetch"],
-  ["/mcpres", "list mcp resources", "resources templates"],
-  ["/mcpstatus", "per-server mcp status", "connected failed auth"],
-  ["/mcplog", "recent mcp log messages", "logs diagnostics"],
-  ["/jstools", "user JS tools", "list reload sandbox"],
+  ["/help", "pl.help", "pl.help_h"],
+  ["/new", "a.new_chat", "pl.new_h"],
+  ["/compact", "pl.compact", "pl.compact_h"],
+  ["/plan", "pl.plan", "pl.plan_h"],
+  ["/undo", "pl.undo", "pl.undo_h"],
+  ["/redo", "pl.redo", "pl.redo_h"],
+  ["/init", "pl.init", "pl.init_h"],
+  ["/export", "pl.export", "pl.export_h"],
+  ["/models", "pl.models", "pl.models_h"],
+  ["/mcpres", "pl.mcpres", "pl.mcpres_h"],
+  ["/mcpstatus", "pl.mcpstatus", "pl.mcpstatus_h"],
+  ["/mcplog", "pl.mcplog", "pl.mcplog_h"],
+  ["/jstools", "pl.jstools", "pl.jstools_h"],
 ];
 
 export function PaletteDialog() {
@@ -37,28 +39,29 @@ export function PaletteDialog() {
   const runCmd = useStore((s) => s.runCmd);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
+  const t = useT();
 
   const items: PaletteItem[] = [];
   for (const [cmd, label, hint] of CMDS) {
-    items.push({ icon: "command", label, hint, run: () => runCmd(cmd) });
+    items.push({ icon: "command", label: t(label), hint: t(hint), run: () => runCmd(cmd) });
   }
-  items.push({ icon: "sun", label: "toggle theme", hint: "dark / light", run: () => useStore.getState().toggleTheme() });
-  items.push({ icon: "box", label: "open sandbox", hint: "local VMs, isolated agent workspace", run: () => useStore.getState().setView("sandbox") });
-  items.push({ icon: "sliders", label: "open settings", hint: "provider, hotkeys, mcp, permissions", run: () => useStore.setState({ settingsOpen: true }) });
-  items.push({ icon: "command", label: "keyboard shortcuts", hint: "quick reference", run: () => useStore.setState({ hotkeysOpen: true }) });
-  items.push({ icon: "diff", label: "review session changes", hint: "changed files and diffs", run: () => useStore.getState().openReview() });
-  items.push({ icon: "menu", label: "toggle sidebar", hint: "history panel", run: () => useStore.getState().toggleSidebar() });
+  items.push({ icon: "sun", label: t("sb.theme"), hint: "dark / light", run: () => useStore.getState().toggleTheme() });
+  items.push({ icon: "box", label: t("pl.sandbox"), hint: t("pl.sandbox_h"), run: () => useStore.getState().setView("sandbox") });
+  items.push({ icon: "sliders", label: t("sb.settings"), hint: t("pl.settings_h"), run: () => useStore.setState({ settingsOpen: true }) });
+  items.push({ icon: "command", label: t("hk.title"), hint: t("pl.ref_h"), run: () => useStore.setState({ hotkeysOpen: true }) });
+  items.push({ icon: "diff", label: t("pl.review"), hint: t("pl.review_h"), run: () => useStore.getState().openReview() });
+  items.push({ icon: "menu", label: t("tb.hide"), hint: t("pl.sidebar_h"), run: () => useStore.getState().toggleSidebar() });
   for (const s of sessions.slice(0, 15)) {
     items.push({
       icon: "spark",
-      label: s.title || "new chat",
-      hint: `${s.count} msgs · ${fmtRel(s.updated)}`,
+      label: s.title || t("a.new_chat"),
+      hint: `${s.count} ${t("a.msgs")} · ${fmtRel(s.updated)}`,
       run: () => openSession(s.id),
     });
   }
   for (const m of models) {
     if (m === model) continue;
-    items.push({ icon: "file", label: "model: " + m, hint: "switch model", run: () => runCmd("/model " + m) });
+    items.push({ icon: "file", label: "model: " + m, hint: t("mm.switch"), run: () => runCmd("/model " + m) });
   }
 
   const query = palette.query.trim().toLowerCase();
@@ -103,7 +106,7 @@ export function PaletteDialog() {
         <input
           ref={inputRef}
           value={palette.query}
-          placeholder="type a command, session or model..."
+          placeholder={t("pl.placeholder")}
           spellCheck={false}
           className="w-full border-b border-border bg-transparent px-4.5 py-3.5 text-[14px] outline-none placeholder:text-muted-foreground"
           onChange={(e) => useStore.setState((s) => ({ palette: { ...s.palette, query: e.target.value, idx: 0 } }))}
@@ -122,7 +125,7 @@ export function PaletteDialog() {
         />
         <div ref={listRef} className="max-h-[46vh] overflow-y-auto p-1.5">
           {!filtered.length ? (
-            <div className="p-3 text-[12.5px] text-muted-foreground">nothing matches</div>
+            <div className="p-3 text-[12.5px] text-muted-foreground">{t("pl.no_results")}</div>
           ) : (
             filtered.map((it, i) => (
               <div
@@ -147,7 +150,7 @@ export function PaletteDialog() {
             ))
           )}
         </div>
-        <div className="border-t border-border px-4 py-2 text-[11px] text-muted-foreground">up/down navigate · enter run · esc close</div>
+        <div className="border-t border-border px-4 py-2 text-[11px] text-muted-foreground">{t("pl.nav_hint")}</div>
       </DialogContent>
     </Dialog>
   );

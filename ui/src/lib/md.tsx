@@ -6,6 +6,7 @@ import { openContextMenu } from "@/lib/menu";
 import { openLightbox } from "@/lib/lightbox";
 import { KEYBLOCK_RE, esc, maskedFor, maskSegments } from "@/lib/secrets";
 import { iconSvg } from "@/lib/icons";
+import { tr } from "@/lib/i18n";
 import katex from "katex";
 import "katex/dist/katex.min.css";
 
@@ -72,7 +73,7 @@ function secretBlock(m: string): string {
   return (
     `<span class="md-secret" data-raw="${m}" data-masked="${masked}" data-masked-html="${esc(stars)}">` +
     `<span class="md-secret-value">${stars}</span>` +
-    `<button type="button" class="md-eye" aria-pressed="false" aria-label="reveal value" title="reveal value">` +
+    `<button type="button" class="md-eye" aria-pressed="false" aria-label="${esc(tr("md.reveal"))}" title="${esc(tr("md.reveal"))}">` +
     `<span class="md-eye-i md-eye-reveal">${EYE_SVG}</span>` +
     `<span class="md-eye-i md-eye-hide">${EYE_OFF_SVG}</span>` +
     `</button></span>`
@@ -508,13 +509,13 @@ export function mdContextMenu(e: React.MouseEvent<HTMLElement>) {
     const src = imgTile.getAttribute("data-src") || "";
     if (!/^https?:/.test(src)) return;
     openContextMenu(e, [
-      { id: "open-img", label: "Open Image", icon: "globe", onSelect: () => invoke("open_url", { url: src }).catch(() => {}) },
+      { id: "open-img", label: tr("md.open_img"), icon: "globe", onSelect: () => invoke("open_url", { url: src }).catch(() => {}) },
       {
         id: "copy-img",
-        label: "Copy Image Address",
+        label: tr("md.copy_img"),
         icon: "link",
         onSelect: () => {
-          void copyText(src).then((ok) => ok && useStore.getState().toast("copied"));
+          void copyText(src).then((ok) => ok && useStore.getState().toast("a.copied"));
         },
       },
     ]);
@@ -525,13 +526,13 @@ export function mdContextMenu(e: React.MouseEvent<HTMLElement>) {
   const href = anchor.getAttribute("href") || "";
   if (!/^https?:/.test(href)) return;
   openContextMenu(e, [
-    { id: "open", label: "Open Link", icon: "globe", onSelect: () => invoke("open_url", { url: href }).catch(() => {}) },
+    { id: "open", label: tr("md.open_link"), icon: "globe", onSelect: () => invoke("open_url", { url: href }).catch(() => {}) },
     {
       id: "copy",
-      label: "Copy Link",
+      label: tr("md.copy_link"),
       icon: "link",
       onSelect: () => {
-        void copyText(href).then((ok) => ok && useStore.getState().toast("copied"));
+        void copyText(href).then((ok) => ok && useStore.getState().toast("a.copied"));
       },
     },
   ]);

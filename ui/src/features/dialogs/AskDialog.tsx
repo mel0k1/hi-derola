@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useStore } from "@/store/app";
 import { cn } from "@/lib/utils";
+import { useT } from "@/lib/i18n";
 import { useEffect, useRef } from "react";
 
 export function AskDialog() {
@@ -10,6 +11,7 @@ export function AskDialog() {
   const submitAsk = useStore((s) => s.submitAsk);
   const skipAsk = useStore((s) => s.skipAsk);
   const firstCtl = useRef<HTMLDivElement>(null);
+  const t = useT();
 
   useEffect(() => {
     if (ask?.open) {
@@ -102,7 +104,7 @@ export function AskDialog() {
     <Dialog open={ask.open}>
       <DialogContent className="max-h-[85vh] w-[min(680px,92vw)] overflow-y-auto" showCloseButton={false} onEscapeKeyDown={(e) => { e.preventDefault(); skipAsk(); }}>
         <DialogHeader>
-          <DialogTitle className="text-primary">agent asks</DialogTitle>
+          <DialogTitle className="text-primary">{t("ak.title")}</DialogTitle>
         </DialogHeader>
         <div ref={firstCtl} className="flex flex-col gap-5">
           {ask.qs.map((q, i) => {
@@ -134,7 +136,7 @@ export function AskDialog() {
                               defaultValue={def.default !== undefined ? String(def.enum.indexOf(def.default)) : ""}
                               onChange={(e) => setVal(i, name, e.target.value === "" ? "" : def.enum![Number(e.target.value)])}
                             >
-                              <option value="">{req ? "(pick)" : "(none)"}</option>
+                              <option value="">{req ? t("ak.pick") : t("ak.none_opt")}</option>
                               {def.enum.map((v, k) => {
                                 const nm = Array.isArray(def.enumNames) ? def.enumNames[k] : undefined;
                                 return (
@@ -184,7 +186,7 @@ export function AskDialog() {
                             <input
                               type="text"
                               maxLength={def.maxLength}
-                              placeholder={def.format || "value"}
+                              placeholder={def.format || t("ak.value")}
                               defaultValue={def.default !== undefined ? String(def.default) : ""}
                               spellCheck={false}
                               className="h-9 rounded-lg border border-input bg-background px-2.5 text-[13px] outline-none focus:border-ring"
@@ -223,7 +225,7 @@ export function AskDialog() {
                       })}
                     </div>
                     <input
-                      placeholder="type your own answer"
+                      placeholder={t("ak.own_answer")}
                       spellCheck={false}
                       className="h-9 rounded-lg border border-input bg-background px-2.5 text-[13px] outline-none focus:border-ring"
                       onInput={(e) => setCustom(i, e.currentTarget.value)}
@@ -242,10 +244,10 @@ export function AskDialog() {
         </div>
         <DialogFooter className="gap-2">
           <Button variant="ghost" size="sm" onClick={skipAsk}>
-            skip <kbd className="font-mono text-[10px] text-muted-foreground">esc</kbd>
+            {t("ak.skip")} <kbd className="font-mono text-[10px] text-muted-foreground">esc</kbd>
           </Button>
           <Button size="sm" onClick={() => submitAsk(compose())}>
-            answer <kbd className="font-mono text-[10px] opacity-70">enter</kbd>
+            {t("ak.answer")} <kbd className="font-mono text-[10px] opacity-70">enter</kbd>
           </Button>
         </DialogFooter>
       </DialogContent>

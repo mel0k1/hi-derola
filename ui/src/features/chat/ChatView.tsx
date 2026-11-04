@@ -7,13 +7,14 @@ import { openContextMenu, type MenuItem } from "@/lib/menu";
 import { invoke } from "@/lib/tauri";
 import { useStore, type ChatItem } from "@/store/app";
 import { cn, copyText } from "@/lib/utils";
+import { useT } from "@/lib/i18n";
 import { InputBar } from "@/features/chat/InputBar";
 
 const SUGGESTIONS = [
-  { label: "explain this codebase", prompt: "explain this codebase: what it does and how it is structured" },
-  { label: "find and fix a bug", prompt: "find a bug in this project and fix it" },
-  { label: "write tests for the core", prompt: "write tests for the core module" },
-  { label: "show commands", prompt: "/help" },
+  { label: "ch.explain", prompt: "ch.explain_p" },
+  { label: "ch.fix_bug", prompt: "ch.fix_bug_p" },
+  { label: "ch.write_tests", prompt: "ch.write_tests_p" },
+  { label: "ch.show_cmds", prompt: "/help" },
 ];
 
 // dsh tool row: per-family glyph, tool name as the title
@@ -117,6 +118,7 @@ function ToolRow({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
 
 function Welcome() {
   const doSend = useStore((s) => s.doSend);
+  const t = useT();
   return (
     <div className="flex flex-1 flex-col items-center justify-center px-5 pb-10 text-center">
       <div className="msg-in" style={{ animationDelay: "0s" }}>
@@ -128,7 +130,7 @@ function Welcome() {
         Hi!Derola
       </div>
       <div className="msg-in mt-1 text-[13.5px] text-tertiary" style={{ animationDelay: "0.12s" }}>
-        a fast coding assistant in pure rust
+        {t("ch.tagline")}
       </div>
       <div className="mt-7 flex flex-wrap items-center justify-center gap-2">
         {SUGGESTIONS.map((s, i) => (
@@ -136,14 +138,14 @@ function Welcome() {
             key={s.label}
             className="msg-in h-8 rounded-full border-[0.5px] border-border px-3.5 text-[13px] text-muted-foreground transition-colors duration-100 hover:bg-accent hover:text-foreground active:scale-[0.97]"
             style={{ animationDelay: `${0.18 + i * 0.05}s` }}
-            onClick={() => doSend(s.prompt)}
+            onClick={() => doSend(t(s.prompt))}
           >
-            {s.label}
+            {t(s.label)}
           </button>
         ))}
       </div>
       <div className="msg-in mt-8 flex flex-wrap items-center justify-center gap-1.5 text-[12px] text-caption" style={{ animationDelay: "0.42s" }}>
-        ask anything · attach files with <Icon name="paperclip" className="text-tertiary" /> · /help for commands
+        {t("ch.hint_line")} <Icon name="paperclip" className="text-tertiary" /> {t("ch.hint_line2")}
       </div>
     </div>
   );
@@ -151,10 +153,11 @@ function Welcome() {
 
 function ToolOut({ item }: { item: Extract<ChatItem, { kind: "toolout" }> }) {
   const [open, setOpen] = useState(false);
+  const t = useT();
   return (
     <pre
       onClick={() => setOpen(!open)}
-      title={open ? "click to collapse" : "click to expand"}
+      title={open ? t("ch.collapse") : t("ch.expand")}
       className={cn(
         "msg-in my-1 ml-2 cursor-pointer overflow-y-auto overflow-x-hidden rounded-[12px] border-[0.5px] border-hairline bg-code px-3 py-1.5 font-mono text-[11px] leading-[19px] break-words whitespace-pre-wrap text-tertiary transition-colors duration-100 hover:text-muted-foreground",
         open ? "max-h-80" : "max-h-9"
@@ -167,6 +170,7 @@ function ToolOut({ item }: { item: Extract<ChatItem, { kind: "toolout" }> }) {
 
 function ThinkBox({ item }: { item: Extract<ChatItem, { kind: "think" }> }) {
   const [open, setOpen] = useState(item.open);
+  const t = useT();
   useEffect(() => setOpen(item.open), [item.open]);
   return (
     <div className="msg-in my-1">
@@ -175,7 +179,7 @@ function ThinkBox({ item }: { item: Extract<ChatItem, { kind: "think" }> }) {
         className="-mx-2 flex h-7 items-center gap-2 rounded-[10px] px-2 text-left transition-colors duration-100 hover:bg-accent"
       >
         <Icon name="chevron" className={cn("flex-none text-caption transition-transform duration-100 [&>svg]:size-3.5", open ? "rotate-180" : "-rotate-90")} />
-        <span className={cn("text-[13px]", item.streaming ? "shimmer-text font-medium" : "text-tertiary")}>thinking</span>
+        <span className={cn("text-[13px]", item.streaming ? "shimmer-text font-medium" : "text-tertiary")}>{t("ch.thinking")}</span>
         {item.streaming && <span className="pulse-dot size-1.5 flex-none rounded-full bg-info" />}
       </button>
       {open && (
@@ -189,6 +193,7 @@ function ThinkBox({ item }: { item: Extract<ChatItem, { kind: "think" }> }) {
 
 function BgTask({ item }: { item: Extract<ChatItem, { kind: "bg" }> }) {
   const preRef = useRef<HTMLPreElement>(null);
+  const t = useT();
   useEffect(() => {
     if (preRef.current) preRef.current.scrollTop = preRef.current.scrollHeight;
   }, [item.output]);
@@ -196,13 +201,13 @@ function BgTask({ item }: { item: Extract<ChatItem, { kind: "bg" }> }) {
     <div className="msg-in my-2">
       <div className="-mx-2 flex h-7 items-center gap-2 px-2">
         <span className={cn("size-1.5 flex-none rounded-full", item.ended ? "bg-caption/70" : "pulse-dot bg-info")} />
-        <span className={cn("font-mono text-[11.5px] font-semibold tracking-wide", item.ended ? "text-caption" : "text-info")}>{item.bgId} output</span>
+        <span className={cn("font-mono text-[11.5px] font-semibold tracking-wide", item.ended ? "text-caption" : "text-info")}>{item.bgId} {t("ch.output")}</span>
         {!item.ended && (
           <button
             className="h-5 rounded-[8px] border-[0.5px] border-destructive/40 px-2 font-mono text-[10px] font-semibold text-destructive transition-colors duration-100 hover:bg-destructive/10"
             onClick={() => invoke("task_kill", { id: item.bgId }).catch(() => {})}
           >
-            kill
+            {t("ch.kill")}
           </button>
         )}
       </div>
@@ -233,10 +238,11 @@ function MsgActions({ side, children }: { side: "left" | "right"; children: Reac
 
 function CopyBtn({ getText, side }: { getText: () => string; side: "left" | "right" }) {
   const [copied, setCopied] = useState(false);
+  const t = useT();
   return (
-    <Hint label={copied ? "copied" : "copy"} side={side}>
+    <Hint label={copied ? t("a.copied") : t("a.copy")} side={side}>
       <button
-        aria-label="copy message"
+        aria-label={t("ch.copy_msg")}
         onClick={() => {
           void copyText(getText()).then((ok) => {
             if (!ok) return;
@@ -254,32 +260,32 @@ function CopyBtn({ getText, side }: { getText: () => string; side: "left" | "rig
 
 // dsh url/message menu: copy selection when present, else the whole message;
 // user bubbles also carry the chat-fork entry
-function msgMenu(e: React.MouseEvent, text: string, fork?: () => void) {
+function msgMenuTr(e: React.MouseEvent, text: string, fork: (() => void) | undefined, tr: (k: string) => string) {
   const sel = window.getSelection()?.toString() || "";
   const items: MenuItem[] = [];
   if (sel.trim()) {
     items.push({
       id: "sel",
-      label: "Copy Selection",
+      label: tr("ch.copy_sel"),
       icon: "copy",
       onSelect: () => {
-        void copyText(sel).then((ok) => ok && useStore.getState().toast("copied"));
+        void copyText(sel).then((ok) => ok && useStore.getState().toast("a.copied"));
       },
     });
   }
   items.push({
     id: "msg",
-    label: "Copy Message",
+    label: tr("ch.copy_msg"),
     icon: "copy",
     sep: !!sel.trim(),
     onSelect: () => {
-      void copyText(text).then((ok) => ok && useStore.getState().toast("copied"));
+      void copyText(text).then((ok) => ok && useStore.getState().toast("a.copied"));
     },
   });
   if (fork) {
     items.push({
       id: "fork",
-      label: "Fork from Here",
+      label: tr("ch.fork_here"),
       icon: "branch",
       sep: true,
       onSelect: fork,
@@ -290,9 +296,10 @@ function msgMenu(e: React.MouseEvent, text: string, fork?: () => void) {
 
 function UserItem({ item, userIndex, canFork }: { item: Extract<ChatItem, { kind: "user" }>; userIndex: number; canFork: boolean }) {
   const forkFrom = useStore((s) => s.forkFrom);
+  const t = useT();
   const fork = () => void forkFrom(userIndex);
   return (
-    <div className="group/msg relative my-3 flex flex-col items-end" onContextMenu={(e) => msgMenu(e, item.text, canFork ? fork : undefined)}>
+    <div className="group/msg relative my-3 flex flex-col items-end" onContextMenu={(e) => msgMenuTr(e, item.text, canFork ? fork : undefined, t)}>
       <div
         className="msg-in max-w-[85%] rounded-[20px] bg-bubble px-4 py-2.5 leading-[1.57] whitespace-pre-wrap break-words text-foreground"
         onClick={mdClickHandler}
@@ -300,9 +307,9 @@ function UserItem({ item, userIndex, canFork }: { item: Extract<ChatItem, { kind
       />
       <MsgActions side="right">
         {canFork && (
-          <Hint label="fork from here" side="left">
+          <Hint label={t("ch.fork_here")} side="left">
             <button
-              aria-label="fork chat from this message"
+              aria-label={t("ch.fork_aria")}
               onClick={fork}
               className="rounded-[7px] p-1 text-caption transition-colors duration-100 hover:bg-accent hover:text-foreground"
             >
@@ -318,17 +325,18 @@ function UserItem({ item, userIndex, canFork }: { item: Extract<ChatItem, { kind
 
 function BotItem({ item, canRetry }: { item: Extract<ChatItem, { kind: "bot" }>; canRetry: boolean }) {
   const retryLast = useStore((s) => s.retryLast);
+  const t = useT();
   return (
-    <div className="group/msg relative my-3" onContextMenu={(e) => msgMenu(e, item.text)}>
+    <div className="group/msg relative my-3" onContextMenu={(e) => msgMenuTr(e, item.text, undefined, t)}>
       <div className="msg-in">
         <Md text={item.text} />
       </div>
       <MsgActions side="left">
         <CopyBtn getText={() => item.text} side="right" />
         {canRetry && (
-          <Hint label="regenerate" side="right">
+          <Hint label={t("ch.regenerate")} side="right">
             <button
-              aria-label="regenerate reply"
+              aria-label={t("ch.regenerate")}
               onClick={() => void retryLast()}
               className="rounded-[7px] p-1 text-caption transition-colors duration-100 hover:bg-accent hover:text-foreground"
             >
@@ -378,6 +386,7 @@ export function ChatView() {
   const autoscrollFlag = useStore((s) => s.autoscrollFlag);
   const scrollJump = useStore((s) => s.scrollJump);
   const phase = useStore((s) => s.phase);
+  const t = useT();
   const scrollRef = useRef<HTMLDivElement>(null);
   const [away, setAway] = useState(false);
   // dsh use-scroll-follow: refs keep the streaming ticks honest — while the
@@ -453,7 +462,7 @@ export function ChatView() {
       >
         <div className="relative mx-auto w-full max-w-[800px]">
           <div className={cn("absolute -top-11 right-0 transition-all duration-150 ease-[cubic-bezier(0.4,0,0.2,1)]", away ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-2 opacity-0")}>
-            <Hint label="jump to latest" side="top">
+            <Hint label={t("ch.jump_latest")} side="top">
               <button
                 onClick={() => {
                   const el = scrollRef.current;

@@ -4,6 +4,7 @@ import { Icon } from "@/lib/icons";
 import { Card, EmptyHint, HostCard, PanelShell } from "@/features/panels/Panels";
 import { useStore } from "@/store/app";
 import { invoke } from "@/lib/tauri";
+import { tr, useT } from "@/lib/i18n";
 
 export function HostsView() {
   const hosts = useStore((s) => s.hosts);
@@ -14,6 +15,7 @@ export function HostsView() {
   const [user, setUser] = useState("");
   const [host, setHost] = useState("");
   const [port, setPort] = useState("22");
+  const t = useT();
 
   useEffect(() => {
     refreshHosts();
@@ -30,7 +32,7 @@ export function HostsView() {
       setFormOpen(false);
       await refreshHosts();
       const key = await invoke<string>("host_pubkey", { id: st.id });
-      note(`host "${st.name}" saved: install this key on the host, then check:\n${key}`);
+      note(tr("hs.saved_key", { name: st.name, key }));
     } catch (e) {
       note(String(e));
     }
@@ -39,11 +41,11 @@ export function HostsView() {
   return (
     <PanelShell
       icon="server"
-      title="remote hosts"
-      sub="your servers over ssh: attach one and the agent works there (bash, files, undo/redo, background tasks)"
+      title={t("sb.hosts")}
+      sub={t("hs.sub")}
       action={
         <Button size="sm" onClick={() => setFormOpen(!formOpen)}>
-          <Icon name="plus" /> add host
+          <Icon name="plus" /> {t("hs.add")}
         </Button>
       }
     >
@@ -51,10 +53,10 @@ export function HostsView() {
         <Card className="mb-3">
           <div className="grid gap-2.5 sm:grid-cols-2">
             {[
-              { label: "name", value: name, set: setName, ph: "web-prod" },
-              { label: "user", value: user, set: setUser, ph: "root" },
-              { label: "host", value: host, set: setHost, ph: "203.0.113.10 or my.server.dev" },
-              { label: "port", value: port, set: setPort, ph: "22", num: true },
+              { label: t("st.m_name"), value: name, set: setName, ph: "web-prod" },
+              { label: t("hs.user"), value: user, set: setUser, ph: "root" },
+              { label: t("hs.host"), value: host, set: setHost, ph: "203.0.113.10 or my.server.dev" },
+              { label: t("hs.port"), value: port, set: setPort, ph: "22", num: true },
             ].map((f) => (
               <label key={f.label} className="flex items-center gap-2.5 text-[13px] text-muted-foreground">
                 {f.label}
@@ -73,17 +75,17 @@ export function HostsView() {
           </div>
           <div className="mt-3 flex items-center gap-2">
             <Button size="sm" onClick={save}>
-              save &amp; generate key
+              {t("hs.save_gen")}
             </Button>
             <Button variant="ghost" size="sm" onClick={() => setFormOpen(false)}>
-              cancel
+              {t("a.cancel")}
             </Button>
           </div>
-          <div className="mt-2 text-[11.5px] text-muted-foreground">a key pair is generated per host: add the shown public key to the host's authorized_keys, then run check</div>
+          <div className="mt-2 text-[11.5px] text-muted-foreground">{t("hs.key_hint")}</div>
         </Card>
       )}
       {hosts.list.length === 0 ? (
-        <EmptyHint>no remote hosts yet: add one and attach it to move the agent's bash and file tools to your server.</EmptyHint>
+        <EmptyHint>{t("hs.empty")}</EmptyHint>
       ) : (
         <div className="flex flex-col gap-2.5">
           {hosts.list.map((h) => (

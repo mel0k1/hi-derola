@@ -5,6 +5,7 @@ import { invoke } from "@/lib/tauri";
 import { useStore, type MentionItem, type TodoEntry } from "@/store/app";
 import { chipName, cn, copyText, fmtCost, fmtTokens } from "@/lib/utils";
 import { fileManagerLabel, openContextMenu } from "@/lib/menu";
+import { tr, useT } from "@/lib/i18n";
 import { ModelMenu } from "./ModelMenu";
 
 let mfilesCache: string[] | null = null;
@@ -12,39 +13,40 @@ let mentionSeq = 0;
 let magentsCache: MentionItem[] | null = null;
 
 // dsh claim ghost hints: while the draft is a bare slash command with blank
-// args, the expected arguments render after the caret in caption color
+// args, the expected arguments render after the caret in caption color;
+// values are i18n keys
 const SLASH_HINTS: Record<string, string> = {
-  "/file": "path — attach a file to the next message",
-  "/model": "name — switch model (bare = show current)",
-  "/models": "list models available for the api key",
-  "/profile": "name — switch provider profile (bare = list, none = base)",
-  "/plan": "toggle plan mode (read-only research)",
-  "/undo": "revert file changes of the last turn",
-  "/redo": "reapply undone changes",
-  "/init": "create or improve AGENTS.md for this project",
-  "/compact": "summarize and shrink the conversation context",
-  "/export": "path — save the session as markdown",
-  "/sessions": "list saved sessions",
-  "/resume": "id — switch to a saved session (latest by default)",
-  "/mcpauth": "name — mcp oauth: status, start a flow or paste a code",
-  "/mcpres": "server — list mcp resources and uri templates",
-  "/mcpstatus": "per-server status: connected/failed/needs auth",
-  "/mcpread": "server uri — read an mcp resource into the chat",
-  "/mcpadd": "name url|command — add a server and connect it",
-  "/mcpconnect": "name — (re)connect a configured server",
-  "/mcpdisconnect": "name — drop the live connection",
-  "/mcplog": "server — recent mcp log messages",
-  "/jstools": "list user js tools (.hi-derola/tools/)",
-  "/doctor": "environment self-check",
-  "/update": "check github releases and update the binary",
-  "/usage": "token/cost report for this session",
-  "/sandbox": "start|stop|attach|detach <id|name> · bare = list",
-  "/host": "add|check|attach|detach|del <name> · bare = list",
-  "/skills": "list · toggle <name> · install <git-url>",
-  "/crew": "new <goal> · add <name|role> · step · auto · stop",
-  "/clear": "start a new session",
-  "/quit": "exit",
-  "/help": "show commands and tools",
+  "/file": "cmd.file",
+  "/model": "cmd.model",
+  "/models": "cmd.models",
+  "/profile": "cmd.profile",
+  "/plan": "cmd.plan",
+  "/undo": "cmd.undo",
+  "/redo": "cmd.redo",
+  "/init": "cmd.init",
+  "/compact": "cmd.compact",
+  "/export": "cmd.export",
+  "/sessions": "cmd.sessions",
+  "/resume": "cmd.resume",
+  "/mcpauth": "cmd.mcpauth",
+  "/mcpres": "cmd.mcpres",
+  "/mcpstatus": "cmd.mcpstatus",
+  "/mcpread": "cmd.mcpread",
+  "/mcpadd": "cmd.mcpadd",
+  "/mcpconnect": "cmd.mcpconnect",
+  "/mcpdisconnect": "cmd.mcpdisconnect",
+  "/mcplog": "cmd.mcplog",
+  "/jstools": "cmd.jstools",
+  "/doctor": "cmd.doctor",
+  "/update": "cmd.update",
+  "/usage": "cmd.usage",
+  "/sandbox": "cmd.sandbox",
+  "/host": "cmd.host",
+  "/skills": "cmd.skills",
+  "/crew": "cmd.crew",
+  "/clear": "cmd.clear",
+  "/quit": "cmd.quit",
+  "/help": "cmd.help",
 };
 
 // dsh slash menu icons: a quiet glyph per command family
@@ -98,6 +100,7 @@ interface MentionState {
 function Chips() {
   const attachments = useStore((s) => s.attachments);
   const detachChip = useStore((s) => s.detachChip);
+  const t = useT();
   if (!attachments.length) return null;
   // dsh open-in-app file menu: reveal in the file manager, copy the path
   const chipMenu = (p: string, i: number) => [
@@ -109,15 +112,15 @@ function Chips() {
     },
     {
       id: "copy",
-      label: "Copy Path",
+      label: t("a.copy_path"),
       icon: "copy",
       onSelect: () => {
-        void copyText(p).then((ok) => ok && useStore.getState().toast("copied"));
+        void copyText(p).then((ok) => ok && useStore.getState().toast("a.copied"));
       },
     },
     {
       id: "remove",
-      label: "Remove",
+      label: t("a.remove"),
       icon: "x",
       sep: true,
       onSelect: () => detachChip(i),
@@ -136,7 +139,7 @@ function Chips() {
           <span className="truncate">{chipName(p)}</span>
           <button
             className="rounded-[6px] p-0.5 text-caption transition-colors duration-100 hover:text-foreground"
-            title="remove"
+            title={t("a.remove")}
             onClick={() => detachChip(i)}
           >
             <Icon name="x" className="[&>svg]:size-3" />
@@ -151,6 +154,7 @@ function PlusMenu() {
   const openFilesDlg = useStore((s) => s.openFiles);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const t = useT();
 
   useEffect(() => {
     if (!open) return;
@@ -168,12 +172,12 @@ function PlusMenu() {
       if (kind === "files") {
         const paths = await invoke<string[]>("pick_files");
         for (const p of paths) await st.attachPath(p);
-        if (paths.length) st.toast(`attached ${paths.length} file(s)`);
+        if (paths.length) st.toast(tr("app.attached_n", { n: paths.length }));
       } else {
         const p = await invoke<string | null>("pick_folder");
         if (p) {
           await st.attachPath(p);
-          st.toast("folder attached");
+          st.toast(tr("in.folder_attached"));
         }
       }
     } catch (e) {
@@ -186,7 +190,7 @@ function PlusMenu() {
 
   return (
     <div ref={ref} className="relative">
-      <Hint label="attach files or folders" side="top">
+      <Hint label={t("in.attach_hint")} side="top">
         <button
           aria-haspopup="menu"
           aria-expanded={open}
@@ -200,11 +204,11 @@ function PlusMenu() {
         <div className="absolute bottom-full left-0 z-50 mb-2 w-60 animate-in fade-in slide-in-from-bottom-1 rounded-[14px] border-[0.5px] border-hairline bg-glass p-1 shadow-panel backdrop-blur-[40px] backdrop-saturate-150 duration-150">
           <button className={item} onMouseDown={(e) => { e.preventDefault(); pick("files"); }}>
             <Icon name="file" className="flex-none text-tertiary" />
-            choose files…
+            {t("in.choose_files")}
           </button>
           <button className={item} onMouseDown={(e) => { e.preventDefault(); pick("folder"); }}>
             <Icon name="folder" className="flex-none text-tertiary" />
-            choose folder…
+            {t("in.choose_folder")}
           </button>
           <button
             className={item}
@@ -215,9 +219,9 @@ function PlusMenu() {
             }}
           >
             <Icon name="search" className="flex-none text-tertiary" />
-            browse project…
+            {t("in.browse")}
           </button>
-          <div className="mt-0.5 border-t-[0.5px] border-hairline px-2.5 pt-1.5 pb-1 text-[11px] text-caption">or drop files anywhere</div>
+          <div className="mt-0.5 border-t-[0.5px] border-hairline px-2.5 pt-1.5 pb-1 text-[11px] text-caption">{t("in.or_drop")}</div>
         </div>
       )}
     </div>
@@ -249,16 +253,17 @@ function TodoStateDot({ status }: { status: TodoEntry["status"] }) {
 function TodoPanel() {
   const todos = useStore((s) => s.todos);
   const [collapsed, setCollapsed] = useState(true);
+  const t = useT();
   if (!todos.length) return null;
   const done = todos.filter((t) => t.status === "completed").length;
   const active = todos.filter((t) => t.status === "in_progress").length;
   const dropped = todos.filter((t) => t.status === "cancelled").length;
   const pending = todos.length - done - active - dropped;
   const progress = [
-    ...done > 0 ? [`${done} done`] : [],
-    ...active > 0 ? [`${active} active`] : [],
-    ...pending > 0 ? [`${pending} pending`] : [],
-    ...dropped > 0 ? [`${dropped} dropped`] : [],
+    ...done > 0 ? [t("in.todo_done", { n: done })] : [],
+    ...active > 0 ? [t("in.todo_active", { n: active })] : [],
+    ...pending > 0 ? [t("in.todo_pending", { n: pending })] : [],
+    ...dropped > 0 ? [t("in.todo_dropped", { n: dropped })] : [],
   ].join("\u2002·\u2002");
   return (
     <section className="msg-in mx-2 mb-1 rounded-[12px] border-[0.5px] border-hairline bg-secondary/50" aria-label="todos">
@@ -269,7 +274,7 @@ function TodoPanel() {
         className="flex h-8 w-full items-center gap-2 rounded-[12px] px-2.5 text-left transition-colors duration-100 [@media(hover:hover)]:hover:bg-accent/60"
       >
         <Icon name="list" className="flex-none text-caption [&>svg]:size-3.5" />
-        <span className="flex-none text-[12.5px] font-medium text-foreground">todos</span>
+        <span className="flex-none text-[12.5px] font-medium text-foreground">{t("in.todos")}</span>
         <span className="min-w-0 flex-1 truncate text-[11.5px] text-tertiary">{progress}</span>
         <Icon
           name="chevron"
@@ -308,6 +313,7 @@ function QueueRow({ text, index }: { text: string; index: number }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(text);
   const taRef = useRef<HTMLTextAreaElement>(null);
+  const t = useT();
 
   useEffect(() => {
     if (!editing) return;
@@ -353,13 +359,13 @@ function QueueRow({ text, index }: { text: string; index: number }) {
             onClick={stopEdit}
             className="h-6 rounded-[8px] px-2 text-[11px] text-caption transition-colors duration-100 hover:bg-accent hover:text-foreground"
           >
-            cancel
+            {t("a.cancel")}
           </button>
           <button
             onClick={save}
             className="h-6 rounded-[8px] bg-info px-2.5 text-[11px] font-medium text-white transition-colors duration-100 hover:bg-info-hover active:scale-[0.97]"
           >
-            save
+            {t("a.save")}
           </button>
         </div>
       </div>
@@ -372,7 +378,7 @@ function QueueRow({ text, index }: { text: string; index: number }) {
       <span className="line-clamp-2 min-w-0 flex-1 text-[12.5px] leading-[19px] break-words text-muted-foreground">{text}</span>
       <div className="flex flex-none items-center gap-0.5 opacity-0 transition-opacity duration-100 group-focus-within/qrow:opacity-100 [@media(hover:hover)]:group-hover/qrow:opacity-100">
         {index > 0 && (
-          <Hint label="run next" side="left">
+          <Hint label={t("in.run_next")} side="left">
             <button
               onClick={() => void useStore.getState().queueMove(index, 0)}
               className="rounded-[7px] p-1 text-caption transition-colors duration-100 hover:bg-accent hover:text-foreground"
@@ -381,7 +387,7 @@ function QueueRow({ text, index }: { text: string; index: number }) {
             </button>
           </Hint>
         )}
-        <Hint label="edit" side="left">
+        <Hint label={t("in.edit")} side="left">
           <button
             onClick={() => setEditing(true)}
             className="rounded-[7px] p-1 text-caption transition-colors duration-100 hover:bg-accent hover:text-foreground"
@@ -389,7 +395,7 @@ function QueueRow({ text, index }: { text: string; index: number }) {
             <Icon name="pencil" className="[&>svg]:size-3.5" />
           </button>
         </Hint>
-        <Hint label="remove" side="left">
+        <Hint label={t("a.remove")} side="left">
           <button
             onClick={() => void useStore.getState().queueRemove(index)}
             className="rounded-[7px] p-1 text-caption transition-colors duration-100 hover:bg-accent hover:text-destructive"
@@ -406,6 +412,7 @@ function QueueDock() {
   const queue = useStore((s) => s.queue);
   const waiting = useStore((s) => s.waiting);
   const [open, setOpen] = useState(true);
+  const t = useT();
   if (!queue.length) return null;
   return (
     <div className="msg-in mb-1.5 overflow-hidden rounded-[18px] border-[0.5px] border-hairline bg-card/70 shadow-[0_1px_8px_rgba(0,0,0,0.03)]">
@@ -415,9 +422,9 @@ function QueueDock() {
         className="flex h-8 w-full items-center gap-2 px-3.5 text-left transition-colors duration-100 hover:bg-accent/40"
       >
         <Icon name="list" className="flex-none text-tertiary [&>svg]:size-3.5" />
-        <span className="text-[12px] font-medium text-foreground">queued</span>
+        <span className="text-[12px] font-medium text-foreground">{t("in.queue")}</span>
         <span className="rounded-full bg-secondary px-1.5 py-px font-mono text-[10px] font-semibold text-muted-foreground">{queue.length}</span>
-        <span className="min-w-0 flex-1 truncate text-[11px] text-caption">{waiting ? "runs after the current task" : ""}</span>
+        <span className="min-w-0 flex-1 truncate text-[11px] text-caption">{waiting ? t("in.runs_after") : ""}</span>
         <Icon name="chevron" className={cn("flex-none text-caption transition-transform duration-150 [&>svg]:size-3.5", open && "rotate-180")} />
       </button>
       {open && (
@@ -436,6 +443,7 @@ function QueueDock() {
 function RunClock() {
   const [t0] = useState(() => Date.now());
   const [, setTick] = useState(0);
+  const t = useT();
   useEffect(() => {
     const id = setInterval(() => setTick((n) => n + 1), 1000);
     return () => clearInterval(id);
@@ -447,7 +455,7 @@ function RunClock() {
   return (
     <span className="flex shrink-0 items-center gap-1.5">
       <span className="pulse-dot size-1.5 flex-none rounded-full bg-info" />
-      <span className="shimmer-text font-sans text-[12px] font-medium">working · {dur}</span>
+      <span className="shimmer-text font-sans text-[12px] font-medium">{t("in.working")} · {dur}</span>
     </span>
   );
 }
@@ -457,12 +465,13 @@ function Dock() {
   const tokens = useStore((s) => s.tokens);
   const ctx = useStore((s) => s.ctx);
   const runCmd = useStore((s) => s.runCmd);
+  const t = useT();
   const pct = ctx.limit > 0 && ctx.used > 0 ? Math.min(100, Math.round((ctx.used / ctx.limit) * 100)) : null;
 
   let stats = "";
   if (!waiting && (tokens.in || tokens.out)) {
-    stats = `${fmtTokens(tokens.in)} in · ${fmtTokens(tokens.out)} out`;
-    if (tokens.cached > 0) stats += ` (${fmtTokens(tokens.cached)} cached)`;
+    stats = `${fmtTokens(tokens.in)} ${t("in.tok_in")} · ${fmtTokens(tokens.out)} ${t("in.tok_out")}`;
+    if (tokens.cached > 0) stats += ` (${fmtTokens(tokens.cached)} ${t("in.tok_cached")})`;
     if (tokens.cost > 0) stats += " · " + fmtCost(tokens.cost);
   }
 
@@ -470,7 +479,7 @@ function Dock() {
     <div className="flex h-6 items-center gap-2 px-2.5 pt-0.5 font-mono text-[11px] text-caption">
       {pct !== null && (
         <button
-          title={`context: ${fmtTokens(ctx.used)} of ${fmtTokens(ctx.limit)} tokens · click to /compact`}
+          title={t("in.ctx_title", { used: fmtTokens(ctx.used), limit: fmtTokens(ctx.limit) })}
           onClick={() => runCmd("/compact")}
           className={cn(
             "rounded-full border-[0.5px] px-2 py-px font-mono text-[10.5px] font-semibold transition-colors duration-100",
@@ -481,7 +490,7 @@ function Dock() {
                 : "border-hairline text-caption hover:text-muted-foreground"
           )}
         >
-          {pct}% ctx
+          {pct}% {t("in.ctx")}
         </button>
       )}
       <span className="truncate">{stats}</span>
@@ -495,6 +504,8 @@ export function InputBar() {
   const doSend = useStore((s) => s.doSend);
   const phase = useStore((s) => s.phase);
   const keys = useStore((s) => s.keys);
+  useStore((s) => s.lang); // re-render on language switch
+  const t = useT();
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const slashRef = useRef<HTMLDivElement>(null);
   const [mention, setMention] = useState<MentionState | null>(null);
@@ -522,8 +533,8 @@ export function InputBar() {
     }
     // ghost hint once the token is complete and a space follows
     const m = v.match(/^\/([a-z0-9_-]*)[ \t]+$/i);
-    const hint = m ? SLASH_HINTS["/" + m[1].toLowerCase()] : undefined;
-    setGhost(m && hint ? { token: m[0], hint } : null);
+    const hint = m ? tr("cmd." + m[1].toLowerCase().replace("/", "")) : undefined;
+    setGhost(m && hint && hint !== ("cmd." + m[1].toLowerCase()) ? { token: m[0], hint } : null);
   };
 
   // dsh menu dismissal: pointer outside the card and the composer closes it
@@ -606,8 +617,8 @@ export function InputBar() {
         label: a.description ? a.name + ": " + a.description : a.name,
         agent: true,
       }));
-      magentsCache.push({ v: "general", label: "general: full tool access", agent: true });
-      magentsCache.push({ v: "explore", label: "explore: read-only exploration", agent: true });
+      magentsCache.push({ v: "general", label: tr("in.agent_general"), agent: true });
+      magentsCache.push({ v: "explore", label: tr("in.agent_explore"), agent: true });
     }
     if (seq !== mentionSeq) return;
     const q = m[1].toLowerCase();
@@ -706,8 +717,8 @@ export function InputBar() {
             data-slash-menu=""
             className="absolute bottom-full left-0 right-0 z-40 mb-1 flex max-h-[400px] animate-in fade-in slide-in-from-bottom-1 flex-col overflow-hidden rounded-[16px] border-[0.5px] border-hairline bg-glass p-1 shadow-panel backdrop-blur-[40px] backdrop-saturate-150 duration-150"
           >
-            <div className="flex-none px-2 pt-1.5 pb-1 text-[11px] leading-[15px] text-caption">commands</div>
-            <div role="listbox" aria-label="slash commands" className="min-h-0 overflow-y-auto">
+            <div className="flex-none px-2 pt-1.5 pb-1 text-[11px] leading-[15px] text-caption">{t("in.commands")}</div>
+            <div role="listbox" aria-label={t("in.commands")} className="min-h-0 overflow-y-auto">
               {slash.items.map((c, i) => (
                 <button
                   key={c.name}
@@ -728,7 +739,7 @@ export function InputBar() {
                 >
                   <Icon name={c.icon} className="flex-none text-tertiary [&>svg]:size-3.5" />
                   <span className="max-w-[40%] flex-none truncate">{c.name}</span>
-                  <span className="min-w-0 flex-1 truncate text-right text-[12px] leading-[18px] text-caption">{c.hint}</span>
+                  <span className="min-w-0 flex-1 truncate text-right text-[12px] leading-[18px] text-caption">{tr(c.hint)}</span>
                 </button>
               ))}
             </div>
@@ -770,7 +781,7 @@ export function InputBar() {
             rows={1}
             autoFocus
             spellCheck={false}
-            placeholder="message · /help for commands · @ files"
+            placeholder={t("in.placeholder_full")}
             className="max-h-60 min-h-9 flex-1 resize-none bg-transparent px-2.5 py-1.5 text-[14px] leading-[22px] outline-none placeholder:text-caption"
             onInput={() => {
               autosize();
@@ -787,13 +798,13 @@ export function InputBar() {
             <ModelMenu />
             {phase === "sending" ? (
               <span
-                aria-label="starting"
+                aria-label={t("in.starting")}
                 className="flex size-[34px] flex-none items-center justify-center rounded-full bg-info/90 text-white"
               >
                 <span key="spin" className="animate-in fade-in zoom-in-50 size-4 animate-spin rounded-full border-2 border-white/30 border-t-white duration-100" />
               </span>
             ) : phase === "running" && !hasText ? (
-              <Hint label="stop" keys={["esc", "esc"]}>
+              <Hint label={t("in.stop")} keys={["esc", "esc"]}>
                 <button
                   onClick={() => invoke("stop").catch(() => {})}
                   className="flex size-[34px] flex-none items-center justify-center rounded-full bg-info text-white transition-all duration-100 hover:bg-info-hover active:scale-95"
@@ -804,7 +815,7 @@ export function InputBar() {
                 </button>
               </Hint>
             ) : (
-              <Hint label={phase === "running" ? "queue after the current task" : "send"} keys={keyChips(keys.send)}>
+              <Hint label={phase === "running" ? t("in.queue_after") : t("in.send")} keys={keyChips(keys.send)}>
                 <button
                   disabled={!hasText}
                   onClick={send}

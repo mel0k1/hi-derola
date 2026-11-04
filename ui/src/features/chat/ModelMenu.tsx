@@ -4,6 +4,7 @@ import { Hint } from "@/lib/hint";
 import { invoke } from "@/lib/tauri";
 import { useStore } from "@/store/app";
 import { cn } from "@/lib/utils";
+import { tr, useT } from "@/lib/i18n";
 
 // dsh ModelSelect: a quiet chip in the composer control row that opens an
 // upward menu with search, keyboard navigation and a check mark on the active model
@@ -14,6 +15,7 @@ export function ModelMenu() {
   const runCmd = useStore((s) => s.runCmd);
   const waiting = useStore((s) => s.waiting);
   const cfg = useStore((s) => s.cfg);
+  const t = useT();
 
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
@@ -60,7 +62,7 @@ export function ModelMenu() {
         api_key: p?.api_key?.trim() || null,
       });
       setModels(ms);
-      if (!ms.length) setErr("provider returned no models");
+      if (!ms.length) setErr(tr("mm.no_models"));
     } catch (e) {
       setErr(String(e));
     }
@@ -73,7 +75,7 @@ export function ModelMenu() {
     if (m && m !== model) {
       setPending(m);
       runCmd("/model " + m);
-      useStore.getState().toast("model → " + m);
+      useStore.getState().toast(tr("mm.switched", { name: m }));
     }
   };
 
@@ -99,7 +101,7 @@ export function ModelMenu() {
 
   return (
     <div ref={rootRef} className="relative" onKeyDown={onKey}>
-      <Hint label="switch model" side="top">
+      <Hint label={t("mm.switch")} side="top">
         <button
           aria-haspopup="listbox"
           aria-expanded={open}
@@ -134,7 +136,7 @@ export function ModelMenu() {
                   setQ(e.target.value);
                   setIdx(0);
                 }}
-                placeholder="search models"
+                placeholder={t("mm.search")}
                 spellCheck={false}
                 className="h-8 w-full rounded-[10px] bg-secondary pr-2.5 pl-8 font-mono text-[12px] outline-none placeholder:text-caption focus-visible:ring-1 focus-visible:ring-info/40"
               />
@@ -164,7 +166,7 @@ export function ModelMenu() {
                 )}
               </button>
             ))}
-            {!list.length && <div className="px-2.5 py-2 text-[12px] text-caption">no match</div>}
+            {!list.length && <div className="px-2.5 py-2 text-[12px] text-caption">{t("sb.no_match")}</div>}
           </div>
           <div className="mt-0.5 border-t-[0.5px] border-hairline px-0.5 pt-1 pb-0.5">
             {err && <div className="line-clamp-2 px-2 pt-0.5 pb-1 text-[11px] break-all text-destructive">{err}</div>}
@@ -177,7 +179,7 @@ export function ModelMenu() {
               className="flex w-full items-center gap-2 rounded-[10px] px-2.5 py-1.5 text-[12px] text-muted-foreground transition-colors duration-100 hover:bg-accent hover:text-foreground"
             >
               <Icon name="download" className={cn("flex-none [&>svg]:size-3.5", loading && "animate-bounce")} />
-              {loading ? "loading…" : models.length ? "refresh model list" : "load models from provider"}
+              {loading ? t("mm.loading") : models.length ? t("mm.refresh") : t("mm.load")}
             </button>
           </div>
         </div>

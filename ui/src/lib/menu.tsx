@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "@/lib/icons";
 import { cn } from "@/lib/utils";
+import { tr } from "@/lib/i18n";
 
 export interface MenuItem {
   id: string;
@@ -46,9 +47,9 @@ export function openContextMenu(e: { clientX: number; clientY: number; preventDe
 /** "Show in Explorer" / "Show in Finder" / "Show in Folder" per platform. */
 export function fileManagerLabel() {
   const ua = navigator.userAgent;
-  if (ua.includes("Mac")) return "Show in Finder";
-  if (ua.includes("Win")) return "Show in Explorer";
-  return "Show in Folder";
+  if (ua.includes("Mac")) return tr("fm.finder");
+  if (ua.includes("Win")) return tr("fm.explorer");
+  return tr("fm.folder");
 }
 
 export function ContextMenuHost() {
