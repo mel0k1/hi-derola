@@ -482,7 +482,7 @@ const SECTIONS = [
   { id: "about", label: "about", icon: "spark" },
 ];
 
-const APP_VERSION = "0.3.2";
+const APP_VERSION = "0.3.3";
 // real version comes from the tauri shell when available (global app api)
 let VERSION = APP_VERSION;
 try {
