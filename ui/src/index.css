@@ -655,6 +655,27 @@
   outline-offset: 2px;
 }
 
+/* dsh math: KaTeX on the text rhythm; long display formulas scroll */
+.md .md-math {
+  margin: 0.55rem 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.md .katex {
+  font-size: 1.06em;
+}
+.md .katex-display {
+  margin: 0.25rem 0;
+}
+.md .katex-display > .katex {
+  padding: 3px 0;
+}
+.md .katex-error {
+  color: var(--destructive);
+  font-family: var(--font-mono);
+  font-size: 0.85em;
+}
+
 /* ---------- diffs ---------- */
 
 .diff-lines {

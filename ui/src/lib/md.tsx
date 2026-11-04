@@ -5,10 +5,35 @@ import { openContextMenu } from "@/lib/menu";
 import { openLightbox } from "@/lib/lightbox";
 import { KEYBLOCK_RE, esc, maskedFor, maskSegments } from "@/lib/secrets";
 import { iconSvg } from "@/lib/icons";
+import katex from "katex";
+import "katex/dist/katex.min.css";
+
+// dsh math rendering: $…$, $$…$$, \(…\), \[…\] and ```math fences via KaTeX.
+// Incomplete pairs (mid-stream) never match and stay literal — no error flash.
+function unescapeTex(s: string) {
+  return s.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&amp;/g, "&");
+}
+
+function renderMath(tex: string, display: boolean): string {
+  try {
+    return katex.renderToString(unescapeTex(tex), { throwOnError: false, strict: "ignore", displayMode: display });
+  } catch {
+    return `<span class="katex-error">${esc(tex)}</span>`;
+  }
+}
 
 function inline(s: string, blocks: string[]) {
+  // code spans stash first so markup and math never touch their content;
+  // math stashes second so $…$ is safe from bold/italic/link rules
+  const codes: string[] = [];
+  const maths: string[] = [];
   const out = s
-    .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+    .replace(/`([^`\n]+)`/g, (_m, c) => "\x01" + (codes.push(c) - 1) + "\x01")
+    .replace(/\\\[([\s\S]+?)\\\]/g, (_m, tex) => "\x04" + (maths.push(renderMath(tex, true)) - 1) + "\x04")
+    .replace(/\$\$([^\n]+?)\$\$/g, (_m, tex) => "\x04" + (maths.push(renderMath(tex, true)) - 1) + "\x04")
+    .replace(/\\\(([^\n]+?)\\\)/g, (_m, tex) => "\x04" + (maths.push(renderMath(tex, false)) - 1) + "\x04")
+    // require a non-space first/last char so "$5 and $10" stays literal
+    .replace(/\$(\S(?:[^\n$]*?[^\s$])?)\$/g, (_m, tex) => "\x04" + (maths.push(renderMath(tex, false)) - 1) + "\x04")
     .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
     .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<i>$2</i>")
     // images before links, so ![alt](url) is not eaten by the link rule;
@@ -18,8 +43,11 @@ function inline(s: string, blocks: string[]) {
       '<span class="md-img" role="button" tabindex="0" data-src="$2" data-alt="$1"><img src="$2" alt="$1" loading="lazy" draggable="false"></span>',
     )
     .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+  const restored = out
+    .replace(/\x01(\d+)\x01/g, (_m, i) => "<code>" + esc(codes[+i] ?? "") + "</code>")
+    .replace(/\x04(\d+)\x04/g, (_m, i) => maths[+i] ?? "");
   // dsh secret rule: credentials masked last so markup protects href/code, eye toggles reveal
-  return maskSegments(out, blocks, true);
+  return maskSegments(restored, blocks, true);
 }
 
 const COPY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
@@ -119,6 +147,17 @@ export function md(src: string) {
     return "\x00" + (blocks.length - 1) + "\x00";
   });
   src = esc(src);
+  // display math spans lines — pull before line splitting (\[…\] and $$…$$)
+  const dmath: string[] = [];
+  src = src
+    .replace(/\$\$([\s\S]+?)\$\$/g, (_m, tex) => {
+      dmath.push(renderMath(tex, true));
+      return "\n\x03" + (dmath.length - 1) + "\x03\n";
+    })
+    .replace(/\\\[([\s\S]+?)\\\]/g, (_m, tex) => {
+      dmath.push(renderMath(tex, true));
+      return "\n\x03" + (dmath.length - 1) + "\x03\n";
+    });
   // dsh secret rule: private key blocks span lines — pull them out before line splitting
   const secrets: string[] = [];
   src = src.replace(KEYBLOCK_RE, (m) => {
@@ -158,7 +197,16 @@ export function md(src: string) {
       closeList();
       closeQuote();
       const [lang, code] = blocks[+bm[1]];
-      html += codeBlock(lang, code);
+      // dsh: ```math fences render as display TeX, not as a code card
+      html += /^math$/i.test(lang) ? `<div class="md-math">${renderMath(code, true)}</div>` : codeBlock(lang, code);
+      continue;
+    }
+    const dm = t.match(/^\x03(\d+)\x03$/);
+    if (dm) {
+      flushPara();
+      closeList();
+      closeQuote();
+      html += `<div class="md-math">${dmath[+dm[1]] ?? ""}</div>`;
       continue;
     }
     const h = t.match(/^(#{1,6})\s+(.*)$/);
