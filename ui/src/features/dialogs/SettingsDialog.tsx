@@ -1,5 +1,7 @@
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { AlertDialog, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Icon } from "@/lib/icons";
@@ -9,7 +11,7 @@ import { parseKVLines, cn, copyText } from "@/lib/utils";
 import { comboFromEvent, comboToText } from "@/lib/keys";
 import { KEY_ACTIONS } from "@/store/keysStore";
 import type { Cfg, McpPrompt, McpResource, McpTemplate } from "@/lib/types";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 function HotkeyRow({ action, label, value, base, onChange }: { action: string; label: string; value: string; base: string; onChange: (v: string) => void }) {
   const [rec, setRec] = useState(false);
@@ -482,6 +484,28 @@ const SECTIONS = [
   { id: "about", label: "about", icon: "spark" },
 ];
 
+// dsh permission presets: three coarse modes over the per-tool fields in
+// config.toml; rules ([[permissions.rules]]) keep applying on top
+type PermMode = "full" | "ask" | "custom";
+
+const PERM_TOOLS: [string, string][] = [
+  ["edit", "edits to project files"],
+  ["write_file", "creating and overwriting files"],
+  ["bash", "running shell commands"],
+  ["sandbox", "local vm sandbox tools"],
+  ["mcp", "mcp server tools"],
+  ["webfetch", "fetching web pages"],
+  ["websearch", "web search"],
+  ["codesearch", "code search"],
+  ["subagent", "spawning subagents"],
+];
+
+const PERM_MODES: Record<PermMode, { label: string; desc: string }> = {
+  full: { label: "full access", desc: "the agent runs every tool without asking — only for tasks you trust" },
+  ask: { label: "ask every time", desc: "every write, command and network call asks before running; reads stay free" },
+  custom: { label: "custom per tool", desc: "pick allow, ask or deny for each tool below" },
+};
+
 const APP_VERSION = "0.3.3";
 // real version comes from the tauri shell when available (global app api)
 let VERSION = APP_VERSION;
@@ -509,6 +533,21 @@ export function SettingsDialog() {
   const [keyOverrides, setKeyOverrides] = useState<Record<string, string>>({});
   const [msg, setMsg] = useState("");
   const [showKey, setShowKey] = useState(false);
+  const [permMode, setPermMode] = useState<PermMode>("custom");
+  const [permFields, setPermFields] = useState<Record<string, string>>({});
+  const [permMenu, setPermMenu] = useState(false);
+  const permMenuRef = useRef<HTMLDivElement>(null);
+  const [riskOpen, setRiskOpen] = useState(false);
+  const [riskAck, setRiskAck] = useState(false);
+
+  useEffect(() => {
+    if (!permMenu) return;
+    const onDown = (e: MouseEvent) => {
+      if (!permMenuRef.current?.contains(e.target as Node)) setPermMenu(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    return () => document.removeEventListener("mousedown", onDown);
+  }, [permMenu]);
 
   useEffect(() => {
     if (open && cfg) {
@@ -525,6 +564,11 @@ export function SettingsDialog() {
       });
       setShowKey(false);
       setKeyOverrides({ ...cfg.keys });
+      // derive the permission mode from the per-tool fields
+      const pm = (cfg.permissions || {}) as Record<string, unknown>;
+      const pv = PERM_TOOLS.map(([k]) => (typeof pm[k] === "string" ? (pm[k] as string).toLowerCase() : ""));
+      setPermMode(pv.every((t) => t === "allow") ? "full" : pv.every((t) => t === "ask") ? "ask" : "custom");
+      setPermFields(Object.fromEntries(PERM_TOOLS.map(([k], i) => [k, pv[i]])));
       setMsg(p.active ? `profile "${p.active}" is active; its fields override the values below (switch with /profile in the chat)` : "");
       setSec("general");
     }
@@ -572,7 +616,15 @@ export function SettingsDialog() {
       keys: keysOut,
       ui: { theme },
       agent: cfg.agent,
-      permissions: cfg.permissions,
+      permissions: (() => {
+        const permOut: Record<string, unknown> = { ...(cfg.permissions || {}) };
+        for (const [k] of PERM_TOOLS) {
+          const val = permMode === "full" ? "allow" : permMode === "ask" ? "ask" : permFields[k] || null;
+          if (val) permOut[k] = val;
+          else delete permOut[k];
+        }
+        return permOut as Cfg["permissions"];
+      })(),
       lsp: cfg.lsp,
       formatters: cfg.formatters,
     };
@@ -617,14 +669,7 @@ export function SettingsDialog() {
       .catch((e) => note(String(e)));
   };
 
-  const perm = cfg.permissions || {};
-  const permLines: string[] = [];
-  for (const k of ["edit", "write_file", "bash", "sandbox", "mcp"]) {
-    if (perm[k]) permLines.push(k + " = " + String(perm[k]));
-  }
-  for (const r of perm.rules || []) {
-    permLines.push(`${r.tool} ${r.pattern || "*"} = ${r.permission}`);
-  }
+  const permRules = cfg.permissions?.rules || [];
 
   const field =
     "h-9 w-full rounded-[10px] border border-input bg-background px-2.5 font-mono text-[12.5px] outline-none transition-colors duration-100 focus-visible:border-info focus-visible:ring-1 focus-visible:ring-info/30";
@@ -762,12 +807,95 @@ export function SettingsDialog() {
           {sec === "mcp" && <McpSection mcp={cfg.mcp} onAdd={addMcp} onRemove={removeMcp} setMsg={setMsg} />}
 
           {sec === "permissions" && (
-            <div className="flex max-w-xl flex-col gap-2.5">
+            <div className="flex max-w-xl flex-col gap-4">
               <h3 className={secTitle}>permissions</h3>
-              <div className="text-[12.5px] whitespace-pre-wrap text-muted-foreground">
-                {permLines.length ? permLines.join("\n") : "default: mutations (write/edit/bash/sandbox/mcp) ask, reads allowed"}
+              {/* dsh PermissionRow: title/desc left, preset selector pill right */}
+              <div className="flex items-center gap-3 border-b-[0.5px] border-hairline pb-4">
+                <div className="flex min-w-0 flex-1 flex-col gap-1 pr-6">
+                  <span className="whitespace-nowrap text-[14px] text-foreground">{PERM_MODES[permMode].label}</span>
+                  <span className="text-[12px] leading-[18px] text-muted-foreground">{PERM_MODES[permMode].desc}</span>
+                </div>
+                <div ref={permMenuRef} className="relative flex-none">
+                  <button
+                    aria-haspopup="menu"
+                    aria-expanded={permMenu}
+                    onClick={() => setPermMenu(!permMenu)}
+                    className="flex h-9 items-center gap-2.5 rounded-[10px] bg-secondary px-3.5 text-[13px] text-foreground transition-colors duration-100 hover:bg-muted [@media(hover:hover)]:hover:bg-muted"
+                  >
+                    {PERM_MODES[permMode].label}
+                    <Icon name="chevron" className={cn("flex-none text-tertiary transition-transform duration-150 [&>svg]:size-3.5", permMenu && "rotate-180")} />
+                  </button>
+                  {permMenu && (
+                    <div className="absolute top-full right-0 z-50 mt-1.5 w-72 animate-in fade-in slide-in-from-top-1 rounded-[14px] border-[0.5px] border-hairline bg-glass p-1 shadow-panel backdrop-blur-[40px] backdrop-saturate-150 duration-150">
+                      {(Object.keys(PERM_MODES) as PermMode[]).map((m) => (
+                        <button
+                          key={m}
+                          onClick={() => {
+                            setPermMenu(false);
+                            if (m === "full") {
+                              if (permMode === "full") return;
+                              setRiskAck(false);
+                              setRiskOpen(true);
+                            } else {
+                              setPermMode(m);
+                            }
+                          }}
+                          className="flex w-full items-start gap-2.5 rounded-[10px] px-2.5 py-1.5 text-left transition-colors duration-100 hover:bg-accent"
+                        >
+                          <span className="min-w-0 flex-1">
+                            <span className={cn("block text-[12.5px]", permMode === m ? "font-medium text-foreground" : "text-foreground/90")}>{PERM_MODES[m].label}</span>
+                            <span className="block text-[11px] leading-[16px] text-caption">{PERM_MODES[m].desc}</span>
+                          </span>
+                          {permMode === m && <Icon name="check" className="mt-0.5 flex-none text-info [&>svg]:size-3.5" />}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
-              <div className="text-[11.5px] text-muted-foreground">edited in config.toml: allow | ask | deny per tool, [[permissions.rules]] adds wildcard patterns</div>
+              {permMode === "custom" && (
+                <div className="flex flex-col">
+                  {PERM_TOOLS.map(([k, label]) => (
+                    <div key={k} className="flex min-h-10 items-center gap-3 border-b-[0.5px] border-hairline py-1.5 last:border-b-0">
+                      <div className="min-w-0 flex-1">
+                        <div className="font-mono text-[12.5px] text-foreground">{k}</div>
+                        <div className="text-[11px] text-caption">{label}</div>
+                      </div>
+                      <div className="flex flex-none rounded-[9px] border-[0.5px] border-hairline p-0.5">
+                        {(["allow", "ask", "deny"] as const).map((p) => {
+                          const on = (permFields[k] || "") === p;
+                          return (
+                            <button
+                              key={p}
+                              onClick={() => setPermFields((f) => ({ ...f, [k]: p }))}
+                              className={cn(
+                                "h-6 rounded-[6px] px-2.5 text-[11px] font-medium capitalize transition-colors duration-100",
+                                on
+                                  ? p === "allow"
+                                    ? "bg-info/15 text-info"
+                                    : p === "ask"
+                                      ? "bg-warning/15 text-warning"
+                                      : "bg-destructive/15 text-destructive"
+                                  : "text-caption hover:text-foreground",
+                              )}
+                            >
+                              {p}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="text-[11.5px] text-muted-foreground">
+                {permMode === "custom"
+                  ? permRules.length
+                    ? `${permRules.length} wildcard rule(s) from config.toml still apply on top`
+                    : "wildcard rules ([[permissions.rules]] in config.toml) apply on top of these"
+                  : "reads and searches stay available in every mode · wildcard rules from config.toml apply on top"}
+              </div>
+              <div className="text-[11.5px] text-muted-foreground">part of the saved form — press save to apply</div>
             </div>
           )}
 
@@ -775,9 +903,7 @@ export function SettingsDialog() {
             <div className="flex max-w-xl flex-col gap-4">
               <h3 className={secTitle}>about</h3>
               <div className="flex items-center gap-3">
-                <span className="flex size-11 flex-none items-center justify-center rounded-[14px] bg-info/10 text-info">
-                  <Icon name="spark" className="[&>svg]:size-5" />
-                </span>
+                <img src="/logo.png" alt="Hi!Derola logo" width={44} height={44} draggable={false} className="size-11 flex-none rounded-[14px] border-[0.5px] border-hairline object-cover" />
                 <div className="flex flex-col gap-0.5">
                   <span className="text-[14px] font-medium">Hi!Derola</span>
                   <button
@@ -807,6 +933,44 @@ export function SettingsDialog() {
           <Button size="sm" onClick={save}>save</Button>
         </div>
       </DialogContent>
+
+      {/* dsh RiskConfirmation: enabling full access requires an explicit acknowledge */}
+      <AlertDialog
+        open={riskOpen}
+        onOpenChange={(o) => {
+          if (!o) {
+            setRiskOpen(false);
+            setRiskAck(false);
+          }
+        }}
+      >
+        <AlertDialogContent className="max-w-[440px]">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-[15px]">enable full access?</AlertDialogTitle>
+            <AlertDialogDescription className="text-[13.5px] leading-[21px]">
+              full access lets the agent skip confirmation steps and perform more actions directly, including sensitive operations, file changes, or external commands. only use it when you trust the subsequent tasks.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <label className="flex items-start gap-2.5 text-[13px] leading-[20px] text-muted-foreground">
+            <Checkbox checked={riskAck} onCheckedChange={(c) => setRiskAck(c === true)} className="mt-0.5" />
+            <span>I understand the risks and want to continue</span>
+          </label>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => { setRiskOpen(false); setRiskAck(false); }}>cancel</AlertDialogCancel>
+            <Button
+              disabled={!riskAck}
+              onClick={() => {
+                setRiskOpen(false);
+                setRiskAck(false);
+                setPermMode("full");
+              }}
+              className="min-w-[136px]"
+            >
+              enable full access
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Dialog>
   );
 }

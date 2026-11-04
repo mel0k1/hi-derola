@@ -10,6 +10,42 @@ let mfilesCache: string[] | null = null;
 let mentionSeq = 0;
 let magentsCache: MentionItem[] | null = null;
 
+// dsh claim ghost hints: while the draft is a bare slash command with blank
+// args, the expected arguments render after the caret in caption color
+const SLASH_HINTS: Record<string, string> = {
+  "/file": "path — attach a file to the next message",
+  "/model": "name — switch model (bare = show current)",
+  "/models": "list models available for the api key",
+  "/profile": "name — switch provider profile (bare = list, none = base)",
+  "/plan": "toggle plan mode (read-only research)",
+  "/undo": "revert file changes of the last turn",
+  "/redo": "reapply undone changes",
+  "/init": "create or improve AGENTS.md for this project",
+  "/compact": "summarize and shrink the conversation context",
+  "/export": "path — save the session as markdown",
+  "/sessions": "list saved sessions",
+  "/resume": "id — switch to a saved session (latest by default)",
+  "/mcpauth": "name — mcp oauth: status, start a flow or paste a code",
+  "/mcpres": "server — list mcp resources and uri templates",
+  "/mcpstatus": "per-server status: connected/failed/needs auth",
+  "/mcpread": "server uri — read an mcp resource into the chat",
+  "/mcpadd": "name url|command — add a server and connect it",
+  "/mcpconnect": "name — (re)connect a configured server",
+  "/mcpdisconnect": "name — drop the live connection",
+  "/mcplog": "server — recent mcp log messages",
+  "/jstools": "list user js tools (.hi-derola/tools/)",
+  "/doctor": "environment self-check",
+  "/update": "check github releases and update the binary",
+  "/usage": "token/cost report for this session",
+  "/sandbox": "start|stop|attach|detach <id|name> · bare = list",
+  "/host": "add|check|attach|detach|del <name> · bare = list",
+  "/skills": "list · toggle <name> · install <git-url>",
+  "/crew": "new <goal> · add <name|role> · step · auto · stop",
+  "/clear": "start a new session",
+  "/quit": "exit",
+  "/help": "show commands and tools",
+};
+
 interface MentionState {
   items: MentionItem[];
   idx: number;
@@ -250,6 +286,27 @@ function QueueDock() {
   );
 }
 
+// dsh RunningStatus: isolated live clock so transcript re-renders never
+// reset it; shimmer label with elapsed time in 1m 23s form
+function RunClock() {
+  const [t0] = useState(() => Date.now());
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const s = Math.max(0, Math.floor((Date.now() - t0) / 1000));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor(s / 60) % 60;
+  const dur = h > 0 ? `${h}h ${m}m ${s % 60}s` : s >= 60 ? `${m}m ${s % 60}s` : `${s}s`;
+  return (
+    <span className="flex shrink-0 items-center gap-1.5">
+      <span className="pulse-dot size-1.5 flex-none rounded-full bg-info" />
+      <span className="shimmer-text font-sans text-[12px] font-medium">working · {dur}</span>
+    </span>
+  );
+}
+
 function Dock() {
   const waiting = useStore((s) => s.waiting);
   const tokens = useStore((s) => s.tokens);
@@ -284,7 +341,7 @@ function Dock() {
       )}
       <span className="truncate">{stats}</span>
       <span className="flex-1" />
-      {waiting && <span className="shimmer-text shrink-0 font-sans text-[12px] font-medium">thinking…</span>}
+      {waiting && <RunClock />}
     </div>
   );
 }
@@ -296,6 +353,18 @@ export function InputBar() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [mention, setMention] = useState<MentionState | null>(null);
   const [hasText, setHasText] = useState(false);
+  const [ghost, setGhost] = useState<{ token: string; hint: string } | null>(null);
+
+  const updateGhost = () => {
+    const el = inputRef.current;
+    if (!el) {
+      setGhost(null);
+      return;
+    }
+    const m = el.value.match(/^\/([a-z0-9_-]*)[ \t]*$/i);
+    const hint = m ? SLASH_HINTS["/" + m[1].toLowerCase()] : undefined;
+    setGhost(m && hint ? { token: m[0], hint } : null);
+  };
 
   const autosize = () => {
     const el = inputRef.current;
@@ -381,6 +450,7 @@ export function InputBar() {
       doSend(el.value);
       el.value = "";
       setHasText(false);
+      setGhost(null);
       autosize();
       hideMention();
       return;
@@ -401,6 +471,7 @@ export function InputBar() {
     doSend(el.value);
     el.value = "";
     setHasText(false);
+    setGhost(null);
     autosize();
     hideMention();
     el.focus();
@@ -431,6 +502,14 @@ export function InputBar() {
             ))}
           </div>
         )}
+        {/* dsh claim ghost hint: an invisible mirror of the token keeps the
+            exact caret width, the expected arguments follow in caption color */}
+        {ghost && (
+          <div className="pointer-events-none absolute top-[14px] left-[18px] z-10 flex whitespace-pre text-[14px] leading-[22px]">
+            <span className="invisible">{ghost.token}</span>
+            <span className="text-caption">{ghost.hint}</span>
+          </div>
+        )}
         {/* composer card, dsh InputBar: 28px radius, soft elevation, blue caret */}
         <div className="flex flex-col gap-0.5 rounded-[28px] bg-card px-2 pt-2 pb-1.5 shadow-[0_0_0_0.5px_var(--border),0_4px_16px_rgba(0,0,0,0.04),0_0_24px_rgba(0,0,0,0.03)]">
           <textarea
@@ -444,6 +523,7 @@ export function InputBar() {
             onInput={() => {
               autosize();
               showMention();
+              updateGhost();
               setHasText(!!inputRef.current?.value.trim());
             }}
             onClick={hideMention}
