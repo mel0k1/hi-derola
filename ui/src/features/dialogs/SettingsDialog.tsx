@@ -511,7 +511,7 @@ const PERM_MODES: Record<PermMode, { label: string; desc: string }> = {
   custom: { label: "st.perm_custom", desc: "st.perm_custom_d" },
 };
 
-const APP_VERSION = "0.3.9";
+const APP_VERSION = "0.3.10";
 // real version comes from the tauri shell when available (global app api)
 let VERSION = APP_VERSION;
 try {
