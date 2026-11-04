@@ -97,6 +97,69 @@ function codeBlock(lang: string, code: string) {
   );
 }
 
+// dsh diff review: ```diff/patch fences render as a review card — add/del line
+// tinting, old/new gutters tracked from the @@ hunk headers, +N −M stats in
+// the toolbar; copy hands out the raw patch (data-code, not the gutters)
+function diffBlock(code: string) {
+  const lines = code.split("\n");
+  if (lines.length && lines[lines.length - 1] === "") lines.pop();
+  let adds = 0;
+  let dels = 0;
+  for (const l of lines) {
+    if (l.startsWith("+") && !l.startsWith("+++")) adds++;
+    else if (l.startsWith("-") && !l.startsWith("---")) dels++;
+  }
+  let o = 0;
+  let n = 0;
+  const row = (cls: string, no: string, nn: string, tx: string) =>
+    `<span class="md-dl md-dl-${cls}"><span class="md-dl-no">${no}</span><span class="md-dl-nn">${nn}</span><span class="md-dl-tx">${tx}</span></span>`;
+  const rows = lines
+    .map((l) => {
+      const t = esc(l);
+      if (/^(---|\+\+\+)\s/.test(l) || l.startsWith("diff --git") || l.startsWith("index ") || l.startsWith("\\")) {
+        return row("meta", "", "", t);
+      }
+      if (l.startsWith("@@")) {
+        const m = l.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+        if (m) {
+          o = parseInt(m[1], 10);
+          n = parseInt(m[2], 10);
+        }
+        return row("hunk", "", "", t);
+      }
+      if (l.startsWith("+")) {
+        const r = row("add", "", String(n), t);
+        n++;
+        return r;
+      }
+      if (l.startsWith("-")) {
+        const r = row("del", String(o), "", t);
+        o++;
+        return r;
+      }
+      const r = row("ctx", String(o), String(n), t);
+      o++;
+      n++;
+      return r;
+    })
+    .join("");
+  return (
+    `<div class="md-code-card md-diff">` +
+    `<div class="md-code-head">` +
+    `<span class="md-code-lang">diff</span>` +
+    `<span class="md-code-actions">` +
+    `<span class="md-diff-stat"><span class="md-diff-adds">+${adds}</span><span class="md-diff-dels">\u2212${dels}</span></span>` +
+    `<button type="button" class="md-wrap" aria-label="toggle line wrap" aria-pressed="true" title="toggle wrap">` +
+    `<span class="md-wrap-i md-wrap-on">${NOWRAP_SVG}</span><span class="md-wrap-i md-wrap-off">${WRAP_SVG}</span>` +
+    `</button>` +
+    `<button type="button" class="md-copy" aria-label="copy patch" data-code="${esc(code)}">` +
+    `<span class="md-copy-i md-copy-copy">${COPY_SVG}</span><span class="md-copy-i md-copy-check">${CHECK_SVG}</span></button>` +
+    `</span></div>` +
+    `<pre class="md-code-pre md-diff-pre" data-wrap="true"><code>${rows}</code></pre>` +
+    `</div>`
+  );
+}
+
 // one pipe row → trimmed cells (GFM tables; escaped pipes are not supported)
 function splitRow(line: string): string[] {
   let t = line.trim();
@@ -197,8 +260,13 @@ export function md(src: string) {
       closeList();
       closeQuote();
       const [lang, code] = blocks[+bm[1]];
-      // dsh: ```math fences render as display TeX, not as a code card
-      html += /^math$/i.test(lang) ? `<div class="md-math">${renderMath(code, true)}</div>` : codeBlock(lang, code);
+      // dsh: ```math fences render as display TeX, not as a code card;
+      // ```diff/patch render as a review card with gutters and stats
+      html += /^math$/i.test(lang)
+        ? `<div class="md-math">${renderMath(code, true)}</div>`
+        : /^(diff|patch)$/i.test(lang)
+          ? diffBlock(code)
+          : codeBlock(lang, code);
       continue;
     }
     const dm = t.match(/^\x03(\d+)\x03$/);
@@ -335,9 +403,9 @@ export function mdClickHandler(e: React.MouseEvent<HTMLElement>) {
   }
   const btn = target.closest("button.md-copy");
   if (!btn) return;
-  const code = btn.closest(".md-code-card")?.querySelector("code");
-  if (!code) return;
-  void copyText(code.textContent || "").then((ok) => {
+  const raw = btn.getAttribute("data-code");
+  const code = raw !== null ? raw : btn.closest(".md-code-card")?.querySelector("code")?.textContent || "";
+  void copyText(code).then((ok) => {
     if (!ok) return;
     btn.classList.add("copied");
     setTimeout(() => btn.classList.remove("copied"), 1400);

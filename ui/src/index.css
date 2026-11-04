@@ -519,6 +519,83 @@
   overflow-x: hidden;
 }
 
+/* dsh diff review card: per-line add/del tinting with old/new gutters */
+.md .md-diff-pre {
+  padding: 0.35rem 0;
+  overflow-x: hidden;
+  font-size: 0.72rem;
+  line-height: 1.65;
+}
+.md .md-dl {
+  display: flex;
+  align-items: baseline;
+  min-height: 1.25em;
+}
+.md .md-dl-no,
+.md .md-dl-nn {
+  flex: none;
+  box-sizing: content-box;
+  width: 34px;
+  padding-right: 7px;
+  text-align: right;
+  color: var(--caption);
+  opacity: 0.62;
+  user-select: none;
+}
+.md .md-dl-tx {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-right: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.md .md-dl-add {
+  background: rgba(34, 197, 94, 0.1);
+  color: #1a9e50;
+}
+.md .md-dl-del {
+  background: rgba(236, 19, 19, 0.08);
+  color: #d5304d;
+}
+.md .md-dl-ctx .md-dl-tx {
+  color: var(--muted-foreground);
+}
+.md .md-dl-hunk {
+  color: var(--info);
+  background: color-mix(in srgb, var(--info) 9%, transparent);
+}
+.md .md-dl-meta .md-dl-tx {
+  color: var(--caption);
+  opacity: 0.85;
+}
+.md .md-diff-adds,
+.md .md-diff-dels {
+  margin-right: 7px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+.md .md-diff-adds {
+  color: #1a9e50;
+}
+.md .md-diff-dels {
+  color: #d5304d;
+}
+.dark .md .md-dl-add {
+  color: #58cd8c;
+}
+.dark .md .md-dl-del {
+  color: #f47a7a;
+}
+.dark .md .md-diff-adds {
+  color: #58cd8c;
+}
+.dark .md .md-diff-dels {
+  color: #f47a7a;
+}
+.md .md-code-actions .md-diff-stat {
+  margin-right: 4px;
+}
+
 /* dsh SecretText: masked credential — mono box, star tiles over the hidden
    characters, inline reveal control; revealing never reflows the line */
 .md-secret {
