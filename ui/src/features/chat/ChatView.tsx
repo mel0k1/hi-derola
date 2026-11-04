@@ -252,8 +252,9 @@ function CopyBtn({ getText, side }: { getText: () => string; side: "left" | "rig
   );
 }
 
-// dsh url/message menu: copy selection when present, else the whole message
-function msgMenu(e: React.MouseEvent, text: string) {
+// dsh url/message menu: copy selection when present, else the whole message;
+// user bubbles also carry the chat-fork entry
+function msgMenu(e: React.MouseEvent, text: string, fork?: () => void) {
   const sel = window.getSelection()?.toString() || "";
   const items: MenuItem[] = [];
   if (sel.trim()) {
@@ -275,18 +276,40 @@ function msgMenu(e: React.MouseEvent, text: string) {
       void copyText(text).then((ok) => ok && useStore.getState().toast("copied"));
     },
   });
+  if (fork) {
+    items.push({
+      id: "fork",
+      label: "Fork from Here",
+      icon: "branch",
+      sep: true,
+      onSelect: fork,
+    });
+  }
   openContextMenu(e, items);
 }
 
-function UserItem({ item }: { item: Extract<ChatItem, { kind: "user" }> }) {
+function UserItem({ item, userIndex, canFork }: { item: Extract<ChatItem, { kind: "user" }>; userIndex: number; canFork: boolean }) {
+  const forkFrom = useStore((s) => s.forkFrom);
+  const fork = () => void forkFrom(userIndex);
   return (
-    <div className="group/msg relative my-3 flex flex-col items-end" onContextMenu={(e) => msgMenu(e, item.text)}>
+    <div className="group/msg relative my-3 flex flex-col items-end" onContextMenu={(e) => msgMenu(e, item.text, canFork ? fork : undefined)}>
       <div
         className="msg-in max-w-[85%] rounded-[20px] bg-bubble px-4 py-2.5 leading-[1.57] whitespace-pre-wrap break-words text-foreground"
         onClick={mdClickHandler}
         dangerouslySetInnerHTML={{ __html: maskUserText(item.text) }}
       />
       <MsgActions side="right">
+        {canFork && (
+          <Hint label="fork from here" side="left">
+            <button
+              aria-label="fork chat from this message"
+              onClick={fork}
+              className="rounded-[7px] p-1 text-caption transition-colors duration-100 hover:bg-accent hover:text-foreground"
+            >
+              <Icon name="branch" className="[&>svg]:size-3.5" />
+            </button>
+          </Hint>
+        )}
         <CopyBtn getText={() => item.text} side="left" />
       </MsgActions>
     </div>
@@ -318,10 +341,10 @@ function BotItem({ item, canRetry }: { item: Extract<ChatItem, { kind: "bot" }>;
   );
 }
 
-function Item({ item, canRetry }: { item: ChatItem; canRetry?: boolean }) {
+function Item({ item, canRetry, userIndex, canFork }: { item: ChatItem; canRetry?: boolean; userIndex?: number; canFork?: boolean }) {
   switch (item.kind) {
     case "user":
-      return <UserItem item={item} />;
+      return <UserItem item={item} userIndex={userIndex ?? -1} canFork={!!canFork} />;
     case "bot":
       return <BotItem item={item} canRetry={!!canRetry} />;
     case "note":
@@ -408,9 +431,14 @@ export function ChatView() {
         <Welcome />
       ) : (
         <div className="mx-auto w-full max-w-[768px] flex-1 px-5 pt-4 pb-2" style={{ fontSize: "var(--chat-font, 14px)" }}>
-          {transcript.map((it) => (
-            <Item key={it.id} item={it} canRetry={it.kind === "bot" && it.id === lastBotId && phase === "idle"} />
-          ))}
+          {/* userIndex = ordinal of the user message in the saved history — the fork cut point */}
+          {(() => {
+            let userOrdinal = 0;
+            return transcript.map((it) => {
+              const u = it.kind === "user" ? userOrdinal++ : -1;
+              return <Item key={it.id} item={it} canRetry={it.kind === "bot" && it.id === lastBotId && phase === "idle"} userIndex={u} canFork={it.kind === "user" && phase === "idle"} />;
+            });
+          })()}
           {streamText !== null && (
             <div className="my-3">
               <Md text={streamText} />

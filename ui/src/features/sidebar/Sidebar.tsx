@@ -23,7 +23,7 @@ function loadPins(): string[] {
   }
 }
 
-function SessionRow({ id, title, count, updated, cost, active, pinned, attention, onPin }: { id: string; title: string; count: number; updated: number; cost?: number; active: boolean; pinned: boolean; attention: boolean; onPin: (id: string) => void }) {
+function SessionRow({ id, title, count, updated, cost, active, pinned, attention, forked, onPin }: { id: string; title: string; count: number; updated: number; cost?: number; active: boolean; pinned: boolean; attention: boolean; forked?: boolean; onPin: (id: string) => void }) {
   const openSession = useStore((s) => s.openSession);
   const waiting = useStore((s) => s.waiting);
   const note = useStore((s) => s.note);
@@ -43,6 +43,7 @@ function SessionRow({ id, title, count, updated, cost, active, pinned, attention
         active ? "bg-accent" : "bg-transparent"
       )}
     >
+      {forked && <Icon name="branch" className="flex-none text-caption [&>svg]:size-3" />}
       <span className={cn("min-w-0 flex-1 truncate text-[13px] leading-5", active ? "font-medium text-foreground" : "text-foreground/90")}>
         {title || "new chat"}
       </span>
@@ -208,6 +209,7 @@ export function Sidebar() {
                   active={s.id === sid}
                   pinned={pins.includes(s.id)}
                   attention={s.id === sid && waiting}
+                  forked={!!s.parent}
                   onPin={togglePin}
                 />
               ))}

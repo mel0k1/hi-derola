@@ -40,6 +40,7 @@ const PATHS: Record<string, string> = {
   wrap: '<path d="M3 6h18"/><path d="M3 12h13a3 3 0 1 1 0 6h-4"/><path d="M14 15l-2 3 2 3"/><path d="M3 18h5"/>',
   nowrap: '<path d="M3 6h18"/><path d="M3 12h13a3 3 0 1 1 0 6"/><path d="M14 15l-2 3 2 3"/><path d="M3 18h3"/><path d="M21 6v12"/>',
   link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+  branch: '<circle cx="6" cy="5" r="2.4"/><circle cx="6" cy="19" r="2.4"/><circle cx="18" cy="7" r="2.4"/><path d="M6 7.4v9.2"/><path d="M18 9.4a8 8 0 0 1-8 8H8.4"/>',
 };
 
 export function iconSvg(name: string) {

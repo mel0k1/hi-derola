@@ -207,7 +207,10 @@ interface Store {
   setChatFont: (px: number) => void;
 
   refreshSessions: () => Promise<void>;
+  applyOpen: (st: OpenSession) => void;
   openSession: (id: string) => Promise<void>;
+  // chat fork: cut the history after the userIndex-th user message (0-based) and continue in a new session
+  forkFrom: (userIndex: number) => Promise<void>;
   newChat: () => void;
   doSend: (text: string) => Promise<void>;
   runCmd: (text: string) => Promise<void>;
@@ -467,15 +470,8 @@ export const useStore = create<Store>((set, get) => ({
     set({ sessions: list });
   },
 
-  openSession: async (id) => {
-    if (get().waiting || get().confirm?.open) return;
-    let st: OpenSession;
-    try {
-      st = await invoke<OpenSession>("open_session", { id });
-    } catch (e) {
-      get().note(String(e));
-      return;
-    }
+  // shared body of open_session / fork_session: rebuild the transcript projection
+  applyOpen: (st) => {
     const items: ChatItem[] = [];
     for (const it of st.transcript) {
       if (it.k === "user") items.push({ kind: "user", id: nextId(), text: it.s });
@@ -510,6 +506,28 @@ export const useStore = create<Store>((set, get) => ({
       get().note(`${(st.queue || []).length} queued message(s) restored from the previous run; they will steer the next run`);
     }
     get().refreshSessions();
+  },
+
+  openSession: async (id) => {
+    if (get().waiting || get().confirm?.open) return;
+    try {
+      const st = await invoke<OpenSession>("open_session", { id });
+      get().applyOpen(st);
+    } catch (e) {
+      get().note(String(e));
+    }
+  },
+
+  forkFrom: async (userIndex) => {
+    if (get().waiting || get().confirm?.open) return;
+    set({ view: "chat" });
+    try {
+      const st = await invoke<OpenSession>("fork_session", { uptoUser: userIndex });
+      get().applyOpen(st);
+      get().note("forked — this chat continues in a new session");
+    } catch (e) {
+      get().note(String(e));
+    }
   },
 
   newChat: () => {

@@ -82,8 +82,11 @@ fn persist(sh: &Shared) {
     if ses.messages.is_empty() {
         return;
     }
+    let sid = sh.sid.lock().unwrap().clone();
+    // forked chats keep their lineage across saves — read it from the stored file
+    let parent = sessions::load(&sid).ok().and_then(|s| s.parent);
     let st = StoredSession {
-        id: sh.sid.lock().unwrap().clone(),
+        id: sid,
         title: sh.title.lock().unwrap().clone(),
         created: *sh.created.lock().unwrap(),
         updated: 0,
@@ -94,7 +97,7 @@ fn persist(sh: &Shared) {
         cost: *sh.cost.lock().unwrap(),
         usage: sh.usage.lock().unwrap().clone(),
         todos: sh.todos.lock().unwrap().clone(),
-        parent: None,
+        parent,
         changes: sh.changes.lock().unwrap().clone(),
         queue: sh.queue.lock().unwrap().clone(),
     };
@@ -1142,16 +1145,11 @@ async fn new_session(sh: State<'_, Arc<Shared>>, app: AppHandle) -> Result<(), S
     Ok(())
 }
 
-#[tauri::command]
-async fn open_session(
-    sh: State<'_, Arc<Shared>>,
-    app: AppHandle,
-    id: String,
-) -> Result<Value, String> {
+fn do_open(sh: &Shared, app: &AppHandle, id: &str) -> Result<Value, String> {
     if *sh.sid.lock().unwrap() != id {
-        persist(&sh);
+        persist(sh);
     }
-    let st = sessions::load(&id).map_err(|e| format!("{e:#}"))?;
+    let st = sessions::load(id).map_err(|e| format!("{e:#}"))?;
     let model = sh.cfg.lock().unwrap().provider.model.clone();
     *sh.session.lock().unwrap() = Session {
         system: if st.system.trim().is_empty() {
@@ -1203,6 +1201,71 @@ async fn open_session(
         "queue": st.queue,
     }))
 }
+
+#[tauri::command]
+async fn open_session(
+    sh: State<'_, Arc<Shared>>,
+    app: AppHandle,
+    id: String,
+) -> Result<Value, String> {
+    do_open(&sh, &app, &id)
+}
+
+// chat fork: cut the saved history right after the upto_user-th user message
+// (the ordinals of the user bubbles in the transcript) and continue in a new
+// session that keeps a link to the original one; counters start from zero
+#[tauri::command]
+async fn fork_session(
+    sh: State<'_, Arc<Shared>>,
+    app: AppHandle,
+    upto_user: usize,
+) -> Result<Value, String> {
+    if sh.inflight.lock().unwrap().is_some() {
+        return Err("wait for the current reply to finish before forking".into());
+    }
+    persist(&sh);
+    let src_sid = sh.sid.lock().unwrap().clone();
+    let mut st = sessions::load(&src_sid).map_err(|e| format!("{e:#}"))?;
+    let mut seen = 0usize;
+    let mut cut = None;
+    for (i, m) in st.messages.iter().enumerate() {
+        if m.role == Role::User {
+            if seen == upto_user {
+                cut = Some(i);
+                break;
+            }
+            seen += 1;
+        }
+    }
+    let Some(cut) = cut else {
+        return Err("that message is not in the saved history".into());
+    };
+    st.messages.truncate(cut + 1);
+    st.id = sessions::new_id();
+    st.title = if st.title.trim().is_empty() {
+        sessions::title_from(
+            st.messages
+                .last()
+                .map(|m| m.content.as_str())
+                .unwrap_or_default(),
+        )
+    } else {
+        st.title.clone()
+    };
+    st.parent = Some(src_sid);
+    st.created = 0;
+    st.updated = 0;
+    st.tokens_in = 0;
+    st.tokens_out = 0;
+    st.cost = 0.0;
+    st.usage = Vec::new();
+    st.queue = Vec::new();
+    sessions::save(&st).map_err(|e| format!("{e:#}"))?;
+    let payload = do_open(&sh, &app, &st.id)?;
+    emit_sessions(&app, &sh);
+    Ok(payload)
+}
+
 #[tauri::command]
 async fn delete_session(
     sh: State<'_, Arc<Shared>>,
@@ -2923,6 +2986,7 @@ pub fn run() -> Result<()> {
             list_sessions,
             new_session,
             open_session,
+            fork_session,
             delete_session,
             list_dir,
             attach_path,

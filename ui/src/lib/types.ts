@@ -47,6 +47,7 @@ export interface SessionMeta {
   updated: number;
   count: number;
   cost?: number;
+  parent?: string | null;
 }
 
 export interface TranscriptItem {
