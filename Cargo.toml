@@ -1,6 +1,6 @@
 [package]
 name = "hi-derola"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 description = "Minimalist dark chat coding assistant for multiple LLM providers (GUI + TUI)"
 

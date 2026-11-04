@@ -506,7 +506,7 @@ const PERM_MODES: Record<PermMode, { label: string; desc: string }> = {
   custom: { label: "custom per tool", desc: "pick allow, ask or deny for each tool below" },
 };
 
-const APP_VERSION = "0.3.4";
+const APP_VERSION = "0.3.5";
 // real version comes from the tauri shell when available (global app api)
 let VERSION = APP_VERSION;
 try {
