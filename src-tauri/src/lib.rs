@@ -1412,7 +1412,7 @@ async fn pick_folder() -> Result<Option<String>, String> {
 
 // ---- native file/url actions (dsh open-in-app) ----
 
-fn spawn_detached(mut cmd: std::process::Command) -> Result<(), String> {
+fn spawn_detached(cmd: &mut std::process::Command) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -1427,7 +1427,7 @@ fn open_with(target: &str) -> Result<(), String> {
     {
         let mut c = std::process::Command::new("cmd");
         c.args(["/C", "start", ""]).arg(target);
-        return spawn_detached(c);
+        return spawn_detached(&mut c);
     }
     #[cfg(target_os = "macos")]
     {
