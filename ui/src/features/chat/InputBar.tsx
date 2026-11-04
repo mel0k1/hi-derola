@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Icon } from "@/lib/icons";
 import { Hint, keyChips } from "@/lib/hint";
 import { invoke } from "@/lib/tauri";
-import { useStore, type MentionItem } from "@/store/app";
+import { useStore, type MentionItem, type TodoEntry } from "@/store/app";
 import { chipName, cn, fmtCost, fmtTokens } from "@/lib/utils";
 import { ModelMenu } from "./ModelMenu";
 
@@ -195,6 +195,84 @@ function PlusMenu() {
         </div>
       )}
     </div>
+  );
+}
+
+// dsh TodoPanel: collapsed plan dock above the composer — header with
+// per-status counts, expandable list with state dots (done/ongoing/idle)
+function TodoStateDot({ status }: { status: TodoEntry["status"] }) {
+  if (status === "in_progress") {
+    return (
+      <svg className="todo-spin size-3.5 flex-none text-caption" viewBox="0 0 24 24" aria-hidden="true">
+        <circle className="todo-spin-track" cx="12" cy="12" r="9.5" />
+        <circle className="todo-spin-arc" cx="12" cy="12" r="9.5" />
+      </svg>
+    );
+  }
+  return (
+    <span
+      aria-hidden="true"
+      className={cn(
+        "flex size-2.5 flex-none items-center justify-center rounded-full",
+        status === "completed" ? "bg-success" : status === "cancelled" ? "bg-caption/50" : "bg-caption/40"
+      )}
+    />
+  );
+}
+
+function TodoPanel() {
+  const todos = useStore((s) => s.todos);
+  const [collapsed, setCollapsed] = useState(true);
+  if (!todos.length) return null;
+  const done = todos.filter((t) => t.status === "completed").length;
+  const active = todos.filter((t) => t.status === "in_progress").length;
+  const dropped = todos.filter((t) => t.status === "cancelled").length;
+  const pending = todos.length - done - active - dropped;
+  const progress = [
+    ...done > 0 ? [`${done} done`] : [],
+    ...active > 0 ? [`${active} active`] : [],
+    ...pending > 0 ? [`${pending} pending`] : [],
+    ...dropped > 0 ? [`${dropped} dropped`] : [],
+  ].join("\u2002·\u2002");
+  return (
+    <section className="msg-in mx-2 mb-1 rounded-[12px] border-[0.5px] border-hairline bg-secondary/50" aria-label="todos">
+      <button
+        type="button"
+        aria-expanded={!collapsed}
+        onClick={() => setCollapsed((v) => !v)}
+        className="flex h-8 w-full items-center gap-2 rounded-[12px] px-2.5 text-left transition-colors duration-100 [@media(hover:hover)]:hover:bg-accent/60"
+      >
+        <Icon name="list" className="flex-none text-caption [&>svg]:size-3.5" />
+        <span className="flex-none text-[12.5px] font-medium text-foreground">todos</span>
+        <span className="min-w-0 flex-1 truncate text-[11.5px] text-tertiary">{progress}</span>
+        <Icon
+          name="chevron"
+          className={cn("flex-none text-caption transition-transform duration-100 [&>svg]:size-3.5", collapsed ? "-rotate-90" : "rotate-180")}
+        />
+      </button>
+      {!collapsed && (
+        <ul className="animate-in fade-in slide-in-from-top-1 max-h-52 overflow-y-auto px-2.5 pb-2 duration-150">
+          {todos.map((t, i) => (
+            <li key={i} className="flex items-start gap-2 py-1 text-[12.5px] leading-[18px]">
+              <span className="mt-[3px] flex-none">
+                <TodoStateDot status={t.status} />
+              </span>
+              <span
+                className={cn(
+                  "min-w-0 break-words",
+                  t.status === "completed" && "text-tertiary",
+                  t.status === "cancelled" && "text-caption line-through",
+                  t.status === "in_progress" && "font-medium text-foreground",
+                  t.status === "pending" && "text-muted-foreground"
+                )}
+              >
+                {t.content}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -589,6 +667,7 @@ export function InputBar() {
 
   return (
     <div id="input-bar" className="mx-auto w-full max-w-[800px]">
+      <TodoPanel />
       <QueueDock />
       <Chips />
       <div className="relative">

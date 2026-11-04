@@ -186,6 +186,8 @@ export function installMock() {
       emit({ t: "tool", name: "read_file", detail: "src/main.rs", diff: [], paths: [] });
       await sleep(200);
       if (runAbort) return;
+      emit({ t: "tool_done", name: "read_file", ok: true, ms: 184, exit: null });
+      emit({ t: "todo", s: "[~] inspect project layout\n[ ] locate the entry point\n[ ] summarize findings" });
       emit({ t: "note", s: "src/main.rs (3 lines)" });
       if (/bash|run |build|ls /i.test(text)) {
         emit({ t: "confirm", name: "bash", detail: "ls -la", diff: [] });
@@ -198,6 +200,7 @@ export function installMock() {
           emit({ t: "tool", name: "bash", detail: "ls -la", diff: [], paths: [] });
           await sleep(150);
           if (runAbort) return;
+          emit({ t: "tool_done", name: "bash", ok: true, ms: 92, exit: null });
           emit({ t: "note", s: "README.md\nCargo.toml\nsrc/\nui/" });
           msgs.push({
             role: "assistant",
@@ -223,6 +226,9 @@ export function installMock() {
           ],
         });
         await sleep(200);
+        if (runAbort) return;
+        emit({ t: "tool_done", name: "edit", ok: false, ms: 1241, exit: 3 });
+        emit({ t: "todo", s: "[x] inspect project layout\n[~] locate the entry point\n[-] dropped step\n[ ] summarize findings" });
       }
       if (runAbort) return;
       const s2 = s;

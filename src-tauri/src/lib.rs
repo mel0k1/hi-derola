@@ -362,6 +362,9 @@ fn pump(mut rx: mpsc::UnboundedReceiver<ApiEvent>, app: AppHandle, sh: Arc<Share
                         "paths": paths,
                     })
                 }
+                ApiEvent::ToolDone { name, ok, ms, exit } => {
+                    json!({"t": "tool_done", "name": name, "ok": ok, "ms": ms, "exit": exit})
+                }
                 ApiEvent::Confirm { name, args, rx } => {
                     if sh.confirm.lock().unwrap().is_some() {
                         let _ = rx.send(hi_derola::provider::ConfirmReply {

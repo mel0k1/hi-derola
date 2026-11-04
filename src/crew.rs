@@ -1819,8 +1819,9 @@ async fn run_member_turn(
         msgs.push(Message::new(crate::chat::Role::Assistant, t).with_calls(calls.clone()));
         for call in calls {
             let tag = if member.bg { " · bg" } else { "" };
+            let display = format!("{} (crew {}{})", call.name, member.name, tag);
             let _ = tx.send(ApiEvent::Tool {
-                name: format!("{} (crew {}{})", call.name, member.name, tag),
+                name: display.clone(),
                 detail: crate::tools::detail(&call.name, &call.args),
                 diff: crate::tools::preview(&call.name, &call.args),
                 paths: crate::tools::paths(&call.name, &call.args),
@@ -1867,18 +1868,40 @@ async fn run_member_turn(
                             perm.rules.push(rule);
                         }
                     }
+                    let started = std::time::Instant::now();
                     let out = crate::tools::execute(&call.name, &call.args, None).await;
-                    msgs.push(tool_msg(match out {
+                    let out = match out {
                         Ok(o) => o,
                         Err(e) => format!("error: {e:#}"),
-                    }));
+                    };
+                    let exit = crate::agent::tool_exit_code(&out);
+                    let _ = tx.send(ApiEvent::ToolDone {
+                        name: display.clone(),
+                        ok: !out.starts_with("error:")
+                            && !out.contains("command timed out")
+                            && exit.map_or(true, |c| c == 0),
+                        ms: started.elapsed().as_millis() as u64,
+                        exit,
+                    });
+                    msgs.push(tool_msg(out));
                 }
                 crate::perm::Perm::Allow => {
+                    let started = std::time::Instant::now();
                     let out = crate::tools::execute(&call.name, &call.args, None).await;
-                    msgs.push(tool_msg(match out {
+                    let out = match out {
                         Ok(o) => o,
                         Err(e) => format!("error: {e:#}"),
-                    }));
+                    };
+                    let exit = crate::agent::tool_exit_code(&out);
+                    let _ = tx.send(ApiEvent::ToolDone {
+                        name: display.clone(),
+                        ok: !out.starts_with("error:")
+                            && !out.contains("command timed out")
+                            && exit.map_or(true, |c| c == 0),
+                        ms: started.elapsed().as_millis() as u64,
+                        exit,
+                    });
+                    msgs.push(tool_msg(out));
                 }
             }
         }

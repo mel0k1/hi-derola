@@ -98,6 +98,7 @@ export type Ev =
   | { t: "reasoning"; s: string }
   | { t: "note"; s: string }
   | { t: "tool"; name: string; detail: string; diff?: DiffRow[]; paths?: string[] }
+  | { t: "tool_done"; name: string; ok: boolean; ms: number; exit?: number | null }
   | { t: "confirm"; name: string; detail: string; diff?: DiffRow[] }
   | { t: "ask"; args: string }
   | { t: "todo"; s: string }

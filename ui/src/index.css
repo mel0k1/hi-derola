@@ -418,42 +418,66 @@
   line-height: 1.6;
 }
 
-/* per-block copy button (dsh CodeToolbar) */
-.md .md-copy {
-  position: absolute;
-  top: 6px;
-  right: 6px;
+/* dsh CodeCard: persistent toolbar — language left, wrap + copy right */
+.md .md-code-card {
+  margin: 0.6rem 0;
+  border: 0.5px solid var(--hairline);
+  border-radius: 12px;
+  background: var(--code);
+  overflow: hidden;
+}
+.md .md-code-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  height: 32px;
+  padding: 0 6px 0 12px;
+  border-bottom: 0.5px solid var(--hairline);
+}
+.md .md-code-lang {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--caption);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.md .md-code-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.md .md-code-actions button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 24px;
   height: 24px;
   border-radius: 7px;
-  border: 0.5px solid var(--hairline);
-  background: var(--card);
+  border: none;
+  background: none;
+  color: var(--caption);
+  transition: background 0.12s ease, color 0.12s ease;
+}
+.md .md-code-card:hover .md-code-actions button {
   color: var(--muted-foreground);
-  opacity: 0;
-  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
 }
-@media (hover: hover) {
-  .md pre:hover .md-copy,
-  .md pre:focus-within .md-copy {
-    opacity: 1;
-  }
-}
-.md .md-copy:hover {
+.md .md-code-actions button:hover {
   color: var(--foreground);
   background: var(--accent);
 }
-.md .md-copy:focus-visible {
-  opacity: 1;
+.md .md-code-actions button:focus-visible {
   outline: 1.5px solid var(--info);
   outline-offset: 1px;
 }
-.md .md-copy-i {
+.md .md-copy-i,
+.md .md-wrap-i {
   display: none;
 }
-.md .md-copy-i svg {
+.md .md-copy-i svg,
+.md .md-wrap-i svg {
   width: 13px;
   height: 13px;
 }
@@ -467,6 +491,34 @@
   display: inline-flex;
   color: var(--info);
 }
+.md .md-wrap[aria-pressed="true"] .md-wrap-on {
+  display: inline-flex;
+}
+.md .md-wrap[aria-pressed="false"] .md-wrap-on {
+  display: none;
+}
+.md .md-wrap[aria-pressed="true"] .md-wrap-off {
+  display: none;
+}
+.md .md-wrap[aria-pressed="false"] .md-wrap-off {
+  display: inline-flex;
+}
+.md .md-code-card pre {
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  background: none;
+  padding: 0.65rem 0.85rem;
+  overflow-x: auto;
+  white-space: pre;
+}
+.md .md-code-card pre[data-wrap="true"] {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: hidden;
+}
+
+/* per-block copy button (dsh CodeToolbar) is styled with .md-code-actions above */
 .md a {
   color: var(--info);
   font-weight: 500;
@@ -481,11 +533,23 @@
   border-top: 0.5px solid var(--border);
   margin: 0.85rem 0;
 }
-.md table {
-  border-collapse: collapse;
+/* dsh tables: <4 columns fill the column, 4+ scroll at natural width */
+.md .md-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
   margin: 0.6rem 0;
+}
+.md .md-table-scroll table {
+  border-collapse: collapse;
   font-size: 13px;
   line-height: 20px;
+}
+.md .md-table-fill table {
+  width: 100%;
+}
+.md .md-table-wide table {
+  width: max-content;
 }
 .md th,
 .md td {
@@ -532,6 +596,51 @@
 }
 .dark .diff-del {
   color: #f47a7a;
+}
+
+/* ---------- dsh TodoPanel state dot spinner ---------- */
+
+.todo-spin {
+  animation: todo-spin 1.5s linear infinite;
+}
+.todo-spin-track,
+.todo-spin-arc {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+.todo-spin-track {
+  opacity: 0.25;
+}
+.todo-spin-arc {
+  stroke-dasharray: 12 150;
+  animation: todo-dash 1.5s ease-in-out infinite;
+}
+@keyframes todo-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes todo-dash {
+  0% {
+    stroke-dasharray: 12 150;
+    stroke-dashoffset: 0;
+  }
+  50% {
+    stroke-dasharray: 24 150;
+    stroke-dashoffset: -6;
+  }
+  100% {
+    stroke-dasharray: 12 150;
+    stroke-dashoffset: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .todo-spin,
+  .todo-spin-arc {
+    animation: none;
+  }
 }
 
 /* ---------- 5px pill scrollbars (dsh) ---------- */

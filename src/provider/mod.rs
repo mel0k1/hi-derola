@@ -38,6 +38,12 @@ pub enum ApiEvent {
         diff: Vec<crate::diff::Row>,
         paths: Vec<String>,
     },
+    ToolDone {
+        name: String,
+        ok: bool,
+        ms: u64,
+        exit: Option<i64>,
+    },
     Confirm {
         name: String,
         args: String,

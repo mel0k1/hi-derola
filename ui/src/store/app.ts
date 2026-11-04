@@ -27,11 +27,33 @@ export type ChatItem =
   | { kind: "bot"; id: number; text: string }
   | { kind: "note"; id: number; text: string }
   | { kind: "error"; id: number; text: string }
-  | { kind: "tool"; id: number; name: string; detail: string; diff?: DiffRow[] }
+  | { kind: "tool"; id: number; name: string; detail: string; diff?: DiffRow[]; state?: "ok" | "error"; ms?: number; exit?: number | null; running?: boolean }
   | { kind: "toolout"; id: number; text: string }
-  | { kind: "todo"; id: number; text: string }
   | { kind: "bg"; bgId: string; id: number; output: string; ended: boolean }
   | { kind: "think"; id: number; text: string; streaming: boolean; open: boolean };
+
+// dsh TodoItem: one projected plan entry rendered in the todo dock
+export interface TodoEntry {
+  content: string;
+  status: "pending" | "in_progress" | "completed" | "cancelled";
+}
+
+// The backend sends todo::render() text — [x] done, [~] active, [ ] pending,
+// [-] cancelled, plus a trailing "N/M completed" summary line.
+export function parseTodos(text: string): TodoEntry[] {
+  const out: TodoEntry[] = [];
+  for (const raw of text.split("\n")) {
+    const m = raw.match(/^\[( |x|X|~|-)\] (.*)$/);
+    if (!m) continue;
+    const content = m[2].trim();
+    if (!content) continue;
+    out.push({
+      content,
+      status: m[1] === "x" || m[1] === "X" ? "completed" : m[1] === "~" ? "in_progress" : m[1] === "-" ? "cancelled" : "pending",
+    });
+  }
+  return out;
+}
 
 export type View = "chat" | "sandbox" | "hosts" | "skills" | "crew";
 
@@ -126,6 +148,7 @@ interface Store {
   ctx: { used: number; limit: number };
   changes: Record<string, ChangeEntry>;
   transcript: ChatItem[];
+  todos: TodoEntry[];
   streamText: string | null;
   attachments: string[];
   models: string[];
@@ -348,6 +371,7 @@ export const useStore = create<Store>((set, get) => ({
   ctx: { used: 0, limit: 0 },
   changes: {},
   transcript: [],
+  todos: [],
   streamText: null,
   attachments: [],
   models: [],
@@ -913,12 +937,36 @@ export const useStore = create<Store>((set, get) => ({
         set((s) => ({
           transcript: [
             ...s.transcript,
-            { kind: "tool", id: nextId(), name: ev.name, detail: ev.detail, diff: ev.diff },
+            { kind: "tool", id: nextId(), name: ev.name, detail: ev.detail, diff: ev.diff, running: true },
           ],
           ...(changes ? { changes } : {}),
           phase: "running",
           autoscrollFlag: s.autoscrollFlag + 1,
         }));
+        break;
+      }
+      case "tool_done": {
+        set((s) => {
+          const items = [...s.transcript];
+          let idx = -1;
+          for (let i = items.length - 1; i >= 0; i--) {
+            const it = items[i];
+            if (it.kind === "tool" && it.name === ev.name) {
+              idx = i;
+              break;
+            }
+          }
+          if (idx < 0) return {};
+          const it = items[idx] as Extract<ChatItem, { kind: "tool" }>;
+          items[idx] = {
+            ...it,
+            state: ev.ok ? "ok" : "error",
+            ms: ev.ms,
+            exit: ev.exit ?? null,
+            running: false,
+          };
+          return { transcript: items };
+        });
         break;
       }
       case "confirm": {
@@ -965,14 +1013,10 @@ export const useStore = create<Store>((set, get) => ({
         break;
       }
       case "todo": {
-        set((s) => {
-          const rest = s.transcript.filter((it) => it.kind !== "todo");
-          if (!ev.s || ev.s === "(todo list is empty)") return { transcript: rest };
-          return {
-            transcript: [...rest, { kind: "todo", id: nextId(), text: ev.s }],
-            autoscrollFlag: s.autoscrollFlag + 1,
-          };
-        });
+        set((s) => ({
+          todos: parseTodos(ev.s || ""),
+          autoscrollFlag: s.autoscrollFlag + 1,
+        }));
         break;
       }
       case "bgout": {
@@ -1022,6 +1066,7 @@ export const useStore = create<Store>((set, get) => ({
           changes: {},
           reviewExpanded: new Set(),
           transcript: [],
+          todos: [],
           streamText: null,
           queue: [],
           phase: "idle",
@@ -1035,7 +1080,11 @@ export const useStore = create<Store>((set, get) => ({
         }
         set((s) => {
           let items = s.transcript.map((it) =>
-            it.kind === "think" ? { ...it, streaming: false, open: false } : it
+            it.kind === "think"
+              ? { ...it, streaming: false, open: false }
+              : it.kind === "tool" && it.running
+                ? { ...it, running: false }
+                : it
           );
           const hadStream = streamRaw !== null;
           streamRaw = null;
@@ -1056,7 +1105,13 @@ export const useStore = create<Store>((set, get) => ({
       case "failed":
         set((s) => ({
           transcript: [
-            ...s.transcript.map((it) => (it.kind === "think" ? { ...it, streaming: false, open: false } : it)),
+            ...s.transcript.map((it) =>
+              it.kind === "think"
+                ? { ...it, streaming: false, open: false }
+                : it.kind === "tool" && it.running
+                  ? { ...it, running: false }
+                  : it
+            ),
             { kind: "error", id: nextId(), text: ev.s },
           ],
           waiting: false,
@@ -1144,7 +1199,7 @@ export const useStore = create<Store>((set, get) => ({
         set({ sidebarHidden: true });
       }
       if (st.todos) {
-        set((s) => ({ transcript: [...s.transcript, { kind: "todo", id: nextId(), text: st.todos! }] }));
+        set({ todos: parseTodos(st.todos) });
       }
       if (!st.has_provider) {
         get().note("no api key yet: press ctrl+comma or click the sliders icon to add one");

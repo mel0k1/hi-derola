@@ -769,6 +769,7 @@ impl App {
                     self.scroll_up = 0;
                 }
             }
+            ApiEvent::ToolDone { .. } => {}
             ApiEvent::Confirm { name, args, rx } => {
                 self.flush_stream();
                 if self.confirm.is_some() {

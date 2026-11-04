@@ -14,6 +14,105 @@ const SUGGESTIONS = [
   { label: "show commands", prompt: "/help" },
 ];
 
+// dsh tool row: per-family glyph, tool name as the title
+const TOOL_ICONS: Record<string, string> = {
+  bash: "terminal",
+  read_file: "file",
+  write_file: "pencil",
+  edit: "pencil",
+  apply_patch: "diff",
+  webfetch: "globe",
+  codesearch: "search",
+  grep: "search",
+  glob: "search",
+  list: "list",
+  todowrite: "list",
+  todoread: "list",
+  question: "crew",
+  subagent: "crew",
+  skill: "skill",
+  code: "box",
+  lsp: "search",
+  task_kill: "x",
+};
+
+function toolIcon(name: string): string {
+  if (name.startsWith("mcp__")) return "server";
+  const base = name.replace(/ \(crew .*\)$/, "").trim();
+  return TOOL_ICONS[base] || "box";
+}
+
+// dsh summarySuffix: mono duration that survives a narrow row
+function fmtMs(ms?: number): string {
+  if (typeof ms !== "number") return "";
+  if (ms < 1000) return `${ms}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s < 10 ? s.toFixed(1) : Math.round(s)}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${Math.round(s % 60)}s`;
+}
+
+function ToolRow({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
+  const hasDiff = !!item.diff && item.diff.length > 0;
+  const [open, setOpen] = useState(false);
+  const adds = item.diff?.filter((r) => r.tag === 1).length ?? 0;
+  const dels = item.diff?.filter((r) => r.tag === 2).length ?? 0;
+  const failed = item.state === "error";
+  const running = !!item.running;
+  const dur = fmtMs(item.ms);
+  return (
+    <div className="msg-in my-1">
+      <div
+        data-state={failed ? "error" : running ? "running" : "ok"}
+        onClick={() => hasDiff && setOpen(!open)}
+        className={cn(
+          "group/row -mx-2 flex h-7 items-center gap-2 rounded-[10px] px-2 transition-colors duration-100",
+          hasDiff && "cursor-pointer hover:bg-accent"
+        )}
+      >
+        <Icon
+          name="chevron"
+          className={cn(
+            "flex-none text-caption transition-transform duration-100 [&>svg]:size-3.5",
+            hasDiff ? (open ? "rotate-180 cursor-pointer" : "-rotate-90 cursor-pointer") : "-rotate-90 opacity-0"
+          )}
+        />
+        <Icon name={toolIcon(item.name)} className="flex-none text-caption [&>svg]:size-3.5" />
+        <span className="flex-none text-[13px] font-medium text-foreground">{item.name}</span>
+        <span className="size-1 flex-none rounded-full bg-caption/70" />
+        <span
+          className={cn(
+            "min-w-0 flex-1 truncate font-mono text-[11.5px] text-tertiary",
+            running && "shimmer-text",
+            failed && "text-destructive"
+          )}
+        >
+          {item.detail}
+        </span>
+        {failed && item.exit != null && (
+          <span className="flex flex-none items-center gap-1.5 rounded-full border-[0.5px] border-hairline bg-card px-2 py-px font-mono text-[10px] text-caption">
+            <span className="size-1.5 rounded-full bg-destructive" />
+            exit {item.exit}
+          </span>
+        )}
+        {dur && !running && (
+          <span className="flex-none font-mono text-[10px] text-caption">{dur}</span>
+        )}
+        {hasDiff && !failed && (
+          <span className="flex-none font-mono text-[10.5px] opacity-0 transition-opacity duration-100 [@media(hover:hover)]:group-hover/row:opacity-100">
+            <span className="text-success">+{adds}</span> <span className="text-destructive">−{dels}</span>
+          </span>
+        )}
+      </div>
+      {hasDiff && open && (
+        <div className="animate-in fade-in slide-in-from-top-1 mt-1 mb-2 ml-3 overflow-x-auto rounded-[12px] border-[0.5px] border-hairline bg-code px-2.5 py-1.5 duration-150">
+          <DiffLines rows={item.diff!} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Welcome() {
   const doSend = useStore((s) => s.doSend);
   return (
@@ -44,35 +143,6 @@ function Welcome() {
       <div className="msg-in mt-8 flex flex-wrap items-center justify-center gap-1.5 text-[12px] text-caption" style={{ animationDelay: "0.42s" }}>
         ask anything · attach files with <Icon name="paperclip" className="text-tertiary" /> · /help for commands
       </div>
-    </div>
-  );
-}
-
-function ToolRow({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
-  const hasDiff = !!item.diff && item.diff.length > 0;
-  const [open, setOpen] = useState(false);
-  return (
-    <div className="msg-in my-1">
-      <div
-        onClick={() => hasDiff && setOpen(!open)}
-        className={cn(
-          "-mx-2 flex h-7 items-center gap-2 rounded-[10px] px-2 transition-colors duration-100",
-          hasDiff && "cursor-pointer hover:bg-accent"
-        )}
-      >
-        <Icon
-          name="chevron"
-          className={cn("flex-none text-caption transition-transform duration-100 [&>svg]:size-3.5", hasDiff ? (open ? "rotate-180" : "-rotate-90 cursor-pointer") : "-rotate-90")}
-        />
-        <span className="flex-none text-[13px] font-medium text-foreground">{item.name}</span>
-        <span className="size-1 flex-none rounded-full bg-caption/70" />
-        <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-tertiary">{item.detail}</span>
-      </div>
-      {hasDiff && open && (
-        <div className="animate-in fade-in slide-in-from-top-1 mt-1 mb-2 ml-3 overflow-x-auto rounded-[12px] border-[0.5px] border-hairline bg-code px-2.5 py-1.5 duration-150">
-          <DiffLines rows={item.diff!} />
-        </div>
-      )}
     </div>
   );
 }
@@ -242,13 +312,6 @@ function Item({ item, canRetry }: { item: ChatItem; canRetry?: boolean }) {
       return <ToolRow item={item} />;
     case "toolout":
       return <ToolOut item={item} />;
-    case "todo":
-      return (
-        <div className="msg-in my-2 ml-1 border-l-2 border-hairline pl-3">
-          <div className="text-[10.5px] font-medium tracking-[0.08em] text-caption uppercase select-none">todos</div>
-          <pre className="mt-0.5 font-mono text-[12px] leading-[19px] break-words whitespace-pre-wrap text-muted-foreground">{item.text}</pre>
-        </div>
-      );
     case "think":
       return <ThinkBox item={item} />;
     case "bg":

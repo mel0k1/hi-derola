@@ -398,6 +398,7 @@ pub async fn run(
                     }
                 }
             }
+            let started = std::time::Instant::now();
             let out = if call.name == "question" {
                 match ask_user(&call.args, &tx).await {
                     Ok(a) => a,
@@ -591,6 +592,17 @@ pub async fn run(
                 }
             };
             let out = tools::spill(out, &call.name, cfg.output_budget);
+            let ms = started.elapsed().as_millis() as u64;
+            let exit = tool_exit_code(&out);
+            let ok = !out.starts_with("error:")
+                && !out.contains("command timed out")
+                && exit.map_or(true, |c| c == 0);
+            let _ = tx.send(ApiEvent::ToolDone {
+                name: call.name.clone(),
+                ok,
+                ms,
+                exit,
+            });
             let summary: String = out.lines().next().unwrap_or("").chars().take(70).collect();
             let _ = tx.send(ApiEvent::Note(summary));
             msgs.push(Message::tool(&call.id, out));
@@ -610,6 +622,16 @@ pub async fn run(
             req.messages = msgs.clone();
         }
     }
+}
+
+/// Exit code appended by the bash tool on failure ("exit code: N" on the tail).
+pub fn tool_exit_code(out: &str) -> Option<i64> {
+    let idx = out.rfind("exit code: ")?;
+    out[idx + "exit code: ".len()..]
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
 }
 
 fn deny_message(name: &str, feedback: &str) -> String {
@@ -1299,6 +1321,7 @@ fn run_subagent<'a>(
                     }
                     ApiEvent::Note(_)
                     | ApiEvent::Tool { .. }
+                    | ApiEvent::ToolDone { .. }
                     | ApiEvent::Confirm { .. }
                     | ApiEvent::Usage { .. }
                     | ApiEvent::BgOut { .. }
