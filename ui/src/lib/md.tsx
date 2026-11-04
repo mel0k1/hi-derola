@@ -1,21 +1,47 @@
 import { copyText } from "@/lib/utils";
+import { invoke } from "@/lib/tauri";
+import { useStore } from "@/store/app";
+import { openContextMenu } from "@/lib/menu";
+import { KEYBLOCK_RE, esc, maskedFor, maskSegments } from "@/lib/secrets";
+import { iconSvg } from "@/lib/icons";
 
-function esc(s: string) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
-
-function inline(s: string) {
-  return s
+function inline(s: string, blocks: string[]) {
+  const out = s
     .replace(/`([^`\n]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
     .replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<i>$2</i>")
     .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');
+  // dsh secret rule: credentials masked last so markup protects href/code, eye toggles reveal
+  return maskSegments(out, blocks, true);
 }
 
 const COPY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
 const CHECK_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>';
 const WRAP_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M3 12h13a3 3 0 1 1 0 6h-4"/><path d="M14 15l-2 3 2 3"/><path d="M3 18h5"/></svg>';
 const NOWRAP_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M3 12h13a3 3 0 1 1 0 6"/><path d="M14 15l-2 3 2 3"/><path d="M3 18h3"/><path d="M21 6v12"/></svg>';
+const EYE_SVG = iconSvg("eye");
+const EYE_OFF_SVG = iconSvg("eyeoff");
+
+// dsh SecretText: masked credential with an inline reveal control
+function secretBlock(m: string): string {
+  const lines = m.split("\n");
+  const masked =
+    lines.length > 2
+      ? lines[0] + "\n" + lines.slice(1, -1).map((l) => (l ? "*".repeat(l.length) : l)).join("\n") + "\n" + lines[lines.length - 1]
+      : maskedFor(m, 8);
+  const stars = masked
+    .split(/(\*+)/)
+    .map((p) => (p ? (p[0] === "*" ? `<span class="md-secret-star">${p}</span>` : esc(p).replace(/\n/g, "<br>")) : ""))
+    .join("");
+  return (
+    `<span class="md-secret" data-raw="${m}" data-masked="${masked}" data-masked-html="${esc(stars)}">` +
+    `<span class="md-secret-value">${stars}</span>` +
+    `<button type="button" class="md-eye" aria-pressed="false" aria-label="reveal value" title="reveal value">` +
+    `<span class="md-eye-i md-eye-reveal">${EYE_SVG}</span>` +
+    `<span class="md-eye-i md-eye-hide">${EYE_OFF_SVG}</span>` +
+    `</button></span>`
+  );
+}
 
 // dsh CodeToolbar: language label left, wrap + copy actions right
 function codeBlock(lang: string, code: string) {
@@ -61,13 +87,13 @@ const isTableSep = (line: string) => /^\|?[\s:|-]+\|?$/.test(line.trim()) && lin
 
 // dsh renderTable: <4 columns fill the message column, 4+ keep natural width
 // and scroll inside the wrapper (md-table-wide hook)
-function tableHtml(rows: string[], aligns: (string | null)[]): string {
+function tableHtml(rows: string[], aligns: (string | null)[], blocks: string[]): string {
   const [head, ...body] = rows;
   const cols = splitRow(head).length;
   const wide = cols >= 4;
   const cell = (c: string, tag: "th" | "td", i: number) => {
     const a = aligns[i] ? ` style="text-align:${aligns[i]}"` : "";
-    return `<${tag}${a}>${inline(c)}</${tag}>`;
+    return `<${tag}${a}>${inline(c, blocks)}</${tag}>`;
   };
   let html = `<div class="md-table-scroll${wide ? " md-table-wide" : " md-table-fill"}"><table>`;
   if (head) {
@@ -86,6 +112,12 @@ export function md(src: string) {
     return "\x00" + (blocks.length - 1) + "\x00";
   });
   src = esc(src);
+  // dsh secret rule: private key blocks span lines — pull them out before line splitting
+  const secrets: string[] = [];
+  src = src.replace(KEYBLOCK_RE, (m) => {
+    secrets.push(secretBlock(m));
+    return "\x02" + (secrets.length - 1) + "\x02";
+  });
   const lines = src.split("\n");
   let html = "";
   let para: string[] = [];
@@ -128,7 +160,7 @@ export function md(src: string) {
       closeList();
       closeQuote();
       const n = h[1].length;
-      html += `<h${n}>${inline(h[2])}</h${n}>`;
+      html += `<h${n}>${inline(h[2], secrets)}</h${n}>`;
       continue;
     }
     if (/^(---+|\*\*\*+|___+)\s*$/.test(t)) {
@@ -146,7 +178,7 @@ export function md(src: string) {
         html += "<blockquote>";
         quote = true;
       }
-      html += inline(text) + "<br>";
+      html += inline(text, secrets) + "<br>";
       continue;
     }
     closeQuote();
@@ -162,7 +194,7 @@ export function md(src: string) {
         li++;
       }
       li--;
-      html += tableHtml(rows, aligns);
+      html += tableHtml(rows, aligns, secrets);
       continue;
     }
     const ul = l.match(/^\s*[-*+]\s+(.*)$/);
@@ -180,9 +212,9 @@ export function md(src: string) {
       let item = match[1];
       const cb = item.match(/^\[( |x|X)\]\s+(.*)$/);
       if (cb) {
-        item = (cb[1] === " " ? "&#9744; " : "&#9745; ") + inline(cb[2]);
+        item = (cb[1] === " " ? "&#9744; " : "&#9745; ") + inline(cb[2], secrets);
       } else {
-        item = inline(item);
+        item = inline(item, secrets);
       }
       html += "<li>" + item + "</li>";
       continue;
@@ -192,7 +224,7 @@ export function md(src: string) {
       closeList();
       continue;
     }
-    para.push(inline(l));
+    para.push(inline(l, secrets));
   }
   flushPara();
   closeList();
@@ -200,31 +232,79 @@ export function md(src: string) {
   return html;
 }
 
-export function Md({ text, className }: { text: string; className?: string }) {
-  // delegated clicks for the generated per-block toolbar buttons
-  const onClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    const target = e.target as HTMLElement;
-    const wrapBtn = target.closest("button.md-wrap");
-    if (wrapBtn) {
-      const pre = wrapBtn.closest(".md-code-card")?.querySelector("pre");
-      if (pre) {
-        const wrapped = pre.getAttribute("data-wrap") !== "false";
-        pre.setAttribute("data-wrap", wrapped ? "false" : "true");
-        wrapBtn.setAttribute("aria-pressed", wrapped ? "false" : "true");
+// delegated clicks for the generated per-block controls (toolbar, secret eye, links);
+// shared with plain-text renderers that embed the same markup (user bubbles)
+export function mdClickHandler(e: React.MouseEvent<HTMLElement>) {
+  const target = e.target as HTMLElement;
+  const eye = target.closest("button.md-eye");
+  if (eye) {
+    const box = eye.closest(".md-secret");
+    const val = box?.querySelector(".md-secret-value");
+    if (box && val) {
+      const revealed = box.getAttribute("data-revealed") === "1";
+      if (revealed) {
+        val.innerHTML = box.getAttribute("data-masked-html") || "";
+        box.setAttribute("data-revealed", "0");
+        eye.setAttribute("aria-pressed", "false");
+      } else {
+        val.textContent = box.getAttribute("data-raw") || "";
+        box.setAttribute("data-revealed", "1");
+        eye.setAttribute("aria-pressed", "true");
       }
-      return;
     }
-    const btn = target.closest("button.md-copy");
-    if (!btn) return;
-    const code = btn.closest(".md-code-card")?.querySelector("code");
-    if (!code) return;
-    void copyText(code.textContent || "").then((ok) => {
-      if (!ok) return;
-      btn.classList.add("copied");
-      setTimeout(() => btn.classList.remove("copied"), 1400);
-    });
-  };
-  return <div className={"md " + (className || "")} onClick={onClick} dangerouslySetInnerHTML={{ __html: md(text) }} />;
+    return;
+  }
+  const anchor = target.closest("a");
+  if (anchor) {
+    const href = anchor.getAttribute("href") || "";
+    if (/^https?:/.test(href)) {
+      e.preventDefault();
+      invoke("open_url", { url: href }).catch(() => {});
+    }
+    return;
+  }
+  const wrapBtn = target.closest("button.md-wrap");
+  if (wrapBtn) {
+    const pre = wrapBtn.closest(".md-code-card")?.querySelector("pre");
+    if (pre) {
+      const wrapped = pre.getAttribute("data-wrap") !== "false";
+      pre.setAttribute("data-wrap", wrapped ? "false" : "true");
+      wrapBtn.setAttribute("aria-pressed", wrapped ? "false" : "true");
+    }
+    return;
+  }
+  const btn = target.closest("button.md-copy");
+  if (!btn) return;
+  const code = btn.closest(".md-code-card")?.querySelector("code");
+  if (!code) return;
+  void copyText(code.textContent || "").then((ok) => {
+    if (!ok) return;
+    btn.classList.add("copied");
+    setTimeout(() => btn.classList.remove("copied"), 1400);
+  });
+}
+
+// dsh open-in-app url menu: open externally or copy the link
+export function mdContextMenu(e: React.MouseEvent<HTMLElement>) {
+  const anchor = (e.target as HTMLElement).closest("a");
+  if (!anchor) return;
+  const href = anchor.getAttribute("href") || "";
+  if (!/^https?:/.test(href)) return;
+  openContextMenu(e, [
+    { id: "open", label: "Open Link", icon: "globe", onSelect: () => invoke("open_url", { url: href }).catch(() => {}) },
+    {
+      id: "copy",
+      label: "Copy Link",
+      icon: "link",
+      onSelect: () => {
+        void copyText(href).then((ok) => ok && useStore.getState().toast("copied"));
+      },
+    },
+  ]);
+}
+
+export function Md({ text, className }: { text: string; className?: string }) {
+  return <div className={"md " + (className || "")} onClick={mdClickHandler} onContextMenu={mdContextMenu} dangerouslySetInnerHTML={{ __html: md(text) }} />;
 }
 
 export function DiffLines({ rows }: { rows: { tag: 0 | 1 | 2; text: string }[] }) {

@@ -518,6 +518,72 @@
   overflow-x: hidden;
 }
 
+/* dsh SecretText: masked credential — mono box, star tiles over the hidden
+   characters, inline reveal control; revealing never reflows the line */
+.md-secret {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  max-width: 100%;
+  margin: 0 2px;
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+}
+.md-secret-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.md-secret-star {
+  -webkit-text-fill-color: transparent;
+  background-color: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 20'%3E%3Cpath d='M6 5.6v8.8M2.19 7.8l7.62 4.4M2.19 12.2l7.62-4.4' stroke='%23000' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") left center / 1ch 100% repeat-x;
+  mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 20'%3E%3Cpath d='M6 5.6v8.8M2.19 7.8l7.62 4.4M2.19 12.2l7.62-4.4' stroke='%23000' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E") left center / 1ch 100% repeat-x;
+}
+/* the line-box center sits below the middle of the glyphs; both marks and the
+   control rise together without moving layout */
+.md-secret-star,
+.md-eye {
+  position: relative;
+  top: -0.125em;
+}
+.md-eye {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--caption);
+  cursor: pointer;
+  transition: color 0.12s ease;
+}
+@media (hover: hover) {
+  .md-eye:hover {
+    color: var(--foreground);
+  }
+}
+.md-eye:focus-visible {
+  outline: 1.5px solid var(--info);
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+.md-eye-i {
+  display: none;
+}
+.md-eye-i svg {
+  width: 1em;
+  height: 1em;
+}
+.md-secret:not([data-revealed="1"]) .md-eye-reveal {
+  display: inline-flex;
+}
+.md-secret[data-revealed="1"] .md-eye-reveal {
+  display: none;
+}
+.md-secret[data-revealed="1"] .md-eye-hide {
+  display: inline-flex;
+}
+
 /* per-block copy button (dsh CodeToolbar) is styled with .md-code-actions above */
 .md a {
   color: var(--info);

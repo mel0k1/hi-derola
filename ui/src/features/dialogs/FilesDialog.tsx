@@ -5,7 +5,8 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Icon } from "@/lib/icons";
 import { useStore } from "@/store/app";
 import { invoke } from "@/lib/tauri";
-import { fmtTokens, joinPath } from "@/lib/utils";
+import { fmtTokens, joinPath, copyText } from "@/lib/utils";
+import { fileManagerLabel, openContextMenu } from "@/lib/menu";
 
 function Crumbs({ path }: { path: string }) {
   const browse = useStore((s) => s.browse);
@@ -116,10 +117,30 @@ export function FilesDialog() {
           <div className="p-1.5">
             {files.data && files.data.entries.length === 0 && <div className="p-3 text-[12.5px] text-muted-foreground">empty folder</div>}
             {files.data && files.data.entries.length > 0 && entries.length === 0 && <div className="p-3 text-[12.5px] text-muted-foreground">no files match "{filter.trim()}"</div>}
-            {entries.map((e) => (
+            {entries.map((e) => {
+              const full = files.data ? joinPath(files.data.path, e.name) : "";
+              return (
               <div
                 key={e.name}
                 className="group flex cursor-pointer items-center gap-2.5 rounded-[10px] px-2.5 py-1.5 transition-colors duration-100 hover:bg-accent"
+                onContextMenu={(ev) =>
+                  openContextMenu(ev, [
+                    {
+                      id: "reveal",
+                      label: fileManagerLabel(),
+                      icon: "folder",
+                      onSelect: () => invoke("reveal_path", { path: full }).catch(() => {}),
+                    },
+                    {
+                      id: "copy",
+                      label: "Copy Path",
+                      icon: "copy",
+                      onSelect: () => {
+                        void copyText(full).then((ok) => ok && useStore.getState().toast("copied"));
+                      },
+                    },
+                  ])
+                }
                 onClick={async () => {
                   if (e.dir && files.data) {
                     browse(joinPath(files.data.path, e.name));
@@ -148,7 +169,8 @@ export function FilesDialog() {
                   </button>
                 )}
               </div>
-            ))}
+              );
+            })}
           </div>
         </ScrollArea>
         <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border px-4 py-2.5">

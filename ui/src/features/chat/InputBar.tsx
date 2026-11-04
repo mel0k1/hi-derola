@@ -3,7 +3,8 @@ import { Icon } from "@/lib/icons";
 import { Hint, keyChips } from "@/lib/hint";
 import { invoke } from "@/lib/tauri";
 import { useStore, type MentionItem, type TodoEntry } from "@/store/app";
-import { chipName, cn, fmtCost, fmtTokens } from "@/lib/utils";
+import { chipName, cn, copyText, fmtCost, fmtTokens } from "@/lib/utils";
+import { fileManagerLabel, openContextMenu } from "@/lib/menu";
 import { ModelMenu } from "./ModelMenu";
 
 let mfilesCache: string[] | null = null;
@@ -98,12 +99,37 @@ function Chips() {
   const attachments = useStore((s) => s.attachments);
   const detachChip = useStore((s) => s.detachChip);
   if (!attachments.length) return null;
+  // dsh open-in-app file menu: reveal in the file manager, copy the path
+  const chipMenu = (p: string, i: number) => [
+    {
+      id: "reveal",
+      label: fileManagerLabel(),
+      icon: "folder",
+      onSelect: () => invoke("reveal_path", { path: p }).catch(() => {}),
+    },
+    {
+      id: "copy",
+      label: "Copy Path",
+      icon: "copy",
+      onSelect: () => {
+        void copyText(p).then((ok) => ok && useStore.getState().toast("copied"));
+      },
+    },
+    {
+      id: "remove",
+      label: "Remove",
+      icon: "x",
+      sep: true,
+      onSelect: () => detachChip(i),
+    },
+  ];
   return (
     <div className="mb-1.5 flex flex-wrap gap-1.5">
       {attachments.map((p, i) => (
         <span
           key={i}
           title={p}
+          onContextMenu={(e) => openContextMenu(e, chipMenu(p, i))}
           className="msg-in flex max-w-72 items-center gap-1.5 rounded-[10px] border-[0.5px] border-hairline bg-secondary py-1 pr-1 pl-2.5 text-[12px] text-foreground"
         >
           <Icon name="file" className="flex-none text-tertiary [&>svg]:size-3.5" />

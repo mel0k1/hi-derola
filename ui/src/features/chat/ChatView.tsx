@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "@/lib/icons";
 import { Hint } from "@/lib/hint";
-import { DiffLines, Md } from "@/lib/md";
+import { DiffLines, Md, mdClickHandler } from "@/lib/md";
+import { maskUserText } from "@/lib/secrets";
+import { openContextMenu, type MenuItem } from "@/lib/menu";
 import { invoke } from "@/lib/tauri";
 import { useStore, type ChatItem } from "@/store/app";
 import { cn, copyText } from "@/lib/utils";
@@ -250,12 +252,40 @@ function CopyBtn({ getText, side }: { getText: () => string; side: "left" | "rig
   );
 }
 
+// dsh url/message menu: copy selection when present, else the whole message
+function msgMenu(e: React.MouseEvent, text: string) {
+  const sel = window.getSelection()?.toString() || "";
+  const items: MenuItem[] = [];
+  if (sel.trim()) {
+    items.push({
+      id: "sel",
+      label: "Copy Selection",
+      icon: "copy",
+      onSelect: () => {
+        void copyText(sel).then((ok) => ok && useStore.getState().toast("copied"));
+      },
+    });
+  }
+  items.push({
+    id: "msg",
+    label: "Copy Message",
+    icon: "copy",
+    sep: !!sel.trim(),
+    onSelect: () => {
+      void copyText(text).then((ok) => ok && useStore.getState().toast("copied"));
+    },
+  });
+  openContextMenu(e, items);
+}
+
 function UserItem({ item }: { item: Extract<ChatItem, { kind: "user" }> }) {
   return (
-    <div className="group/msg relative my-3 flex flex-col items-end">
-      <div className="msg-in max-w-[85%] rounded-[20px] bg-bubble px-4 py-2.5 text-[14px] leading-[22px] whitespace-pre-wrap break-words text-foreground">
-        {item.text}
-      </div>
+    <div className="group/msg relative my-3 flex flex-col items-end" onContextMenu={(e) => msgMenu(e, item.text)}>
+      <div
+        className="msg-in max-w-[85%] rounded-[20px] bg-bubble px-4 py-2.5 text-[14px] leading-[22px] whitespace-pre-wrap break-words text-foreground"
+        onClick={mdClickHandler}
+        dangerouslySetInnerHTML={{ __html: maskUserText(item.text) }}
+      />
       <MsgActions side="right">
         <CopyBtn getText={() => item.text} side="left" />
       </MsgActions>
@@ -266,7 +296,7 @@ function UserItem({ item }: { item: Extract<ChatItem, { kind: "user" }> }) {
 function BotItem({ item, canRetry }: { item: Extract<ChatItem, { kind: "bot" }>; canRetry: boolean }) {
   const retryLast = useStore((s) => s.retryLast);
   return (
-    <div className="group/msg relative my-3">
+    <div className="group/msg relative my-3" onContextMenu={(e) => msgMenu(e, item.text)}>
       <div className="msg-in">
         <Md text={item.text} />
       </div>

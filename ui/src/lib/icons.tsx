@@ -39,6 +39,7 @@ const PATHS: Record<string, string> = {
   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a13.5 13.5 0 0 1 0 18a13.5 13.5 0 0 1 0-18"/>',
   wrap: '<path d="M3 6h18"/><path d="M3 12h13a3 3 0 1 1 0 6h-4"/><path d="M14 15l-2 3 2 3"/><path d="M3 18h5"/>',
   nowrap: '<path d="M3 6h18"/><path d="M3 12h13a3 3 0 1 1 0 6"/><path d="M14 15l-2 3 2 3"/><path d="M3 18h3"/><path d="M21 6v12"/>',
+  link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
 };
 
 export function iconSvg(name: string) {

@@ -18,6 +18,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { useStore } from "@/store/app";
 import { comboFromEvent, parseCombo, sameCombo } from "@/lib/keys";
 import { invoke, listenRaw } from "@/lib/tauri";
+import { ContextMenuHost } from "@/lib/menu";
 import { Icon } from "@/lib/icons";
 
 function DropOverlay({ show }: { show: boolean }) {
@@ -233,6 +234,7 @@ export default function App() {
       <ReviewDialog />
       <PaletteDialog />
       <Toasts />
+      <ContextMenuHost />
       <DropOverlay show={dragOver} />
       <QuitDialog />
     </div>

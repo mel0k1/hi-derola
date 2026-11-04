@@ -1410,6 +1410,81 @@ async fn pick_folder() -> Result<Option<String>, String> {
         .map(|h| h.path().display().to_string()))
 }
 
+// ---- native file/url actions (dsh open-in-app) ----
+
+fn spawn_detached(mut cmd: std::process::Command) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW: no console flash
+    }
+    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[allow(unreachable_code)]
+fn open_with(target: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]).arg(target);
+        return spawn_detached(c);
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return spawn_detached(std::process::Command::new("open").arg(target));
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        return spawn_detached(std::process::Command::new("xdg-open").arg(target));
+    }
+    Err("unsupported platform".into())
+}
+
+/// open a file or folder with the default application
+#[tauri::command]
+#[allow(unreachable_code)]
+async fn open_path(path: String) -> Result<(), String> {
+    open_with(&path)
+}
+
+/// open an http(s) url in the system browser
+#[tauri::command]
+#[allow(unreachable_code)]
+async fn open_url(url: String) -> Result<(), String> {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("only http(s) urls are allowed".into());
+    }
+    open_with(&url)
+}
+
+/// show a path in the file manager (explorer /select, finder -R, parent dir on linux)
+#[tauri::command]
+#[allow(unreachable_code)]
+async fn reveal_path(path: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        return spawn_detached(std::process::Command::new("open").arg("-R").arg(&path));
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let mut c = std::process::Command::new("explorer.exe");
+        c.raw_arg(format!("/select,\"{}\"", path));
+        c.creation_flags(0x0800_0000);
+        return c.spawn().map(|_| ()).map_err(|e| e.to_string());
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let dir = std::path::Path::new(&path)
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| path.clone());
+        return spawn_detached(std::process::Command::new("xdg-open").arg(dir));
+    }
+    #[allow(unreachable_code)]
+    Err("unsupported platform".into())
+}
+
 #[tauri::command]
 async fn detach(sh: State<'_, Arc<Shared>>, app: AppHandle, index: usize) -> Result<(), String> {
     let mut at = sh.attachments.lock().unwrap();
@@ -2854,6 +2929,9 @@ pub fn run() -> Result<()> {
             pick_files,
             pick_folder,
             detach,
+            reveal_path,
+            open_path,
+            open_url,
             set_theme,
             list_project_files,
             set_plan,
