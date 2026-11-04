@@ -596,6 +596,26 @@
   margin-right: 4px;
 }
 
+/* dsh minimap: long code cards scroll inside a capped body; the overview
+   strip on the right mirrors line lengths and carries the viewport band */
+.md .md-code-body {
+  display: flex;
+  align-items: stretch;
+}
+.md .md-code-body pre {
+  flex: 1 1 auto;
+  min-width: 0;
+  max-height: 420px;
+  overflow-y: auto;
+}
+.md .md-minimap {
+  flex: none;
+  width: 46px;
+  border-left: 0.5px solid var(--hairline);
+  cursor: crosshair;
+  touch-action: none;
+}
+
 /* dsh SecretText: masked credential — mono box, star tiles over the hidden
    characters, inline reveal control; revealing never reflows the line */
 .md-secret {

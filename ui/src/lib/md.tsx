@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { copyText } from "@/lib/utils";
 import { invoke } from "@/lib/tauri";
 import { useStore } from "@/store/app";
@@ -78,9 +79,14 @@ function secretBlock(m: string): string {
   );
 }
 
-// dsh CodeToolbar: language label left, wrap + copy actions right
+// dsh CodeToolbar: language label left, wrap + copy actions right.
+// Long blocks get a scrollable body with an overview minimap on the right
+const MINIMAP_MIN_LINES = 28;
+
 function codeBlock(lang: string, code: string) {
   const label = lang ? esc(lang) : "code";
+  const pre = `<pre class="md-code-pre" data-wrap="true"><code${lang ? ` class="lang-${esc(lang)}"` : ""}>${esc(code)}</code></pre>`;
+  const body = code.split("\n").length >= MINIMAP_MIN_LINES ? `<div class="md-code-body">${pre}<canvas class="md-minimap" aria-hidden="true"></canvas></div>` : pre;
   return (
     `<div class="md-code-card">` +
     `<div class="md-code-head">` +
@@ -92,7 +98,7 @@ function codeBlock(lang: string, code: string) {
     `<button type="button" class="md-copy" aria-label="copy code">` +
     `<span class="md-copy-i md-copy-copy">${COPY_SVG}</span><span class="md-copy-i md-copy-check">${CHECK_SVG}</span></button>` +
     `</span></div>` +
-    `<pre class="md-code-pre" data-wrap="true"><code${lang ? ` class="lang-${esc(lang)}"` : ""}>${esc(code)}</code></pre>` +
+    body +
     `</div>`
   );
 }
@@ -158,6 +164,87 @@ function diffBlock(code: string) {
     `<pre class="md-code-pre md-diff-pre" data-wrap="true"><code>${rows}</code></pre>` +
     `</div>`
   );
+}
+
+// dsh minimap: overview strip of a long code card — one bar per line (width =
+// line length), a band for the viewport, click/drag to scroll the code
+function paintMinimap(cv: HTMLCanvasElement, pre: HTMLElement) {
+  const w = cv.clientWidth;
+  const h = cv.clientHeight;
+  if (!w || !h) return;
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = Math.round(w * dpr);
+  cv.height = Math.round(h * dpr);
+  const ctx = cv.getContext("2d");
+  if (!ctx) return;
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+  const lines = (pre.querySelector("code")?.textContent || "").split("\n");
+  const total = lines.length;
+  const slots = Math.max(1, Math.floor(h));
+  const charW = Math.max(1, (w - 9) / 100);
+  const color = getComputedStyle(pre).color || "#888";
+  const slotW = new Array<number>(slots).fill(0);
+  for (let i = 0; i < total; i++) {
+    const s = Math.min(slots - 1, Math.floor((i * slots) / total));
+    slotW[s] = Math.max(slotW[s], lines[i].replace(/\s+$/, "").length);
+  }
+  ctx.fillStyle = color;
+  ctx.globalAlpha = 0.38;
+  for (let s = 0; s < slots; s++) {
+    if (!slotW[s]) continue;
+    const bw = Math.min(w - 7, Math.max(1.5, slotW[s] * charW));
+    ctx.fillRect(4, s + 0.5, bw, 1);
+  }
+  // viewport band + right edge indicator
+  if (pre.scrollHeight > pre.clientHeight + 4) {
+    const top = (pre.scrollTop / pre.scrollHeight) * h;
+    const bh = Math.max(10, (pre.clientHeight / pre.scrollHeight) * h);
+    ctx.globalAlpha = 0.08;
+    ctx.fillRect(0, top, w, bh);
+    ctx.globalAlpha = 0.5;
+    ctx.fillRect(w - 3, top, 2, bh);
+  }
+}
+
+// paint pass for every minimap under root; listeners bind once per pre
+export function paintMinimaps(root: HTMLElement | null) {
+  if (!root || !root.querySelectorAll) return;
+  root.querySelectorAll<HTMLCanvasElement>(".md-minimap").forEach((cv) => {
+    const pre = cv.closest(".md-code-card")?.querySelector("pre");
+    if (!pre) return;
+    const repaint = () => paintMinimap(cv, pre);
+    repaint();
+    const host = pre as HTMLElement & { __mdMini?: boolean };
+    if (host.__mdMini) return;
+    host.__mdMini = true;
+    pre.addEventListener("scroll", repaint, { passive: true });
+    const jump = (clientY: number) => {
+      const r = cv.getBoundingClientRect();
+      pre.scrollTop = ((clientY - r.top - pre.clientHeight / 2) / Math.max(1, cv.clientHeight)) * pre.scrollHeight;
+    };
+    cv.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      cv.setPointerCapture(e.pointerId);
+      jump(e.clientY);
+      const move = (ev: PointerEvent) => jump(ev.clientY);
+      const up = () => {
+        cv.removeEventListener("pointermove", move);
+        cv.removeEventListener("pointerup", up);
+      };
+      cv.addEventListener("pointermove", move);
+      cv.addEventListener("pointerup", up);
+    });
+    new ResizeObserver(repaint).observe(pre);
+  });
+}
+
+// wrap toggle changes the pre height — refresh the band of that card's minimap
+function repaintMinimap(card: Element | null | undefined) {
+  const cv = card?.querySelector(".md-minimap");
+  const pre = card?.querySelector("pre");
+  if (cv && pre) paintMinimap(cv as HTMLCanvasElement, pre as HTMLElement);
 }
 
 // one pipe row → trimmed cells (GFM tables; escaped pipes are not supported)
@@ -393,11 +480,13 @@ export function mdClickHandler(e: React.MouseEvent<HTMLElement>) {
   }
   const wrapBtn = target.closest("button.md-wrap");
   if (wrapBtn) {
-    const pre = wrapBtn.closest(".md-code-card")?.querySelector("pre");
+    const card = wrapBtn.closest(".md-code-card");
+    const pre = card?.querySelector("pre");
     if (pre) {
       const wrapped = pre.getAttribute("data-wrap") !== "false";
       pre.setAttribute("data-wrap", wrapped ? "false" : "true");
       wrapBtn.setAttribute("aria-pressed", wrapped ? "false" : "true");
+      repaintMinimap(card);
     }
     return;
   }
@@ -449,7 +538,12 @@ export function mdContextMenu(e: React.MouseEvent<HTMLElement>) {
 }
 
 export function Md({ text, className }: { text: string; className?: string }) {
-  return <div className={"md " + (className || "")} onClick={mdClickHandler} onContextMenu={mdContextMenu} dangerouslySetInnerHTML={{ __html: md(text) }} />;
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    // fresh innerHTML — repaint overview strips and bind their scroll helpers
+    paintMinimaps(ref.current);
+  }, [text]);
+  return <div ref={ref} className={"md " + (className || "")} onClick={mdClickHandler} onContextMenu={mdContextMenu} dangerouslySetInnerHTML={{ __html: md(text) }} />;
 }
 
 export function DiffLines({ rows }: { rows: { tag: 0 | 1 | 2; text: string }[] }) {
