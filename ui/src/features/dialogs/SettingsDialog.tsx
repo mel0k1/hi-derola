@@ -993,7 +993,6 @@ export function SettingsDialog() {
               <Button variant="ghost" size="sm" className="w-fit" onClick={() => window.open("https://github.com/mel0k1/hi-derola", "_blank")}>
                 <Icon name="crew" className="[&>svg]:size-3.5" /> {t("st.github")}
               </Button>
-              <div className="text-[11.5px] text-muted-foreground">{t("st.about_hint")}</div>
             </div>
           )}
         </div>

@@ -10,13 +10,6 @@ import { cn, copyText } from "@/lib/utils";
 import { useT } from "@/lib/i18n";
 import { InputBar } from "@/features/chat/InputBar";
 
-const SUGGESTIONS = [
-  { label: "ch.explain", prompt: "ch.explain_p" },
-  { label: "ch.fix_bug", prompt: "ch.fix_bug_p" },
-  { label: "ch.write_tests", prompt: "ch.write_tests_p" },
-  { label: "ch.show_cmds", prompt: "/help" },
-];
-
 // dsh tool row: per-family glyph, tool name as the title
 const TOOL_ICONS: Record<string, string> = {
   bash: "terminal",
@@ -116,9 +109,8 @@ function ToolRow({ item }: { item: Extract<ChatItem, { kind: "tool" }> }) {
   );
 }
 
+// dsh quiet welcome: just the mark and the name — no tagline, no filler
 function Welcome() {
-  const doSend = useStore((s) => s.doSend);
-  const t = useT();
   return (
     <div className="flex flex-1 flex-col items-center justify-center px-5 pb-10 text-center">
       <div className="msg-in" style={{ animationDelay: "0s" }}>
@@ -128,24 +120,6 @@ function Welcome() {
       </div>
       <div className="msg-in mt-4 text-[26px] leading-8 font-semibold tracking-tight" style={{ animationDelay: "0.06s" }}>
         Hi!Derola
-      </div>
-      <div className="msg-in mt-1 text-[13.5px] text-tertiary" style={{ animationDelay: "0.12s" }}>
-        {t("ch.tagline")}
-      </div>
-      <div className="mt-7 flex flex-wrap items-center justify-center gap-2">
-        {SUGGESTIONS.map((s, i) => (
-          <button
-            key={s.label}
-            className="msg-in h-8 rounded-full border-[0.5px] border-border px-3.5 text-[13px] text-muted-foreground transition-colors duration-100 hover:bg-accent hover:text-foreground active:scale-[0.97]"
-            style={{ animationDelay: `${0.18 + i * 0.05}s` }}
-            onClick={() => doSend(t(s.prompt))}
-          >
-            {t(s.label)}
-          </button>
-        ))}
-      </div>
-      <div className="msg-in mt-8 flex flex-wrap items-center justify-center gap-1.5 text-[12px] text-caption" style={{ animationDelay: "0.42s" }}>
-        {t("ch.hint_line")} <Icon name="paperclip" className="text-tertiary" /> {t("ch.hint_line2")}
       </div>
     </div>
   );
